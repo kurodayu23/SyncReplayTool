@@ -176,6 +176,9 @@ signals:
     // 用户才分得清"正在传"和"卡住不动"（只有百分比时压缩阶段可以长时间不跳）。
     void byteStats(qint64 bytes, double bytesPerSec);
     void logText(const QString &text);
+    // 本组里被 rsync 明确报失败的文件（相对路径）。
+    // 界面用它把那些已经被 --out-format=%n 标成「已完成」的行改回「失败」。
+    void fileFailedInGroup(const QString &relativePath);
     void allFinished(bool ok);
 
 private slots:
@@ -199,6 +202,10 @@ private:
     // 进程刚退出时 readyReadStandardError 不一定已经投递过，
     // 这时 readAllStandardError() 里还留着最后一段，直接丢掉就查不到失败原因。
     void takeStderrTail();
+    // 从 stderr 里把 rsync 明确报失败的文件挑出来，逐个发 fileFailedInGroup。
+    // 只在本组 rsync 退出码非 0 时调 —— 退出码 0 时 stderr 里出现的路径是
+    // 别的来源的（远端 shell 告警等），拿它当失败会把好文件标成坏的。
+    void reportFailedNames();
     struct Group
     {
         QString     remoteBase;
@@ -261,6 +268,21 @@ private:
     // 也不会再被标成已完成（实测曾报 finalStateOk=1 / finalCountText="1 / 1"）。
     // 空串 = 当前没有在传的文件。
     QString        m_startedName;
+
+    // 本组里被 rsync 明确报为失败的文件的**文件名**（不含目录）。
+    //
+    // 为什么需要它：--out-format=%n 是「开始传输」时打印的，实测（3.2.7 客户端，
+    // 2026-10-19）在文件只传了一半就失败时**照样打印**它的名字 ——
+    // 所以 onStdout 那一套「下一个开始 == 上一个结束」的推断，会把一个
+    // 只传了 63% 就失败的文件标成「已完成」。
+    // 以前靠退出码兜底只能救**最后一个**文件，中间那些失败的一律误标。
+    //
+    // 判据是 rsync 自己 stderr 里的报错行，实测三种形态都带**带引号的完整路径**：
+    //   rsync: [generator] opendir "/remote/sub/f.spe" failed: Permission denied (13)
+    //   rsync: [receiver] open "/remote/f.spe" failed: Permission denied (13)
+    //   rsync: [receiver] write failed on "/remote/f.spe": File too large (27)
+    // 取 basename 后与本组清单核对，对得上的才算失败。
+    QSet<QString>   m_failedNames;
 
     // 当前这一组要传的文件清单（相对路径）。
     // rsync 的 --out-format=%n 输出里，统计行和真实文件名长得几乎一样：

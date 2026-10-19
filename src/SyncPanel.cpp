@@ -198,6 +198,8 @@ SyncPanel::SyncPanel(QWidget *parent)
             this, SLOT(onFileStarted(QString)));
     connect(m_runner, SIGNAL(fileTransferred(QString,int,int)),
             this, SLOT(onFileTransferred(QString,int,int)));
+    connect(m_runner, SIGNAL(fileFailedInGroup(QString)),
+            this, SLOT(onFileFailedInGroup(QString)));
     connect(m_runner, SIGNAL(byteProgress(int)),
             this, SLOT(onByteProgress(int)));
     connect(m_runner, SIGNAL(byteStats(qint64,double)),
@@ -1651,6 +1653,32 @@ void SyncPanel::onFileTransferred(const QString &relativePath, int done, int tot
     //
     // 现在进度条只有一个口径：globalProgressPercent()。
     // 文件计数回到计数行报「已处理 / 总数」，不再去动进度条。
+}
+
+// 把一个已经被 onFileTransferred 标成「已完成」的行改回「失败」。
+//
+// 为什么会走到这一步：--out-format=%n 是「开始传输」时打印的，
+// 传了一半就失败的文件**照样会被打印**，于是 onStdout 里
+// 「下一个开始 == 上一个结束」的推断把它标成了「已完成」。
+// 以前只有最后一个文件靠退出码兜住，中间的失败文件一律误标 ——
+// 界面上是绿的，远端是半截文件，下游照单全收就是静默消费损坏数据。
+//
+// 这里只改显示状态，不动计数：m_runDone 是「已处理完」的分子，
+// 一个处理过（哪怕失败）的文件确实已经处理完了，计数没错。
+void SyncPanel::onFileFailedInGroup(const QString &relativePath)
+{
+    const int row = m_model->rowForRelativePath(relativePath);
+    if (row < 0)
+        return;
+    // 只降级「已完成」和「同步中」两种：已经是失败/跳过的行不用再动，
+    // 而「待传输」的行不能动 —— 它还没轮到，rsync 报它失败是因为
+    // 上一组传它时失败过，本组还没开始，不该提前判死。
+    const FileTableModel::FileState st = m_model->fileState(row);
+    if (st != FileTableModel::StateOk && st != FileTableModel::StateSyncing)
+        return;
+    m_model->setFileState(row, FileTableModel::StateFailed);
+    m_pendingRows.removeAll(row);
+    renderCountLabel();
 }
 
 void SyncPanel::onAllFinished(bool ok)

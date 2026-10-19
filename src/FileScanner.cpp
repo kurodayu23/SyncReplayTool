@@ -274,6 +274,20 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
                 continue;
             }
 
+            // 本程序自己的配置文件永远不进同步清单。
+            //
+            // 正常情况下它在 %APPDATA%\AP\ 下，不在用户选的数据目录里，扫不到。
+            // 但「本机文件目录」选得大时（比如选到用户家目录）它就在扫描范围内，
+            // 规则后缀命中 ini 就会把它当普通数据文件传出去 —— 里面是目标 IP、
+            // 登录账号、远端路径、私钥路径、工具路径和加密后的密码密文。
+            // 这里是硬防护：不管目录怎么选、规则怎么配，它都排掉。
+            // 判据用**文件名**而不是绝对路径：SRT_CONFIG_DIR 沙箱、便携模式、
+            // 相对路径启动都会让绝对路径对不上，文件名是唯一稳定的口径。
+            if (fi.fileName().compare(QLatin1String("SyncReplayTool.ini"),
+                                      Qt::CaseInsensitive) == 0) {
+                continue;
+            }
+
             // 文件侧必须和规则侧做完全一样的归一化（第 63 行 toLower().trimmed()）。
             //
             // 之前这里只有 toLower()，两边不对称，实测（本轮规则矩阵）：
@@ -427,6 +441,14 @@ QVector<SuffixStat> FileScanner::detectSuffixes(const QString &root)
             // 会被当成残留永远跳过，界面上零提示。
             if (fi.fileName().startsWith(QLatin1String(".srt-filelist-"))
                 && fi.fileName().endsWith(QLatin1String(".txt"), Qt::CaseInsensitive)) {
+                continue;
+            }
+
+            // 对齐 scan()：本程序自己的配置文件（SyncReplayTool.ini）同样排掉。
+            // 两边口径必须一致，否则 scan() 排掉了、自动识别规则那条路径没排，
+            // 规则里就会凭空多出一个 ini 后缀，用户照着配就去同步配置文件了。
+            if (fi.fileName().compare(QLatin1String("SyncReplayTool.ini"),
+                                      Qt::CaseInsensitive) == 0) {
                 continue;
             }
 
