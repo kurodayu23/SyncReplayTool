@@ -1,0 +1,74 @@
+# ---- Qt / qmake 生成物 ----
+Makefile
+Makefile.*
+.qmake.stash
+moc_*.cpp
+moc_*.h
+ui_*.h
+qrc_*.cpp
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.res
+debug/
+release/
+
+# ---- IDE / 本机配置（含本机绝对路径，不该进仓库）----
+*.pro.user
+*.user
+.vs/
+.vscode/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+
+# ---- 交付产物与打包中间物 ----
+*.tar.gz
+*.zip
+*.iso
+*.app
+*.desktop~
+
+# 例外：deliverables/ 下的是**要交付给客户的成品**，必须进仓库。
+# 上面的 *.zip / *.tar.gz 是为了挡住随手打进源码树的打包中间物，
+# 但成品包是唯一的对外交付物，漏了就等于仓库里没有可交付的东西。
+!deliverables/*.zip
+!deliverables/*.tar.gz
+
+# ---- 密钥、口令、私钥：绝不进仓库 ----
+*.pem
+*.key
+*.p12
+*.pfx
+*.ppk
+*.asc
+id_rsa*
+id_ed25519*
+authorized_keys
+ssh_host_*
+
+# ---- 历史事故残留：曾经被写进源码树的本机垃圾 ----
+# 起因是把 /usr/bin/... 之类的绝对路径当相对路径执行，于是
+# usr\ etc\ home\ tmp\ 整棵目录树长在了源码树里（etc\ssh 里还有主机私钥）。
+NUL
+usr/
+etc/
+home/
+tmp/
+60000/
+zz_probe.txt
+
+# ---- 编辑器临时文件 ----
+*~
+*.orig
+*.rej
+*.bak
