@@ -2231,6 +2231,9 @@ void RsyncRunner::launchNext()
     // 新的一组开始：上一组没收尾的那个"在传文件名"必须清掉，
     // 否则它会被算进这一组的成果里（onProcFinished 里的结账会重复计一次）。
     m_startedName.clear();
+    // 上一组报失败的文件不能带进这一组：同一批文件名可能跨组出现，
+    // 带过来的话这一组里同名的好文件会被误标成失败。
+    m_failedNames.clear();
     // 本组总字节：看门狗的校验阶段预算要按它放大（见 watchdogMs 注释）。
     // 只在这里算一次，每一行 stdout/stderr 都会重置看门狗，不能每次重算。
     m_currentGroupBytes = 0;
@@ -2631,6 +2634,7 @@ void RsyncRunner::onFinished(int exitCode, QProcess::ExitStatus status)
         // 并给这一层该做的事。放在既有日志之后，是为了让"发生了什么 → 原文是什么
         // → 该找谁"按顺序读下来，而不是先丢一句结论让人猜。
         reportAttribution(m_stderrTail);
+        reportFailedNames();
         reportIncompleteRemoteFiles();
     } else {
         // 传输过程中源文件被改过：rsync 传的是它**打开那一刻**的快照，
@@ -2660,7 +2664,7 @@ void RsyncRunner::onFinished(int exitCode, QProcess::ExitStatus status)
         // 打过（确实开传了），把这个即将结账的文件算进去。
         const bool lastFilePending = (m_total == 1) && !m_startedName.isEmpty();
         if (m_done == 0 && !lastFilePending)
-            emit logText(QString::fromUtf8(u8"\u672C\u7EC4\u65E0\u53D8\u5316\uFF0C\u5168\u90E8\u5DF2\u662F\u6700\u65B0\u3002"));
+            emit logText(QString::fromUtf8(u8"\u672C\u7EC4\u65E0\u53D8\u5316\uFF0C\u8FDC\u7AEF\u5DF2\u6709\u3002"));
         else
             emit logText(QString::fromUtf8(u8"\u672C\u7EC4\u5B8C\u6210\u3002"));
         // rsync 退出码 0 但 stderr 有内容的情况是存在的（接收端报了可恢复的错误、
@@ -2971,6 +2975,52 @@ static const QRegularExpression re(QStringLiteral("\"(/[^\"]+)\""));
     emit logText(QString::fromUtf8(u8"\u672C\u6B21\u4F20\u8F93\u672A\u5B8C\u6210\u7684\u6587\u4EF6\uFF0C\u5176\u5DF2\u4F20\u8F93\u90E8\u5206\u7559\u5728\u8FDC\u7AEF\u7684 .srt-partial/ \u76EE\u5F55\u4E0B\uFF0C\u6CA1\u6709\u4EE5\u539F\u6587\u4EF6\u540D\u843D\u76D8\u3002"));
     emit logText(QString::fromUtf8(u8"\u4E0B\u6B21\u540C\u6B65\u4F1A\u56E0\u5927\u5C0F\u4E0D\u4E00\u81F4\u81EA\u52A8\u91CD\u4F20\uFF0C"
                                  u8"\u4E0D\u9700\u8981\u624B\u52A8\u5220\u9664\u3002"));
+}
+
+void RsyncRunner::reportFailedNames()
+{
+    if (m_stderrTail.trimmed().isEmpty())
+        return;
+
+    // 只认**确实报了 errno 的那种行**。rsync 的 stderr 里还有大量不带文件名的
+    // 行（"some files/attrs were not transferred"、连接告警、ssh_config 提示），
+    // 也有报目录的（mkdir failed on "/remote/sub"）。前者抓不出文件名，
+    // 后者会把目录名当文件名 —— 只认带 errno 括号的那种，两类都排掉了。
+    //
+    // 实测（rsync 3.2.7，2026-10-19）三种会命中的形态：
+    //   rsync: [generator] opendir "/dst/sub/f2.spe" failed: Permission denied (13)
+    //   rsync: [receiver] open "/dst/f3.spe" failed: Permission denied (13)
+    //   rsync: [receiver] write failed on "/dst/f1.spe": File too large (27)
+    static const QRegularExpression re(QStringLiteral("\"(/[^\"]+)\"[^\\n]*\\(\\d+\\)"));
+    QSet<QString> bases;
+    const QStringList lines = m_stderrTail.split(QLatin1Char('\n'));
+    for (const QString &line : lines) {
+        QRegularExpressionMatchIterator it = re.globalMatch(line);
+        while (it.hasNext()) {
+            const QString n = it.next().captured(1);
+            const int slash = n.lastIndexOf(QLatin1Char('/'));
+            if (slash < 0)
+                continue;
+            const QString base = n.mid(slash + 1);
+            if (!base.isEmpty())
+                bases.insert(base);
+        }
+    }
+    if (bases.isEmpty())
+        return;
+
+    // 和本组清单核对：报出来的必须确实是这次要传的数据文件。
+    // 同名文件可能分布在不同目录，全部标失败比漏标安全 ——
+    // 少标一个，用户看到的是「已完成」而远端是半截文件（静默消费损坏数据）；
+    // 多标一个，用户会发现重传一次就对了。
+    for (const QString &f : m_currentGroupFiles) {
+        const int slash = f.lastIndexOf(QLatin1Char('/'));
+        const QString base = slash >= 0 ? f.mid(slash + 1) : f;
+        if (!bases.contains(base) || m_failedNames.contains(f))
+            continue;
+        m_failedNames.insert(f);
+        emit fileFailedInGroup(f);
+    }
 }
 
 void RsyncRunner::cleanupListFiles()

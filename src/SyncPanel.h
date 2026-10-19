@@ -255,6 +255,8 @@ private slots:
     // RsyncRunner 回调
     void onFileStarted(const QString &relativePath);
     void onFileTransferred(const QString &relativePath, int done, int total);
+    // 本组里被 rsync 报失败的文件：把已经被标成「已完成」的行改回「失败」。
+    void onFileFailedInGroup(const QString &relativePath);
     void onByteProgress(int percent);
     void onByteStats(qint64 bytes, double bytesPerSec);
     void onAllFinished(bool ok);
