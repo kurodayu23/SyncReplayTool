@@ -2987,11 +2987,30 @@ void RsyncRunner::reportFailedNames()
     // 也有报目录的（mkdir failed on "/remote/sub"）。前者抓不出文件名，
     // 后者会把目录名当文件名 —— 只认带 errno 括号的那种，两类都排掉了。
     //
-    // 实测（rsync 3.2.7，2026-10-19）三种会命中的形态：
+    // 实测（rsync 3.2.7，2026-10-19）四种会命中的形态：
     //   rsync: [generator] opendir "/dst/sub/f2.spe" failed: Permission denied (13)
     //   rsync: [receiver] open "/dst/f3.spe" failed: Permission denied (13)
     //   rsync: [receiver] write failed on "/dst/f1.spe": File too large (27)
+    //   rsync: [receiver] mkstemp "/dst/.f4.spe.eYGjDO" failed: Permission denied (13)
     static const QRegularExpression re(QStringLiteral("\"(/[^\"]+)\"[^\\n]*\\(\\d+\\)"));
+    // 上面第四种是 **mkstemp 临时名**：接收端建不出临时文件时 rsync 报的是
+    // "点 + 真实文件名 + 点 + 6 位随机"（实测 f4.spe -> .f4.spe.eYGjDO，
+    // 含空格的 a b.spe -> .a b.spe.DaS0si）。
+    //
+    // 这不是可选的边角：接收端磁盘满、配额超限、目录不可写三种最常见的
+    // 失败全都走 mkstemp，而它的 basename 与清单里的文件名对不上。
+    // 还原不出来就等于不报 —— 界面把整组标成「已完成」，而远端一个字节都没有。
+    // 实测复现（接收端目录 chmod 555）：远端 ls -A = 0 个条目，界面 3 个「✓ 已完成」。
+    //
+    // 只剥「点 + 6 位字母数字」这一段，真实文件名里的点原样保留。
+    // 这里用贪婪的 .* 而不是分段写法：分段版（[^.]*(?:\.[^.]*)*）对
+    // ".f1.spe.3aLM1K" 同样能还原，但实测两版对所有用例结果一致，
+    // 贪婪版少一层嵌套、少一个转义，日后好读。
+    //
+    // 3 位或 5 位后缀、以及 ".hidden" 这类本来就没有随机段的，都不匹配 ——
+    // 实测过，避免把正常的点开头文件误剥。
+    static const QRegularExpression tempRe(
+        QStringLiteral("^\\.(.*)\\.[A-Za-z0-9]{6}$"));
     QSet<QString> bases;
     const QStringList lines = m_stderrTail.split(QLatin1Char('\n'));
     for (const QString &line : lines) {
@@ -3001,7 +3020,11 @@ void RsyncRunner::reportFailedNames()
             const int slash = n.lastIndexOf(QLatin1Char('/'));
             if (slash < 0)
                 continue;
-            const QString base = n.mid(slash + 1);
+            QString base = n.mid(slash + 1);
+            // 临时名还原成真实文件名
+            const QRegularExpressionMatch tm = tempRe.match(base);
+            if (tm.hasMatch())
+                base = tm.captured(1);
             if (!base.isEmpty())
                 bases.insert(base);
         }
