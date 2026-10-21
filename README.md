@@ -92,4 +92,4 @@ jom
 
 Linux 同理（`qmake && make`）。
 
-Windows 下 `scripts/build-win.ps1` 打包发布版：脚本里的本机路径（Qt 安装位置、MSVC、SDK）需要按自己的环境调整。
+Windows 下 `scripts/build-win.ps1` 编译发布版。Qt 安装位置、MSVC、SDK、构建目录都是**参数**，默认值是本机路径，按自己的环境改参数即可（例如 `-BuildRoot D:\somewhere\build`）。工程根目录默认取脚本所在仓库，不需要填。
