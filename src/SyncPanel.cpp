@@ -29,6 +29,7 @@
 #include <QStyle>
 #include <QRunnable>
 #include <QThreadPool>
+#include <QPointer>
 #include <cstdio>
 
 #include "Theme.h"
@@ -55,6 +56,19 @@ public:
     {
         const QVector<FileItem> files = FileScanner::scan(m_root, m_suffixes);
         const bool truncated = FileScanner::wasTruncated();
+        // 投递之前必须确认接收者还活着。
+        //
+        // 原来这里无条件 invokeMethod(m_sink, ...)：目录很大时扫描要几十秒，
+        // 用户在这个窗口里点关闭，SyncPanel 析构、m_sink 变成野指针，
+        // 后台线程再调一次 invokeMethod 就是 use-after-free ——
+        // 表现是关闭时崩溃、退出码异常，麒麟上还可能给客户的运维留 core dump。
+        //
+        // 用 QPointer 而不是裸指针：对象析构时它自动置空，不用改任何生命周期代码。
+        // 这里**不能**改成"析构里 waitForDone()" —— 那会把"关窗卡住"
+        // 这个已经修过的问题带回来（FileScanner.cpp 里记着那个坑：
+        // 扫描遇到目录环会一直不返回）。
+        if (m_sink.isNull())
+            return;
         QMetaObject::invokeMethod(m_sink, "deliverScanResult",
                                   Qt::QueuedConnection,
                                   Q_ARG(QVector<FileItem>, files),
@@ -64,7 +78,7 @@ public:
 private:
     QString m_root;
     QStringList m_suffixes;
-    QObject *m_sink;
+    QPointer<QObject> m_sink;
 };
 
 // 连接探测跑在后台线程：RsyncRunner::probeConnection 是**阻塞**的
@@ -73,13 +87,19 @@ private:
 class ConnTestWorker : public QRunnable
 {
 public:
-    ConnTestWorker(const TargetConfig &t, const RsyncRunner *runner, QObject *sink)
+    ConnTestWorker(const TargetConfig &t, RsyncRunner *runner, QObject *sink)
         : m_target(t), m_runner(runner), m_sink(sink) {}
 
     void run() override
     {
+        // 同 ScannerWorker：探测最长要等 15 秒，这期间用户很可能已经关窗。
+        // m_runner 指向的 RsyncRunner 也可能已经被析构，所以两处都要判空。
+        if (m_sink.isNull() || m_runner.isNull())
+            return;
         QString detail;
-        const bool ok = m_runner ? m_runner->probeConnection(m_target, &detail) : false;
+        const bool ok = m_runner->probeConnection(m_target, &detail);
+        if (m_sink.isNull())
+            return;
         QMetaObject::invokeMethod(m_sink, "deliverConnResult",
                                   Qt::QueuedConnection,
                                   Q_ARG(QString, detail),
@@ -88,8 +108,8 @@ public:
 
 private:
     TargetConfig m_target;
-    const RsyncRunner *m_runner;
-    QObject *m_sink;
+    QPointer<RsyncRunner> m_runner;
+    QPointer<QObject> m_sink;
 };
 
 QString T(const char *s) { return QString::fromUtf8(s); }
@@ -1439,6 +1459,36 @@ void SyncPanel::onScanFinished(const QVector<FileItem> &files)
                       QObject::tr(u8"\u6709 %1 \u6761\u5DE5\u5177\u89C4\u5219\u7684\u7A0B\u5E8F\u5728\u672C\u673A\u4E0D\u5B58\u5728\uFF0C\u5DF2\u6682\u4E0D\u663E\u793A\u5DE5\u5177\u6309\u94AE\u3002")
                           .arg(missingExe), 3);
     }
+
+    // 大小写只差的重名文件：必须报出来。
+    //
+    // 发送端在 Windows 上时，A.spe 和 a.spe 在磁盘上本来就是同一个文件 ——
+    // 后写的把先写的覆盖了，Windows 不会提示任何东西。接收端是 Linux
+    // （大小写敏感），用户以为传过去的是两个文件，实际远端可能只有一份内容，
+    // 或者两份内容不同却与他在 Windows 上看到的对不上。
+    //
+    // 程序替用户决定传哪一个都有风险，所以只报事实。
+    //
+    // 事实必须**按平台说得准**。原来第二句写的是「在 Windows 上这些是同一个
+    // 文件，后写的会覆盖先写的。」—— 发送端是麒麟时这一句就成了噪音：
+    // 麒麟上 A.spe 和 a.spe 就是两个不同的文件，两个都会正常传过去，
+    // 谁也覆盖不了谁。用户看到"后写的会覆盖先写的"，会去排查一个
+    // 根本不存在的问题。
+    //
+    // 所以改成条件句：把"会不会覆盖"交给磁盘的实际特性去决定，
+    // 两边都不说死。
+    const QStringList collisions = FileScanner::caseCollisionPaths(displayFiles);
+    if (!collisions.isEmpty()) {
+        appendLogLine(QStringLiteral("WARN"),
+                      QObject::tr(u8"有 %1 个目录里存在只差大小写的重名文件。")
+                          .arg(collisions.size()), 3);
+        appendLogLine(QStringLiteral("WARN"),
+                      QObject::tr(u8"如果本机磁盘不区分大小写（例如 Windows），这些名字指向同一个文件，后写的会覆盖先写的。"), 3);
+        appendLogLine(QStringLiteral("WARN"),
+                      QObject::tr(u8"接收端如果也用不区分大小写的磁盘，同样只会保留其中一个。"), 3);
+        appendLogLine(QStringLiteral("WARN"),
+                      QObject::tr(u8"涉及的文件：%1").arg(collisions.join(QStringLiteral(" / "))), 3);
+    }
     m_model->setFiles(displayFiles, ruleHash, m_localRoot);
 
     rebuildTabs();
@@ -1879,34 +1929,60 @@ void SyncPanel::applyFromSettings(const TargetConfig &t, const QString &localRoo
     // 后果不是"少个配置项"：RsyncRunner 按 remoteSubDir 决定远端落地目录，
     // vendor/spe 变成空之后，文件从 <远端根>/vendor/spe/ 改落到 <远端根>/，
     // 客户的远端目录结构被改掉，全程零提示。
-    QHash<QString, QString> oldSubDir;   // 后缀(小写) -> 旧 remoteSubDir
+    //
+    // 存整条旧规则（不只是 remoteSubDir），因为下面还要拿它**保命**：
+    // 定稿 UI 里能配的只有工具规则，用户可能只配了"按后缀分目录"而没配工具，
+    // 这时旧规则里的那个后缀是唯一的信息来源，丢掉就等于丢掉用户的配置。
+    QHash<QString, SyncRule> oldRules;   // 后缀(小写) -> 旧规则
     for (int i = 0; i < m_syncRules.size(); ++i) {
         const SyncRule &old = m_syncRules.at(i);
         const QString key = ToolRunner::normSuffix(old.suffix);
         if (key.isEmpty())
             continue;
-        // 只记住非空的：空值不进来，newRule 里取不到就是空串，语义一致。
-        if (!old.remoteSubDir.isEmpty() && !oldSubDir.contains(key))
-            oldSubDir.insert(key, old.remoteSubDir);
+        if (!oldRules.contains(key))
+            oldRules.insert(key, old);
     }
 
     QVector<SyncRule> nr;
     QSet<QString> seen;
     for (int i = 0; i < tools.size(); ++i) {
         const QString suf = tools.at(i).suffix;
-        if (suf.isEmpty() || seen.contains(suf))
+        const QString key = ToolRunner::normSuffix(suf);
+        if (key.isEmpty() || seen.contains(key))
             continue;
-        seen.insert(suf);
+        seen.insert(key);
         SyncRule r;
-        r.suffix = suf;
-        r.remoteSubDir = oldSubDir.value(ToolRunner::normSuffix(suf));
+        r.suffix = key;
+        r.remoteSubDir = oldRules.value(key).remoteSubDir;
         nr.append(r);
     }
+    // 旧规则里**没有对应工具**的那些后缀，必须原样保留。
+    //
+    // 以前这段循环依赖调用方把旧规则传进来，而 MainWindow 传的是空的
+    // QVector<SyncRule>() —— 于是这个循环一次都不执行，用户配的
+    // "按后缀分目录"规则点一次「保存设置」就没了。
+    //
+    // 后果比"少个配置项"严重得多：m_syncRules 变空之后，
+    // FileScanner 的 wanted 列表也变空，而空列表意味着**不过滤** ——
+    // 目录下 .txt / .exe / .dll 全部进入同步范围。
+    // 用户只想传 .spe，结果整个目录都被推到了接收端，全程零提示。
+    for (int i = 0; i < m_syncRules.size(); ++i) {
+        const SyncRule &old = m_syncRules.at(i);
+        const QString key = ToolRunner::normSuffix(old.suffix);
+        if (key.isEmpty() || seen.contains(key))
+            continue;
+        seen.insert(key);
+        nr.append(old);
+    }
+    // 调用方明确传进来的规则优先（将来有 UI 能直接编辑同步规则时用得上）。
     for (int i = 0; i < rules.size(); ++i) {
-        if (!seen.contains(rules.at(i).suffix)) {
-            seen.insert(rules.at(i).suffix);
-            nr.append(rules.at(i));
-        }
+        const QString key = ToolRunner::normSuffix(rules.at(i).suffix);
+        if (key.isEmpty() || seen.contains(key))
+            continue;
+        seen.insert(key);
+        SyncRule r = rules.at(i);
+        r.suffix = key;
+        nr.append(r);
     }
     m_syncRules = nr;
     // 设置里的「保存设置」是**用户明确的动作**：从这一刻起这批规则是用户选的，

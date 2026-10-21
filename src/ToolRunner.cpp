@@ -333,6 +333,19 @@ QString ToolRunner::normSuffix(const QString &s)
     QString v = s.trimmed().toLower();
     while (v.startsWith(QLatin1Char('.')))
         v.remove(0, 1);
+    // **尾点也必须去**，而且必须两侧同时去。
+    //
+    // 扫描侧（FileScanner）早就去了尾点，传输侧没去，于是规则写成 "spe." 时：
+    //   扫描侧：规则 "spe." -> "spe"，文件 "a.spe" 的后缀也是 "spe" -> 匹配上，列表里有它
+    //   传输侧：规则 "spe." -> "spe."，文件 "a.spe" -> "spe" -> 对不上 -> **这一组是空的**
+    // 空的组会走「没有匹配到要同步的文件。」+ allFinished(true)，
+    // 界面上是「同步完成」、进度 100%、远端一个文件都没有 ——
+    // 用户据此认为数据已经上机。
+    //
+    // 归一化只有一处实现，正是为了防这种"两侧不对称"。
+    // FileScanner 的规则侧也改成调这个函数（见 FileScanner.cpp）。
+    while (v.endsWith(QLatin1Char('.')) && v.length() > 1)
+        v.chop(1);
     return v;
 }
 

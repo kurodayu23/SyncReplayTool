@@ -8,6 +8,9 @@
 
 bool SecretStore::isEncrypted() { return true; }
 
+// Windows 用 DPAPI，系统自带，没有"找不到后端"这回事。
+bool SecretStore::cryptoBackendAvailable() { return true; }
+
 QString SecretStore::backendName()
 {
     return QString::fromUtf8(u8"DPAPI");
@@ -62,8 +65,11 @@ QString SecretStore::unprotect(const QString &stored)
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QSysInfo>
 #include <QUuid>
+
+#include "ConfigStore.h"
 
 #include <pwd.h>
 #include <unistd.h>
@@ -108,8 +114,11 @@ QString SecretStore::unprotect(const QString &stored)
 
 namespace {
 
-// 密文格式前缀。裸 base64（旧版本）没有前缀，据此区分两代格式。
-const char *kPrefix = "SRT2:";
+// 密文格式前缀。裸 base64（旧版本）没有前缀，据此区分几代格式。
+//   SRT2: —— 密钥只由**公开材料**派生（machine-id + 用户名 + 常量盐）
+//   SRT3: —— 密钥里掺入了本机私有密钥文件（只有本人可读）
+const char *kPrefix   = "SRT2:";
+const char *kPrefixV3 = "SRT3:";
 const int   kIvLen  = 16;
 
 // AES 的块大小，三个主版本都一样。常量，不参与 dlopen。
@@ -298,6 +307,101 @@ QByteArray machineSecret()
     return cached;
 }
 
+// 本机私有密钥：一份随机字节，存成一个**只有本人可读**的文件。
+//
+// 为什么必须有它（2026-10-21 复核）：
+// machineSecret() 的材料是 /etc/machine-id（0444，全机可读）+ 登录用户名
+// （任何进程都查得到）+ 一个写死在源码里的常量盐。
+// 这三样**全都是公开信息**，所以任何拿到 ini 的人都能离线复算出同一把
+// AES 密钥，把 target/password 里的密文还原成目标机的 **SSH 明文口令**。
+// "换机器解不开"这个保证只对"没拿到 ini"的人成立，对"拿到 ini"的人不成立。
+//
+// 加一份只有本人可读的随机材料之后，拿到 ini 但拿不到密钥文件的人
+// （同机别的用户）就还原不出口令了 —— 这正是 Windows 上 DPAPI 提供的
+// 那一级保证。
+//
+// 放在 ini 旁边：ini 所在目录本来就是当前用户自己的；
+// SRT_CONFIG_DIR 沙箱把两者一起搬走，沙箱内外不会串。
+//
+// 读不出来 / 建不了文件时返回空串 —— 上层会退回只用公开材料的那套密钥，
+// 也就是"保护弱一点但功能正常"，而不是"密码存不进去"。
+QByteArray privateKeyMaterial()
+{
+    static QByteArray cached;
+    static bool        inited = false;
+    if (inited) {
+        return cached;
+    }
+    inited = true;
+
+    const QString iniPath = ConfigStore::iniPath();
+    if (iniPath.isEmpty()) {
+        return cached;
+    }
+    const QString keyPath =
+        QFileInfo(iniPath).absolutePath() + QStringLiteral("/SyncReplayTool.key");
+    // 目录可能还没建（第一次运行时 ini 还没写过）。建不出来就当没有这一层保护。
+    if (!QDir().mkpath(QFileInfo(iniPath).absolutePath())) {
+        return cached;
+    }
+
+    QFile in(keyPath);
+    if (in.open(QIODevice::ReadOnly)) {
+        cached = in.readAll().trimmed();
+        in.close();
+    }
+    if (cached.size() == 32) {
+        return cached;
+    }
+
+    // 没有 / 长度不对：生成一份新的。
+    QByteArray key(32, '\0');
+    QFile rnd(QStringLiteral("/dev/urandom"));
+    bool got = false;
+    if (rnd.open(QIODevice::ReadOnly)) {
+        got = (rnd.read(key.data(), 32) == 32);
+        rnd.close();
+    }
+    if (!got) {
+        const QByteArray u = QUuid::createUuid().toByteArray();
+        for (int i = 0; i < 32; ++i)
+            key[i] = (i < u.size()) ? u.at(i) : '\0';
+    }
+
+    QFile out(keyPath);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return cached;                 // 建不了就当没有这一层保护
+    }
+    out.write(key);
+    out.close();
+    // 权限收紧到只有本人可读写。Windows 上 setPermissions 只映射到只读属性、
+    // 改不了 ACL（那边靠 DPAPI，不靠这个文件），Linux 上是真的生效。
+    out.setPermissions(QFile::ReadOwner | QFile::WriteOwner);
+    cached = key;
+    return cached;
+}
+
+// 掺入私有材料之后的密钥。
+QByteArray machineSecretV3()
+{
+    static QByteArray cached;
+    static bool        inited = false;
+    if (inited) {
+        return cached;
+    }
+    inited = true;
+
+    const QByteArray priv = privateKeyMaterial();
+    if (priv.isEmpty()) {
+        return cached;                 // 没有私有材料 -> 调用方退回 v1
+    }
+    QByteArray material = machineSecret();
+    material += '\x1f';
+    material += priv;
+    cached = QCryptographicHash::hash(material, QCryptographicHash::Sha256);
+    return cached;
+}
+
 QByteArray aesApply(bool encrypt, const QByteArray &key, const QByteArray &iv,
                     const QByteArray &in)
 {
@@ -362,6 +466,15 @@ QByteArray aesApply(bool encrypt, const QByteArray &key, const QByteArray &iv,
 
 bool SecretStore::isEncrypted() { return true; }
 
+// 此刻这台机器上到底能不能加密：就是问一次 dlopen 有没有成功。
+//
+// loadEvp 内部会缓存结果，重复问不会重复 dlopen。
+bool SecretStore::cryptoBackendAvailable()
+{
+    Evp evp;
+    return loadEvp(evp);
+}
+
 QString SecretStore::backendName()
 {
     // 界面上不要写死"DPAPI"——Linux 上没有 DPAPI，
@@ -375,11 +488,19 @@ QString SecretStore::protect(const QString &plain)
         return QString();
     }
     const QByteArray iv = randomIv();
-    const QByteArray ct = aesApply(true, machineSecret(), iv, plain.toUtf8());
+    // 优先用掺了私有材料的密钥（v3）。私有材料拿不到时退回 v1 ——
+    // 保护弱一档，但密码照样能存能取，不给用户"存不进去"的dead end。
+    QByteArray key = machineSecretV3();
+    const char *prefix = kPrefixV3;
+    if (key.isEmpty()) {
+        key = machineSecret();
+        prefix = kPrefix;
+    }
+    const QByteArray ct = aesApply(true, key, iv, plain.toUtf8());
     if (ct.isEmpty()) {
         return QString();
     }
-    return QString::fromLatin1(QByteArray(kPrefix) + (iv + ct).toBase64());
+    return QString::fromLatin1(QByteArray(prefix) + (iv + ct).toBase64());
 }
 
 QString SecretStore::unprotect(const QString &stored)
@@ -388,6 +509,29 @@ QString SecretStore::unprotect(const QString &stored)
         return QString();
     }
 
+    // 新格式：密钥里掺了本机私有材料。
+    if (stored.startsWith(QString::fromLatin1(kPrefixV3))) {
+        const QByteArray key = machineSecretV3();
+        if (key.isEmpty()) {
+            return QString();
+        }
+        const QByteArray raw = QByteArray::fromBase64(stored.mid(5).toLatin1());
+        if (raw.size() <= kIvLen) {
+            return QString();
+        }
+        const QByteArray pt =
+            aesApply(false, key, raw.left(kIvLen), raw.mid(kIvLen));
+        if (pt.isEmpty()) {
+            return QString();
+        }
+        const QString plain = QString::fromUtf8(pt);
+        if (plain.toUtf8() != pt)
+            return QString();
+        return plain;
+    }
+
+    // 上一代格式：密钥只由公开材料派生。仍然要能解开 ——
+    // 老配置里的口令不能因为程序升级就再也读不出来。
     if (stored.startsWith(QString::fromLatin1(kPrefix))) {
         const QByteArray raw = QByteArray::fromBase64(stored.mid(5).toLatin1());
         if (raw.size() <= kIvLen) {
@@ -400,7 +544,19 @@ QString SecretStore::unprotect(const QString &stored)
         if (pt.isEmpty()) {
             return QString();
         }
-        return QString::fromUtf8(pt);
+        // 往返校验：口令一定是文本，解出来的字节必须仍是合法 UTF-8 才认。
+        //
+        // 少了这一条，ini 被拷到另一台机器（密钥不同）时，
+        // AES-CBC 解出来的**垃圾字节**只要 padding 恰好通过（约 1/256）
+        // 就会被当成口令返回 —— 用户看到的是一串乱码，认证失败，
+        // 而"密文本机解不开"这条真正的线索不会出现在界面上，
+        // 反而绕开了 ConfigStore 专门准备的提示。
+        //
+        // 旧 base64 分支一直有这道校验（见下面），两条路径的口径必须一致。
+        const QString plain = QString::fromUtf8(pt);
+        if (plain.toUtf8() != pt)
+            return QString();
+        return plain;
     }
 
     // 旧版本的裸 base64（无前缀）。继续按 base64 解，

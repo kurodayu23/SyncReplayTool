@@ -101,6 +101,37 @@ public:
     };
     static ProgressFrame parseProgressFrame(const QString &line);
 
+    // 把 rsync 输出的**转义名**还原成真实文件名。
+    //
+    // rsync 的 --out-format=%n 不是原样打印文件名的：它会把「不可打印」的字节
+    // 转义成 \#NNN（反斜杠 + # + 3 位八进制）。
+    //
+    // 实测（2026-10-21，rsync 3.2.7 与 3.1.1 各跑一遍全字节扫描 1..255，
+    // locale 取 C / C.utf8 / en_US.UTF-8 三档，规则完全一致）：
+    //   0x01-0x08、0x0A-0x1F、0x80-0xFF  ->  \#NNN
+    //   0x09（制表符）、0x20-0x7F       ->  原样输出
+    // locale 改不改都一样，所以「run.sh 里设 LC_ALL=C.utf8」并不能绕开它。
+    //
+    // 为什么这条必须修：中文文件名在 stdout 上长成
+    //   混\#344\#270\#255文.spe
+    // 而清单里存的是真实名「混中文.spe」，两者**永远对不上**。
+    // 于是这个文件既不计数、也不点亮行，最后靠 leftover 兜底规则
+    // 显示成「✓ 已完成」—— 传是传过去了，但界面全程显示 0 个文件，
+    // 直到结束才被强拉到 100%。客户看到的是「进度条不动、计数是 0」，
+    // 而日志里那句「已传 N 个文件」里的 N 一直是错的。
+    //
+    // 反解义是**有歧义**的：真实文件名里本来就可能带字面量 "\#012"，
+    // 而 rsync 不转义反斜杠（实测 0x5C 原样输出），于是
+    // 名字 "a\#012b" 和 "a<换行>b" 在 stdout 上长得一模一样。
+    // 所以调用点必须**两个都试**：先拿还原结果查清单，没命中再拿原始串查。
+    // 先还原后原样：中文这类绝大多数情况一次就中；
+    // 先原样后还原：字面量 "\#NNN" 的名字也不会被误还原。
+    static QString unescapeRsyncName(const QString &raw);
+
+    // 把 rsync 的一行输出还原成本组清单里的真实文件名；不在清单里就返回空串。
+    // 候选怎么取、还原与原样谁先试，都在这里，--selfcheck 直接拿真机原文来判。
+    static QString resolveRsyncName(const QString &line, const QSet<QString> &groupSet);
+
     // 主机名 / 账号能不能安全地拼进 "user@host:path"。
     // 空格、冒号、引号、分号这些字符会让这一整串被 rsync/ssh 拆开或二次解释，
     // 结果是报错报天书，或者更糟：安静地连到别的地方去。
@@ -253,6 +284,9 @@ private:
     int            m_groupIndex = 0;
     int            m_done  = 0;
     int            m_total = 0;
+    // 本组开始时的 m_done 快照。用来判断"这一组有没有产生传输动作" ——
+    // m_done 是整轮累计的，光看它分不出是上一组传的还是这一组传的。
+    int            m_doneAtGroupStart = 0;
 
     // 本组里"rsync 已经报过名字、但还没被确认传完"的那一个文件。
     //

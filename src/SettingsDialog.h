@@ -64,6 +64,14 @@ private:
     QPushButton *m_btnClose = nullptr;
     QPushButton *m_addRule = nullptr;
     QPushButton *m_btnSave = nullptr;
+    // 「记住设置」复选框。
+    //
+    // 实际语义（2026-10-20 查证 ConfigStore 全文后确认）：
+    // 它的开关状态只被记到 ini 的 app/rememberSettings 键；
+    // 目标连接信息（IP / 端口 / 账号 / 密码 / 私钥 / 本机目录 / 目标落盘路径）
+    // 的落盘与恢复由「保存设置」这一动作决定，路径在 ConfigStore::saveTarget /
+    // ConfigStore::loadTarget。界面上的行为说明放在 SettingsDialog.cpp 的构造里
+    // （tooltip），供用户直接读到。
     QCheckBox   *m_rememberBox = nullptr;
     QLabel      *m_testLabel = nullptr;
     QLabel      *m_saveTip = nullptr;

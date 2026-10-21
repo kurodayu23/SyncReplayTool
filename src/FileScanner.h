@@ -30,6 +30,15 @@ public:
     // 扫描跑在后台线程，标志用 QAtomicInt 而不是裸 bool。
     static QVector<FileItem> scan(const QString &root, const QStringList &suffixes);
 
+    // 找出"只有大小写不同"的重名文件（同一目录内）。
+    //
+    // 发送端在 Windows 上时，A.spe 和 a.spe 在磁盘上本来就是同一个文件 ——
+    // 后写的把先写的覆盖了，全程没有提示。接收端是 Linux（大小写敏感），
+    // 到底该传哪一个、还是两个都传，程序替用户决定不了，只能报出来。
+    //
+    // 返回相对路径列表（每个冲突目录报一次）。跨目录同名不算冲突。
+    static QStringList caseCollisionPaths(const QVector<FileItem> &items);
+
     // 反向能力：先扫一遍，把目录里实际存在的后缀统计出来。
     //
     // 为什么需要它：scan() 必须先拿到 suffixes 才能扫，可 suffixes 来自用户配置。

@@ -18,6 +18,7 @@
 #include "SyncPanel.h"
 #include "RsyncRunner.h"
 #include "ConfigStore.h"
+#include "SecretStore.h"
 #include "Theme.h"
 #include "Model.h"
 #include "FileTableModel.h"
@@ -176,6 +177,15 @@ static int toolCellWidth(const ToolColumnDelegate &d)
 int runSelfCheck()
 {
     QTextStream out(stdout);
+    // 输出编码必须钉死成 UTF-8。
+    //
+    // 不钉的话，stdout 的编码跟着**当前 locale** 走：在 C locale 下
+    // （SSH 登录、cron、容器里都是这个）非 ASCII 字符全变成 "?"，
+    // 于是自检输出里会出现 backend=?????? 这种东西 ——
+    // 客户（和运维）看到的是乱码，还以为程序坏了。
+    //
+    // 这不是显示层的小事：交付包里的 自检.sh 会把这段输出原样转述给人看。
+    out.setCodec("UTF-8");
     int bad = 0;
 
     // 整个自检跑在临时沙箱里。自检里会构造 SyncPanel，而 SyncPanel 的构造
@@ -278,7 +288,103 @@ int runSelfCheck()
             << "\n";
     }
 
-    // 目录型历史残留的清扫。判据要能在**安全的地方**造假输入，
+    // rsync %n 的转义还原与名字解析。
+    //
+    // 测试数据是**真机 rsync 抓下来的原文**（2026-10-21，容器内跑真 rsync 3.2.7，
+    // LC_ALL=C 与 LC_ALL=C.UTF-8 各一遍），不是我照着规则编出来的 ——
+    // 编出来的样例会把"转义规则随 locale 变"这件事整个漏掉，而那恰恰是要防的。
+    //
+    // 实测到的规则：
+    //   0x01-0x08、0x0A-0x1F    -> \#NNN（两种 locale 一致）
+    //   0x80-0xFF                -> C locale 转义；UTF-8 locale 下合法 UTF-8 原样输出
+    //   0x09（制表符）、0x20-0x7F -> 原样
+    //   反斜杠 0x5C              -> 只在后面紧跟 "#" 加 3 位八进制时才转义成 \#134
+    //                              （rsync 靠这条保证转义可逆：真名里带 \#012 的，
+    //                                输出成 \#134#012，两种情况区分得开）
+    //
+    // 修之前的症状：stdout 上的名字和清单里的原始名对不上，文件传过去了却
+    // 既不计数也不点亮行，最后靠 leftover 兜底规则显示成「✓ 已完成」，
+    // 日志里「已传 N 个文件」那个 N 一直是 0。
+    {
+        QSet<QString> group;
+        group.insert(QString::fromUtf8(u8"混中文.spe"));
+        group.insert(QStringLiteral("plain.spe"));
+        group.insert(QString::fromUtf8(u8"data dir/名字 带空格.spe"));
+        group.insert(QStringLiteral("with trailing space "));
+        group.insert(QStringLiteral("a\\#012b.spe"));
+        group.insert(QStringLiteral("x\ny.spe"));
+        group.insert(QStringLiteral("x\x01y.spe"));
+        group.insert(QString::fromUtf8("x\xC3\xA4" "y.spe"));
+        group.insert(QStringLiteral("a#b.spe"));
+        group.insert(QStringLiteral("x\\y.spe"));
+
+        struct Case { const char *raw; const char *want; };
+        const Case cases[] = {
+            // C locale 真机输出：中文名被逐字节转义
+            { "\\#346\\#267\\#267\\#344\\#270\\#255\\#346\\#226\\#207.spe",
+              "\xE6\xB7\xB7\xE4\xB8\xAD\xE6\x96\x87.spe" },
+            // UTF-8 locale 真机输出：合法 UTF-8 原样
+            { "\xE6\xB7\xB7\xE4\xB8\xAD\xE6\x96\x87.spe",
+              "\xE6\xB7\xB7\xE4\xB8\xAD\xE6\x96\x87.spe" },
+            { "plain.spe", "plain.spe" },
+            // 文件名带尾随空格：必须用未 trim 的原始行去匹配
+            { "with trailing space ", "with trailing space " },
+            // 名字里本来就有字面量 \#012：rsync 输出的是 \#134#012
+            { "a\\#134#012b.spe", "a\\#012b.spe" },
+            // 名字里真的有换行
+            { "x\\#012y.spe", "x\ny.spe" },
+            // 控制字符
+            { "x\\#001y.spe", "x\x01y.spe" },
+            // 高位字节：两种 locale 各一份
+            { "x\\#303\\#244y.spe", "x\xC3\xA4" "y.spe" },
+            { "x\xC3\xA4" "y.spe", "x\xC3\xA4" "y.spe" },
+            // # 后面不是 3 位八进制：一律原样，不许乱还原
+            { "a#b.spe", "a#b.spe" },
+            { "x\\y.spe", "x\\y.spe" },
+            // 子目录 + 中文名 + 空格
+            { "data dir/\\#345\\#220\\#215\\#345\\#255\\#227 \\#345\\#270\\#246\\#347\\#251\\#272\\#346\\#240\\#274.spe",
+              "data dir/\xE5\x90\x8D\xE5\xAD\x97 \xE5\xB8\xA6\xE7\xA9\xBA\xE6\xA0\xBC.spe" },
+            { "data dir/\xE5\x90\x8D\xE5\xAD\x97 \xE5\xB8\xA6\xE7\xA9\xBA\xE6\xA0\xBC.spe",
+              "data dir/\xE5\x90\x8D\xE5\xAD\x97 \xE5\xB8\xA6\xE7\xA9\xBA\xE6\xA0\xBC.spe" },
+            // 反向锁：不在清单里的一律还原不出来
+            { "other.spe", "" },
+            { "     1,234 100%   1.00MB/s    0:00:00 (xfr#1, to-chk=0/1)", "" },
+            { "data dir/", "" },
+            // 反向锁：只是前缀像，不许模糊命中
+            { "plain.speX", "" },
+        };
+
+        bool ok = true;
+        QString firstBad;
+        int passed = 0;
+        for (const Case &c : cases) {
+            const QString got = RsyncRunner::resolveRsyncName(QString::fromUtf8(c.raw), group);
+            const QString want = QString::fromUtf8(c.want);
+            if (got != want) {
+                ok = false;
+                if (firstBad.isEmpty()) {
+                    firstBad = QString::fromUtf8("raw=%1 want=%2 got=%3")
+                        .arg(QString::fromUtf8(c.raw), want, got);
+                }
+            } else {
+                ++passed;
+            }
+        }
+        // 反解义本身不许乱动普通名字
+        if (RsyncRunner::unescapeRsyncName(QStringLiteral("plain.spe"))
+            != QStringLiteral("plain.spe")) {
+            ok = false;
+            if (firstBad.isEmpty())
+                firstBad = QStringLiteral("unescape mangled a plain name");
+        }
+        if (!ok)
+            ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "rsync-name-escape"
+            << "\tcases=" << (ok ? QString::number(passed) : QString::number(passed))
+            << "/" << QString::number(static_cast<int>(sizeof(cases) / sizeof(cases[0])))
+            << "\tfirstBad=" << (firstBad.isEmpty() ? QStringLiteral("none") : firstBad)
+            << "\n";
+    }
     // 所以走 purgeLegacySecretDirs(dir, keepPid) 而不是直接测 QDir::tempPath()。
     {
         QTemporaryDir sandbox;
@@ -786,8 +892,30 @@ int runSelfCheck()
                                 && !ConfigStore::pathLooksCorrupted(QStringLiteral("\\\\srv\\share\\a.spe"))
                                 && !ConfigStore::pathLooksCorrupted(QStringLiteral("D:"))
                                 && !ConfigStore::pathLooksCorrupted(QString());
+        // 反向锁：Linux 上带冒号的路径**完全正常**（冒号是合法的文件名字符），
+        // 判成"配置已损坏"会让用户每次启动都看到一句让他重选目录的提示，
+        // 而路径一点问题都没有。
+        const bool okFlagLinuxColon = !ConfigStore::pathLooksCorrupted(QStringLiteral("/data/spe:2024"))
+                                      && !ConfigStore::pathLooksCorrupted(QStringLiteral("/mnt/d:spe"))
+                                      && !ConfigStore::pathLooksCorrupted(QStringLiteral("/home/apuser/a:b:c"));
+        // 反向锁：Linux 路径里的反斜杠是**合法的文件名字符**，
+        // 归一化把它换成正斜杠就等于把用户指向了另一个目录。
+        // Windows 上规则相反 —— 那边必须换（Qt 读回时会掉字符）。
+#ifdef Q_OS_WIN
+        const bool okNormLinux = true;   // Linux 规则在 Windows 上不适用
+        const bool okNormWin = ConfigStore::normalizePathForStore(QStringLiteral("C:\\AP\\keys\\id_rsa"))
+                               == QStringLiteral("C:/AP/keys/id_rsa")
+                               && ConfigStore::normalizePathForStore(QStringLiteral("/data/spe\\2024"))
+                                  == QStringLiteral("/data/spe/2024");
+#else
+        const bool okNormLinux = ConfigStore::normalizePathForStore(QStringLiteral("/data/spe\\2024"))
+                                 == QStringLiteral("/data/spe\\2024");
+        const bool okNormWin = ConfigStore::normalizePathForStore(QStringLiteral("C:\\AP\\keys\\id_rsa"))
+                               == QStringLiteral("C:/AP/keys/id_rsa");
+#endif
 
-        const bool ok = made && okRound && okUnchanged && okFlagMangled && okFlagGood;
+        const bool ok = made && okRound && okUnchanged && okFlagMangled && okFlagGood
+                        && okFlagLinuxColon && okNormLinux && okNormWin;
         if (!ok)
             ++bad;
         out << (ok ? "PASS\t" : "FAIL\t") << "ini-path-roundtrip"
@@ -1667,6 +1795,20 @@ int runSelfCheck()
         }
     }
 
+    // 口令加密后端**此刻**能不能用。
+    //
+    // 这不是一条判据，是一条**事实汇报**：客户看交付包里的自检输出时，
+    // 需要知道"这台机器上登录口令到底会不会被加密"。
+    // 之前包里的自检脚本靠"包内 lib/ 目录里有没有 libcrypto"来判断 ——
+    // 而包里本来就不带 OpenSSL，那个判据恒为假，
+    // 于是客户每次都看到「保存的登录口令不会被加密」，
+    // 实际上系统的 libcrypto 找得到、口令是加密的。
+    //
+    // 事实必须由**程序自己**报：判据和实现在同一条代码路径上，
+    // 才不会再出现"脚本说一套、程序做另一套"。
+    out << "INFO\tcrypto-backend\tavailable=" << (SecretStore::cryptoBackendAvailable() ? 1 : 0)
+        << "\tbackend=" << SecretStore::backendName() << "\n";
+
     out << (bad == 0 ? "SELFCHECK_ALL_PASS" : "SELFCHECK_FAILED") << "\n";
     return bad == 0 ? 0 : 1;
 }
@@ -1707,7 +1849,8 @@ struct SecretCheck
     // 放构造函数里初始化，不用 QTextStream out(stdout)：
     //   1) 那写法会被解析成函数声明（最令人 vexing 的那种），报出来是莫名语法错；
     //   2) QTextStream 的拷贝构造在 Qt 5.9 是私有的，= 初始化也不行。
-    SecretCheck() : out(stdout) {}
+    // 输出编码同样钉死 UTF-8，理由见 runSelfCheck() 里那段注释。
+    SecretCheck() : out(stdout) { out.setCodec("UTF-8"); }
     QTextStream   out;
     int           roundsLeft = 0;
     int           doneBefore = 0;

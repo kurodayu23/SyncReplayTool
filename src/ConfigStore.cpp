@@ -67,6 +67,46 @@ std::unique_ptr<QSettings> openSettings()
     return s;
 }
 
+// 最近一次落盘失败的原因。空串 = 上次写成功了。
+//
+// 为什么要有它：QSettings 的错误是**延迟**报的 —— setValue 全部返回 void，
+// 磁盘满 / 目录只读 / 配置文件被别的程序锁住时，它一声不吭，
+// 只有 sync() 之后 status() 才说得出真话。
+//
+// 原来整个工程没有一处检查 status()，于是设置弹窗无条件显示
+// 「✓ 设置已保存」，实际一个字节都没落盘。用户关掉重开，
+// IP / 端口 / 密码 / 规则全回到旧值 —— 界面上却什么异常都没有。
+static QString g_lastWriteError;
+
+// 落盘并把结果记下来。
+void flushSettings(QSettings *s)
+{
+    s->sync();
+    if (s->status() == QSettings::NoError) {
+        g_lastWriteError.clear();
+        return;
+    }
+    // Qt 5.9 的 QSettings 没有 errorString()，只能按 status() 分形态给话。
+    // （这一点是编译期才发现的：QSettings::errorString() 是 Qt 6 才有的。）
+    QString detail;
+    switch (s->status()) {
+    case QSettings::AccessError:
+        detail = QString::fromUtf8(u8"没有权限写入配置文件（目录可能不可写，或文件正被别的程序占用）");
+        break;
+    case QSettings::FormatError:
+        detail = QString::fromUtf8(u8"配置文件格式异常，写入被拒绝");
+        break;
+    default:
+        detail = QString::fromUtf8(u8"写入配置文件失败（磁盘可能已满）");
+        break;
+    }
+    g_lastWriteError = detail;
+    // 提示走日志抽屉（notice 的通道），不当场弹框 ——
+    // 弹框会卡在关窗路径的嵌套事件循环里，表现为"关不掉"。
+    ConfigStore::notice(QString::fromUtf8(u8"设置没有保存到 %1：%2")
+                        .arg(ConfigStore::iniPath()).arg(g_lastWriteError));
+}
+
 // 配置里存着乱码时把它还原回原文。
 //
 // 历史上有过一段时间，界面文案里的中文被编译器按本地代码页(GBK)读成了错字，
@@ -145,6 +185,21 @@ QString repairMojibake(const QString &s)
     return fixed;
 }
 
+// 这条路径是不是 Windows 形态：带盘符（"C:\..." / "C:/..."），或者是 UNC（"\\srv\share"）。
+//
+// 为什么需要它：Linux 上**反斜杠是合法的文件名字符**，
+// "/data/spe\2024" 是一个真目录，不是 Windows 路径。
+// 把两种形态一视同仁地处理（换反斜杠、判"盘符冒号后面不是分隔符就是坏了"），
+// 在麒麟上会天天误伤用户填的正常路径。
+bool looksLikeWindowsPath(const QString &p)
+{
+    if (p.startsWith(QLatin1String("\\\\")))
+        return true;                                   // UNC：\\srv\share
+    if (p.size() >= 2 && p.at(0).isLetter() && p.at(1) == QLatin1Char(':'))
+        return true;                                   // 盘符：C:\ 或 C:/
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // 路径字段写进 ini 之前，先把反斜杠换成正斜杠。
 //
@@ -169,11 +224,31 @@ QString repairMojibake(const QString &s)
 // 正斜杠在 Windows 上完全等价（Win32 和 Qt 都认），跨 Windows/麒麟 通用。
 QString normalizePathForStore(const QString &p)
 {
+#ifdef Q_OS_WIN
+    // Windows 上：凡是有反斜杠的路径都换。
+    // 相对路径（"keys\id_rsa"）也要换 —— 它同样是 Qt 读回时会掉字符的那种形态。
     if (!p.contains(QLatin1Char('\\')))
         return p;
     QString s = p;
     s.replace(QLatin1Char('\\'), QLatin1Char('/'));
     return s;
+#else
+    // 麒麟/Linux 上：反斜杠是**合法的文件名字符**。
+    // 把它换成正斜杠，等于把用户指向了另一个目录：
+    //   原路径 /data/spe\2024  ->  存成 /data/spe/2024
+    // 下次启动读回来就是一个不存在的目录，界面报「本地根目录不存在或不可读」，
+    // 用户重选一次存一次，**永远同步不了**，而且界面一个解释都没有。
+    //
+    // 只有确实是 Windows 形态的路径（盘符 / UNC）才换 ——
+    // 那种路径搬到麒麟上也仍然是 Windows 路径，按 Windows 规则处理才对。
+    if (!looksLikeWindowsPath(p))
+        return p;
+    if (!p.contains(QLatin1Char('\\')))
+        return p;
+    QString s = p;
+    s.replace(QLatin1Char('\\'), QLatin1Char('/'));
+    return s;
+#endif
 }
 
 // 已经损坏的旧值长什么样，用一个高精度的判据认出来：
@@ -191,10 +266,23 @@ QString normalizePathForStore(const QString &p)
 // 任何猜测都会把用户带到另一个文件上去。唯一正确的处理是提示重填。
 bool pathLooksCorrupted(const QString &p)
 {
-    const int c = p.indexOf(QLatin1Char(':'));
-    if (c <= 0 || c + 1 >= p.size())
-        return false;                       // 没有盘符冒号，或冒号在末尾
-    const QChar next = p.at(c + 1);
+    // 只有**盘符形态**的路径才可能是被吃坏了的。
+    //
+    // 原来只要看到冒号就判，于是 Linux 上完全正常的路径
+    //   /data/spe:2024   /mnt/d:spe
+    // 也被判成「配置里的本机目录已经被损坏」，每次启动都报一句
+    // 「请到设置里重新选择一次本机目录」—— 而路径一点问题都没有。
+    // 用户重选一次，提示照旧出现（判的是字符串形态，不是文件系统），
+    // 于是他以为软件坏了。
+    //
+    // 被吃掉分隔符的形态只可能出现在 Windows 路径上：盘符冒号后面
+    // 直接跟了普通字符。判据收窄到「首字符是字母 + 第二字符是冒号」，
+    // 正好只覆盖这一种。
+    if (p.size() < 3)
+        return false;
+    if (!p.at(0).isLetter() || p.at(1) != QLatin1Char(':'))
+        return false;
+    const QChar next = p.at(2);
     return next != QLatin1Char('/') && next != QLatin1Char('\\');
 }
 
@@ -210,6 +298,14 @@ QString ConfigStore::normalizePathForStore(const QString &path)
 bool ConfigStore::pathLooksCorrupted(const QString &path)
 {
     return ::pathLooksCorrupted(path);
+}
+
+// 最近一次落盘失败的原因。空串 = 上次写成功了。
+// 实现必须在匿名命名空间**外面** —— 命名空间里不能定义外部类的成员
+// （MSVC 报 C2888）。
+QString ConfigStore::lastWriteError()
+{
+    return g_lastWriteError;
 }
 
 // 「路径已被损坏」这两条用户可见文案。抽成函数是为了让自检判据验到
@@ -361,6 +457,22 @@ bool ConfigStore::isPlainPortText(const QString &text)
 
 TargetConfig ConfigStore::loadTarget()
 {
+    // 「记住设置」不勾 = 不恢复目标连接信息。
+    //
+    // 原来这个复选框只记录**自己**被勾没被勾，实际落盘与恢复走的是另一条路：
+    //   落盘：saveTarget 无条件写 target/*
+    //   恢复：loadTarget 无条件读 target/*
+    // 于是用户取消勾选之后，IP/账号/密码照样写进配置文件、下次启动照样自动填回，
+    // 界面上那个勾选框等于摆设。
+    //
+    // 这里必须在**读任何键之前**返回：不勾就不该把配置里的连接信息读出来。
+    if (!loadRememberSettings()) {
+        TargetConfig t;
+        t.port = 22;
+        t.autoAcceptHostKey = true;
+        return t;
+    }
+
     auto s = openSettings();
 
     TargetConfig t;
@@ -450,6 +562,38 @@ TargetConfig ConfigStore::loadTarget()
 void ConfigStore::saveTarget(const TargetConfig &target)
 {
     auto s = openSettings();
+
+    // 「记住设置」不勾 = 不保存目标连接信息，并且**清掉配置文件里原有的那些**。
+    //
+    // 清掉这一步是必须的：用户的直觉是"别把我的口令留在机器上"。
+    // 只是不写、却把旧密文留在文件里，等于没兑现。
+    //
+    // 这个闸门必须放在**最前面**：
+    //   1) 放在 password 分支之前 —— 不然「口令框是空的」那一支的
+    //      s->remove("target/password") 会在用户**没要求清空**的情况下
+    //      把那份"本机解不开、换台机器也许能解开"的密文删掉；
+    //   2) 放在任何 setValue 之前 —— 不勾就不能写。
+    if (!loadRememberSettings()) {
+        static const char *kTargetKeys[] = {
+            "host", "port", "user", "keyPath", "password",
+            "remoteRoot", "localRoot", "autoAcceptHostKey"
+        };
+        bool had = false;
+        for (unsigned i = 0; i < sizeof(kTargetKeys) / sizeof(kTargetKeys[0]); ++i) {
+            const QString key = QStringLiteral("target/") + QLatin1String(kTargetKeys[i]);
+            if (s->contains(key)) {
+                s->remove(key);
+                had = true;
+            }
+        }
+        flushSettings(s.get());
+        if (had) {
+            notice(QString::fromUtf8(u8"按「记住设置」的当前状态，配置文件里原有的目标连接信息"
+                                     u8"（IP、端口、账号、密码、私钥、目录）已经清除。"));
+        }
+        return;
+    }
+
     s->setValue(QStringLiteral("target/host"), target.host);
     s->setValue(QStringLiteral("target/port"), target.port);
     s->setValue(QStringLiteral("target/user"), target.user);
@@ -499,6 +643,7 @@ void ConfigStore::saveTarget(const TargetConfig &target)
     s->setValue(QStringLiteral("target/remoteRoot"), normalizePathForStore(target.remoteRoot));
     s->setValue(QStringLiteral("target/localRoot"), normalizePathForStore(target.localRoot));
     s->setValue(QStringLiteral("target/autoAcceptHostKey"), target.autoAcceptHostKey);
+    flushSettings(s.get());
 }
 
 // beginReadArray 返回的是 ini 里写的 size，QSettings 不会去核实真的有那么多条。
@@ -688,6 +833,7 @@ void ConfigStore::saveSyncRules(const QVector<SyncRule> &rules)
         s->setValue(QStringLiteral("remoteSubDir"), rules.at(i).remoteSubDir);
     }
     s->endArray();
+    flushSettings(s.get());
 }
 
 QVector<ToolRule> ConfigStore::loadToolRules()
@@ -824,4 +970,5 @@ void ConfigStore::saveToolRules(const QVector<ToolRule> &rules)
         }
     }
     s->endArray();
+    flushSettings(s.get());
 }

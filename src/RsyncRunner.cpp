@@ -1,5 +1,7 @@
 #include "RsyncRunner.h"
 
+#include "ToolRunner.h"
+
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -619,6 +621,115 @@ RsyncRunner::ProgressFrame RsyncRunner::parseProgressFrame(const QString &line)
     return f;
 }
 
+// 把 rsync 转义过的文件名还原成真实文件名。
+//
+// rsync 的 --out-format=%n 不是原样打印文件名的：它会把「不可打印」的字节
+// 写成 \#NNN（反斜杠 + # + 3 位八进制）。
+//
+// 实测（2026-10-21，rsync 3.2.7 与 3.1.1 各跑一遍全字节扫描 1..255，
+// locale 取 C / C.utf8 / en_US.UTF-8 三档）：
+//   0x01-0x08、0x0A-0x1F              -> \#NNN（三种 locale 一致）
+//   0x80-0xFF                          -> C locale 转义；UTF-8 locale 下
+//                                         **合法 UTF-8 原样输出**，非法字节仍转义
+//   0x09（制表符）、0x20-0x7F           -> 原样
+//   反斜杠 0x5C                        -> 只在"后面紧跟 # 加 3 位八进制"时
+//                                         才转义成 \#134（rsync 靠这条保证转义可逆：
+//                                         名字里带 \#012 的，输出成 \#134#012）
+// locale 改不改高位字节的规则都会变，所以"run.sh 里设 LC_ALL=C.utf8"绕不开它。
+//
+// 为什么这条必须修：中文文件名在 stdout 上长成
+//   混\#344\#270\#255文.spe
+// 而清单里存的是真实名「混中文.spe」，两者**永远对不上**。
+// 于是这个文件既不计数、也不点亮行，最后靠 leftover 兜底规则
+// 显示成「✓ 已完成」—— 传是传过去了，但界面全程显示 0 个文件，
+// 直到结束才被强拉到 100%。客户看到的是「进度条不动、计数是 0」，
+// 而日志里那句「已传 N 个文件」里的 N 一直是错的。
+//
+// 逐字节在 **QByteArray** 上做，不在 QString 上做：还原出来的字节可能不是合法 UTF-8
+// （文件名里单个 0xE4 就是这种情况），而 QString 装不下非法序列。
+// 但这恰恰对得上：FileScanner 扫目录时文件名也经过同一次 UTF-8 解码，
+// 非法字节在那边已经变成 U+FFFD，这边还原完再解码一次，同样是 U+FFFD，
+// 两边照样对得上。反过来在 QString 上做，中间会先把非法字节吃成 U+FFFD，
+// 再 toUtf8 变成 EF BF BD，就再也还原不回去了。
+QString RsyncRunner::unescapeRsyncName(const QString &raw)
+{
+    const QByteArray in = raw.toUtf8();
+    // 快路径：没有反斜杠就没有转义序列。
+    if (!in.contains('\\'))
+        return raw;
+
+    QByteArray out;
+    out.reserve(in.size());
+    for (int i = 0; i < in.size(); ) {
+        // 形如 \#344：反斜杠(1) + #(1) + 3 位八进制 = 5 个字符
+        if (in.at(i) == '\\' && i + 4 < in.size() && in.at(i + 1) == '#') {
+            int v = 0;
+            bool allOct = true;
+            for (int k = 0; k < 3; ++k) {
+                const char c = in.at(i + 2 + k);
+                if (c < '0' || c > '7') {
+                    allOct = false;
+                    break;
+                }
+                v = v * 8 + (c - '0');
+            }
+            // 上限 255：rsync 只可能转义单字节，\#377 就是 0xFF。
+            // 更大的值（\#999）只可能来自名字里的字面量，不该被还原。
+            if (allOct && v <= 255) {
+                out.append(static_cast<char>(v));
+                i += 5;
+                continue;
+            }
+        }
+        out.append(in.at(i));
+        ++i;
+    }
+    return QString::fromUtf8(out);
+}
+
+// 把 rsync 的一行输出还原成「本组清单里的真实文件名」，不在清单里就返回空串。
+//
+// 候选有两份，缺一不可：
+//   line    —— 原样。文件名**首尾带空格**是合法的（NTFS 与 Linux 都允许），
+//              而 trim 过的串永远等于不了清单里的名字。
+//   trimmed —— rsync 输出里若有前后空白，trim 之后才是真名。
+//
+// 每一份候选都试两次：先按 rsync 的规则还原，还原后命中清单就用还原结果；
+// 没命中再拿原始串试一次 —— 覆盖"文件名里本来就带字面量 \#NNN"的情况
+// （rsync 恰恰会把那种名字输出成 \#134#012，所以还原一次就能对上，
+//  但两路都留着才不怕规则再变）。
+//
+// 抽成独立函数是为了让 --selfcheck 能拿**真机 rsync 的原文**直接判，
+// 而不是靠"跑一次看看计数对不对"——后者要连上接收端才测得出来。
+QString RsyncRunner::resolveRsyncName(const QString &line, const QSet<QString> &groupSet)
+{
+    const QString trimmed = line.trimmed();
+    // 候选列表必须是**具名局部变量**。
+    //
+    // 写成 `for (const QString &raw : QStringList() << line << trimmed)` 会在
+    // 麒麟上直接崩掉：那个 QStringList 临时对象在 range-for 的初始化语句
+    // 结束时就析构了，而循环体还在用它 —— 释放过的 QList 再 append，
+    // 就是 heap corruption（实测：malloc(): memory corruption (fast)，
+    // 崩在 QListData::detach_grow 里）。
+    // Windows 上同样的写法居然能跑完自检 36 项全绿 —— 典型的"换个平台
+    // 就不炸"，靠不住。
+    QStringList candidates;
+    candidates << line << trimmed;
+    for (const QString &raw : candidates) {
+        QString cand = raw;
+        if (cand.startsWith(QLatin1String("./")))
+            cand.remove(0, 2);
+        if (cand.isEmpty() || cand == QLatin1String("."))
+            continue;
+        const QString unescaped = unescapeRsyncName(cand);
+        if (groupSet.contains(unescaped))
+            return unescaped;
+        if (groupSet.contains(cand))
+            return cand;
+    }
+    return QString();
+}
+
 // 把刚建好的 m_proc 挂进 m_job 作业，并让它用 CREATE_SUSPENDED 起来。
 // 必须定义在这个匿名命名空间外面：命名空间内不能定义外部类的成员（MSVC 报 C2888）。
 // 作业整个生命周期只建一次、跨组复用：每次重建都会把上一组退出瞬间还没收完尾的
@@ -925,12 +1036,29 @@ QString RsyncRunner::askpassDir()
     // cmd 解析得对，含空格无碍。
     static const QString dir = []() -> QString {
         const QStringList candidates = {
+            // Windows 上优先用 LOCALAPPDATA：它**一定是当前用户私有的**，
+            // 不管用户名是不是中文、路径里有没有空格。
+            //
+            // 原来的候选表里排第一位的是 QDir::tempPath()，而 %TEMP% 展开成
+            // C:\Users\张三\AppData\Local\Temp 时含中文，会被下面那条
+            // "无空格、纯 ASCII" 的判据否掉；于是在中文用户名 + 装在
+            // Program Files（标准用户不可写）这两条同时成立时，
+            // 候选表一路走到 **C:\Windows\Temp** ——
+            // 那是本机 Users 组默认可读的目录，等于把**明文 SSH 口令**
+            // 摆在同机任何用户都拿得到的地方。
+            //
+            // 两条一起改：候选表去掉 C:/Windows/Temp，并把 LOCALAPPDATA 放前面。
+            // 顺带一提，QFile::setPermissions(ReadOwner|WriteOwner) 在 Windows 上
+            // 只映射到只读属性、**改不了 NTFS ACL**，所以"用权限位保护口令文件"
+            // 这条路在 Windows 上本来就是空的 —— 只能靠目录本身的私有性。
+#ifdef Q_OS_WIN
+            QDir::homePath() + QStringLiteral("/AppData/Local"),
+#endif
             QDir::tempPath(),
             // 程序目录只在"装在可写位置"时才算数：装进 Program Files 的
             // 标准用户对它没有写权限，选中它等于把口令创建推到失败路径上。
             QCoreApplication::applicationDirPath(),
             QDir::homePath(),
-            QStringLiteral("C:/Windows/Temp"),
         };
         for (const QString &candidate : candidates) {
             if (candidate.isEmpty())
@@ -1646,16 +1774,36 @@ void RsyncRunner::start(const TargetConfig &target,
 
     // 同一后缀命中多条规则时只取第一条，否则同一批文件会被反复传输一遍
     QVector<QString> usedSuffixes;
+    // 记下每条规则归一化之后的后缀，只为了在"一条都没匹配上"时
+    // 能把用户填的东西原样念给他听（他多半是后缀写错了）。
+    QStringList configuredSuffixes;
     for (const SyncRule &rule : rules) {
-        if (usedSuffixes.contains(rule.suffix))
+        // 后缀比较必须大小写无关。
+        //
+        // 用户在设置里把文件类型填成 "SPE"（大写）是完全正常的写法，而
+        // FileScanner 产出的 f.suffix 一定是小写 —— 以前这里用的是全等，
+        // 结果是：组建不出来 → 走「没有匹配到要同步的文件」→ 界面报
+        // 「同步完成」、进度打满 100% —— 而**一个字节都没传**。
+        //
+        // 更隐蔽的是重启后就好了：ConfigStore 读配置时做了 toLower，
+        // 所以故障只出现在"刚填完还没重启"的这一次会话里。
+        //
+        // 归一化统一走 ToolRunner::normSuffix（去空白、去前导点、去尾点、转小写），
+        // 跟工具规则的匹配口径完全一致，扫描侧（FileScanner）也是同一个函数。
+        const QString ruleSuffix = ToolRunner::normSuffix(rule.suffix);
+        if (ruleSuffix.isEmpty())
             continue;
-        usedSuffixes.append(rule.suffix);
+        if (!configuredSuffixes.contains(ruleSuffix))
+            configuredSuffixes.append(ruleSuffix);
+        if (usedSuffixes.contains(ruleSuffix))
+            continue;
+        usedSuffixes.append(ruleSuffix);
 
         Group g;
         g.remoteBase = remoteSpec(target, rule.remoteSubDir);
         g.remoteDir  = remoteDir(target, rule.remoteSubDir);
         for (const FileItem &f : files) {
-            if (f.suffix == rule.suffix)
+            if (ToolRunner::normSuffix(f.suffix) == ruleSuffix)
                 g.files.append(f.relativePath);
         }
         if (!g.files.isEmpty())
@@ -1663,8 +1811,24 @@ void RsyncRunner::start(const TargetConfig &target,
     }
 
     if (m_groups.isEmpty()) {
-        emit logText(QString::fromUtf8(u8"\u6CA1\u6709\u5339\u914D\u5230\u8981\u540C\u6B65\u7684\u6587\u4EF6\u3002"));
-        emit allFinished(true);
+        // **有文件、一条规则都没匹配上 —— 这是失败，不能报成功。**
+        //
+        // 报成功的后果：界面显示「同步完成」、进度打满 100%、
+        // 日志里写「没有匹配到要同步的文件。」，而远端一个字节都没传。
+        // 用户据此认为数据已经上机 —— 这正是最伤客户信任的一类静默。
+        //
+        // 走到这里只有一种可能：扫描侧和传输侧的后缀归一化不一致
+        // （历史上就是"spe." 尾点：扫描侧去了、传输侧没去）。
+        // 两边现在共用 ToolRunner::normSuffix，但这里的闸门要留着 ——
+        // 口径一旦再分叉，这里会当场报红，而不是静默传零个文件。
+        emit logText(QString::fromUtf8(u8"本机目录里有 %1 个文件，但没有任何一条同步规则匹配上它们，"
+                                       u8"本次没有传输任何文件。").arg(files.size()));
+        if (!configuredSuffixes.isEmpty()) {
+            emit logText(QString::fromUtf8(u8"当前生效的同步规则后缀：%1")
+                         .arg(configuredSuffixes.join(QString::fromUtf8(u8"\u3001"))));
+        }
+        emit logText(QString::fromUtf8(u8"请检查设置里的文件类型写法（例如 spe 与 .spe 表示同一种类型）。"));
+        emit allFinished(false);
         return;
     }
 
@@ -1912,6 +2076,19 @@ QStringList RsyncRunner::filesMutatedDuringTransfer() const
         return changed;
     const QDir root(m_localRoot);
     for (const SourceSnapshot &s : m_sourceSnapshot) {
+        // **只看本组**。
+        //
+        // m_sourceSnapshot 记的是**整轮**所有文件，而这一轮刚开始时只传了第一组，
+        // 后面那些组还没轮到。全部 stat 一遍，30 万个文件就是 30 万次 stat，
+        // 每一组结束都做一次 —— 而且查出来的"被改过"全是还没传的文件，
+        // 报出来是假警报。
+        //
+        // 只查本组之后语义完全不变：本组之外的文件这轮还没传，
+        // 等它们的组开始时自然会各自查一遍。
+        // m_currentGroupSet 是 QSet，成员资格查询是 O(1)，
+        // 不会退化成"每个文件扫一遍清单"的 O(n^2)。
+        if (!m_currentGroupSet.contains(s.rel))
+            continue;
         const QFileInfo fi(root.absoluteFilePath(s.rel));
         if (!fi.exists()) {
             // 传输中源文件被删了：远端留着的是删除前的版本，同样要报
@@ -2228,6 +2405,9 @@ void RsyncRunner::launchNext()
 
     const Group &g = m_groups.at(m_groupIndex);
     m_currentGroupFiles = g.files;
+    // 本组的计数基线：m_done 是**整轮**的已传数，
+    // 要判断"这一组有没有产生传输动作"就得记住这一组开始时它是多少。
+    m_doneAtGroupStart = m_done;
     // 新的一组开始：上一组没收尾的那个"在传文件名"必须清掉，
     // 否则它会被算进这一组的成果里（onProcFinished 里的结账会重复计一次）。
     m_startedName.clear();
@@ -2486,10 +2666,18 @@ void RsyncRunner::handleLine(const QString &line)
     if (trimmed.endsWith(QLatin1Char('/')))
         return;
 
-    QString name = trimmed;
-    if (name.startsWith(QLatin1String("./")))
-        name.remove(0, 2);
-    if (name.isEmpty() || name == QLatin1String("."))
+    // 名字解析：rsync 的 %n 会把「不可打印」的字节转义成 \#NNN（实测表见
+    // unescapeRsyncName），所以 stdout 上的名字是**转义过的**，
+    // 直接拿去和清单比一定对不上：中文文件名会变成 混\#344\#270\#255文.spe，
+    // 于是这个文件既不计数、也不点亮行，最后靠 leftover 兜底规则显示成「✓ 已完成」。
+    //
+    // 解析细节（候选怎么取、还原与原样谁先试）都在 resolveRsyncName 里，
+    // 那里有 --selfcheck 直接拿真机原文来判。
+    //
+    // 顺带解决"文件名首尾带空格"：rsync 的 %n 输出前后没有空白，
+    // 所以用未 trim 的原始行去匹配才对，trim 过的串永远等于不了清单里的名字。
+    const QString name = resolveRsyncName(line, m_currentGroupSet);
+    if (name.isEmpty())
         return;
 
     // 只有"确实在这一组清单里"的行才算数。
@@ -2500,8 +2688,7 @@ void RsyncRunner::handleLine(const QString &line)
     //   "sent 40 bytes ..."      会被前缀过滤当成噪声，文件同样漏计
     // 这两种情况下文件其实都在远端，界面只显示"已同步 1 / 2 个文件"。
     // 按清单认，猜不出来就不计——宁可少报也不能虚报成功。
-    if (!m_currentGroupSet.contains(name))
-        return;
+    //
     // 同一行重复到达（管道缓冲重放、\r 覆写残留）时不重复计数。
     if (name == m_startedName)
         return;
@@ -2601,6 +2788,20 @@ void RsyncRunner::onFinished(int exitCode, QProcess::ExitStatus status)
     // "部分文件未完成传输"，看不到 rsync 到底报的什么。
     takeStderrTail();
 
+    // 本组有没有自己的问题。只看**这一组**的事。
+    //
+    // 原来这个判据里带着 `!m_failed`，而 m_failed 是**整轮**的汇总标志
+    // （start() 里清一次，之后任何一组失败就永久为真）。于是多组场景下：
+    //   第 1 组 rsync 退出码非 0 -> m_failed 变真
+    //   第 2 组一切正常、退出码 0、文件全部落地
+    //   但 groupOk 仍然算出 false -> 不结账（m_done 少 1、进度到不了 100%）、
+    //   不核对远端目录、连「本组完成。」都不打，
+    //   界面上第 2 组最后一个文件显示成「✕ 失败」。
+    //
+    // 汇总（m_failed）和分组判据（groupOk）必须拆开：
+    // m_failed 只在最后那句 allFinished(!m_failed && !m_cancelRequested) 里用。
+    bool groupProblem = false;
+
     if (m_cancelRequested) {
         // 用户主动取消时进程必然是非零退出，但那不是故障。
         // 以前这里照样置 m_failed，界面弹红框"同步异常，部分文件未完成传输"，
@@ -2652,19 +2853,37 @@ void RsyncRunner::onFinished(int exitCode, QProcess::ExitStatus status)
         const QStringList mutated = filesMutatedDuringTransfer();
         if (!mutated.isEmpty()) {
             m_failed = true;
+            groupProblem = true;
             emit logText(QString::fromUtf8(u8"\u3010\u6CE8\u610F\u3011\u4EE5\u4E0B\u6587\u4EF6\u5728\u4F20\u8F93\u8FC7\u7A0B\u4E2D\u88AB\u4FEE\u6539\uFF1A%1")
                              .arg(mutated.join(QString::fromUtf8(u8"\u3001"))));
             emit logText(QString::fromUtf8(u8"\u8FDC\u7AEF\u6536\u5230\u7684\u662F\u4FEE\u6539\u524D\u7684\u5185\u5BB9\uFF08\u672C\u6B21\u4F20\u8F93\u53D7\u5F71\u54CD\uFF09\u3002"));
         }
         // 增量同步时 rsync 不会输出任何文件名（文件本来就一致），靠退出码判定成功
         //
-        // 但结账发生在**下面**（rsyncOk 时才 ++m_done），所以本组只有 1 个文件时
-        // 走到这里 m_done 必然还是 0 —— 照字面判会把「真传了一个文件」报成
-        // 「本组无变化，全部已是最新」。m_startedName 非空表示 rsync 的 %n 已经
-        // 打过（确实开传了），把这个即将结账的文件算进去。
-        const bool lastFilePending = (m_total == 1) && !m_startedName.isEmpty();
-        if (m_done == 0 && !lastFilePending)
-            emit logText(QString::fromUtf8(u8"\u672C\u7EC4\u65E0\u53D8\u5316\uFF0C\u8FDC\u7AEF\u5DF2\u6709\u3002"));
+        // rsync 退出码 0 且一个文件名都没打印 —— 只说明"rsync 没有报告任何
+        // 传输动作"，**不能**据此断言"远端已有、内容一致"。
+        //
+        // 原因：这两种成因程序分不清：
+        //   a) 远端确实已有同样的文件（--checksum 比对后判定一致，一个字节都不传）
+        //   b) 清单里的文件名一个都没被 rsync 认出来（比如文件名被转义成了
+        //      \#NNN 形式，认不出来）
+        // (b) 的后果是**远端一个文件都没有**，但界面照样显示"同步完成"。
+        //
+        // 所以这里只陈述观察到的事实，成因交给用户自己判断 ——
+        // 说"远端已有"是把 (a) 当成唯一解释，属于未经证实的断言。
+        //
+        // 「本组」的字面意思必须是**这一组**：
+        //   m_done > m_doneAtGroupStart  -> 这一组已经结账过文件（有文件真的传完了）
+        //   m_startedName 非空            -> 这一组刚开传、还没被下一个文件顶掉
+        //
+        // 原来这里判的是 `m_total == 1`（**整轮**的文件总数）和 `m_done == 0`
+        // （**整轮**的已传数），于是：
+        //   配两条规则、第一条只命中 1 个文件时，第一组传完了却打出
+        //   「本组无变化，远端已有。」，而同一屏的计数行已经是 1 / 6 个文件；
+        //   第二组真的一直没传任何东西时，那句话又根本不打。
+        const bool groupTransferred = (m_done > m_doneAtGroupStart) || !m_startedName.isEmpty();
+        if (!groupTransferred)
+            emit logText(QString::fromUtf8(u8"\u672C\u7EC4\u6CA1\u6709\u4EA7\u751F\u4EFB\u4F55\u4F20\u8F93\u52A8\u4F5C\u3002"));
         else
             emit logText(QString::fromUtf8(u8"\u672C\u7EC4\u5B8C\u6210\u3002"));
         // rsync 退出码 0 但 stderr 有内容的情况是存在的（接收端报了可恢复的错误、
@@ -2681,7 +2900,8 @@ void RsyncRunner::onFinished(int exitCode, QProcess::ExitStatus status)
     //
     // 只在真的失败时记：成功组里 rsync 也可能打无害的告警行（退出码 0 但
     // stderr 有内容），那些不是失败原因，不该出现在弹框里。
-    const bool groupOk = !m_cancelRequested && !m_failed
+    // 本组成败只看**这一组**的结果，不看整轮的汇总标志（理由见上面 groupProblem）。
+    const bool groupOk = !m_cancelRequested && !groupProblem
                          && status != QProcess::CrashExit && exitCode == 0;
     if (!groupOk && !m_stderrTail.trimmed().isEmpty())
         m_lastFailure = m_stderrTail.trimmed();
@@ -2927,8 +3147,17 @@ static const QRegularExpression re(QStringLiteral("\"(/[^\"]+)\""));
             if (slash < 0)
                 continue;
             const QString base = n.mid(slash + 1);
-            if (!base.isEmpty() && !names.contains(base))
+            if (base.isEmpty())
+                continue;
+            if (!names.contains(base))
                 names.append(base);
+            // stderr 里的文件名和 %n 是**同一套转义规则**，
+            // 所以中文名在报错行里也是 混\#344\#270\#255文.spe。
+            // 两份都收：原始串覆盖"名字里本来就带字面量 \#NNN"，
+            // 还原串覆盖中文/含换行这类真会被转义的。
+            const QString unescaped = unescapeRsyncName(base);
+            if (!unescaped.isEmpty() && unescaped != base && !names.contains(unescaped))
+                names.append(unescaped);
         }
     }
     if (names.isEmpty())
@@ -3025,8 +3254,19 @@ void RsyncRunner::reportFailedNames()
             const QRegularExpressionMatch tm = tempRe.match(base);
             if (tm.hasMatch())
                 base = tm.captured(1);
-            if (!base.isEmpty())
-                bases.insert(base);
+            if (base.isEmpty())
+                continue;
+            // rsync 报错行里的文件名和 %n 是**同一套转义规则**，
+            // 所以中文名在报错行里也是 混\#344\#270\#255文.spe。
+            // 两份都收进集合：原始串覆盖"名字里本来就带字面量 \#NNN"，
+            // 还原串覆盖中文/含换行这类真会被转义的。
+            //
+            // 顺序有讲究：tempRe 的 `.` 不匹配真实换行符，而转义后的串里
+            // 换行是 \#012、不是真换行，所以**先剥临时名再还原**才能对得上。
+            bases.insert(base);
+            const QString unescaped = unescapeRsyncName(base);
+            if (!unescaped.isEmpty() && unescaped != base)
+                bases.insert(unescaped);
         }
     }
     if (bases.isEmpty())

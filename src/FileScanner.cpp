@@ -1,5 +1,7 @@
 ﻿#include "FileScanner.h"
 
+#include "ToolRunner.h"
+
 #include <QDir>
 #include <QFileInfo>
 #include <QAtomicInt>
@@ -181,20 +183,18 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
 
     QStringList wanted;
     for (const QString &s : suffixes) {
-        QString low = s.toLower().trimmed();
-        // 后缀归一化：界面和配置文件里都可能存着带前导点的 ".spe"，
-        // 而 QFileInfo::suffix() 返回的是不带点的 "spe"。
-        while (low.startsWith(QLatin1Char('.')))
-            low.remove(0, 1);
-        // 尾点也必须去，而且必须在**规则侧**去。
-        // 文件侧早就做了（见下面 QString raw 那段），规则侧漏了，于是：
-        //   规则填 "spe."  ->  wanted 里是 "spe."
-        //   文件 "a.spe"    ->  文件侧算出 "spe"
-        //   wanted.contains("spe") 为假 -> **一个文件都不匹配**，界面报"未匹配到文件"
-        // 现象和 P53、"traildot." 那一类完全一样：界面上不报错、清单里就是没有。
-        // 规则和文件两侧的归一化必须逐字对称，缺一边就静默漏文件。
-        while (low.endsWith(QLatin1Char('.')) && low.length() > 1)
-            low.chop(1);
+        // 规则侧的归一化**必须和传输侧逐字对称**，所以这里不再自己写一份，
+        // 直接调 ToolRunner::normSuffix —— 它是唯一实现（去空白、去前导点、
+        // 去尾点、转小写），RsyncRunner 组建分组时调的是同一个函数。
+        //
+        // 之前两侧各写各的，结果是规则填 "spe." 时：
+        //   扫描侧去掉了尾点 -> "spe"，文件 "a.spe" 匹配得上，列表里有它；
+        //   传输侧没去尾点   -> "spe."，和文件的 "spe" 对不上 -> 那一组是空的
+        // 空的组报的是「没有匹配到要同步的文件。」+ 成功，
+        // 界面显示「同步完成」而远端一个文件都没有。
+        //
+        // 归一化收敛到一处之后，这种"少一边就静默漏文件"就不会再发生。
+        const QString low = ToolRunner::normSuffix(s);
         if (!low.isEmpty() && !wanted.contains(low))
             wanted.append(low);
     }
@@ -366,6 +366,53 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
         }
     }
     return items;
+}
+
+// 找出"只有大小写不同"的重名文件。
+//
+// 为什么需要它：接收端是 Linux（大小写敏感），而发送端可能是 Windows
+//（默认大小写不敏感）。同一个目录里若有 A.spe 和 a.spe：
+//   - 在 Windows 上它们**本来就是同一个文件**，用户看到的是一个，
+//     磁盘上只有一份内容 —— 另一份的数据在这台机器上就已经没了
+//   - 用户若从别的机器把两个文件拷进来，拷的瞬间就只剩一个
+//   - 在 Linux 上如果两个都传过去，远端会得到两个内容不同的文件，
+//     与用户在 Windows 上看到的"只有一个"对不上
+//
+// 实测（Windows，NTFS）：写入 A.spe 再写 a.spe，磁盘上只剩 A.spe 一个，
+// 内容被后者替换，全程没有任何提示。程序在扫描时检出并报出来，
+// 用户至少知道"这两个名字在 Windows 上是同一个文件"。
+//
+// 判据：同一目录内，文件名忽略大小写后相同。跨目录不算 ——
+// Linux 上 "a/f.spe" 和 "b/f.spe" 是两个不同路径，本来就该都传。
+QStringList FileScanner::caseCollisionPaths(const QVector<FileItem> &items)
+{
+    QHash<QString, QString> seen;   // 目录(小写) + "/" + 文件名(小写) -> 原名
+    QSet<QString> dirs;             // 已经报过的目录
+    QStringList out;
+    for (int i = 0; i < items.size(); ++i) {
+        const QString &rel = items.at(i).relativePath;
+        const int slash = rel.lastIndexOf(QLatin1Char('/'));
+        const QString dir  = slash >= 0 ? rel.left(slash) : QString();
+        const QString base = slash >= 0 ? rel.mid(slash + 1) : rel;
+        if (base.isEmpty())
+            continue;
+        const QString key = dir + QLatin1Char('/') + base.toLower();
+        const QString prev = seen.value(key);
+        if (prev.isEmpty()) {
+            seen.insert(key, base);
+            continue;
+        }
+        // 同一个小写名已经出现过，且原名不同 —— 这才是冲突。
+        // 同一个名字出现两次是别的问题（扫描重复），不归这里管。
+        if (prev == base)
+            continue;
+        if (dirs.contains(dir))
+            continue;
+        dirs.insert(dir);
+        out.append(dir.isEmpty() ? base
+                                  : dir + QLatin1Char('/') + base);
+    }
+    return out;
 }
 
 // 反向能力：先扫一遍，统计目录里实际有哪些后缀。

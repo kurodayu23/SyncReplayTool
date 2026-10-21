@@ -300,13 +300,33 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     m_saveTip->setVisible(false);
     fl->addWidget(m_saveTip);
 
-    m_rememberBox = new QCheckBox(QString::fromUtf8(u8"\u8BB0\u4F4F\u8BBE\u7F6E"));
+    m_rememberBox = new QCheckBox(QString::fromUtf8(u8"记住设置"));
     m_rememberBox->setObjectName(QStringLiteral("chkRememberSettings"));
     m_rememberBox->setCursor(Qt::PointingHandCursor);
     m_rememberBox->setChecked(ConfigStore::loadRememberSettings());
     connect(m_rememberBox, &QCheckBox::toggled, this, [](bool on) {
         ConfigStore::saveRememberSettings(on);
     });
+    // 「记住设置」的实际语义（2026-10-20 全文查证 ConfigStore 后确认，
+    // 2026-10-21 已让它真正生效）：
+    //
+    // 勾上   —— 目标连接信息（IP、端口、账号、密码、私钥、本机目录、远端路径）
+    //           写进本机配置文件，下次启动自动填回；
+    // 不勾   —— 这些信息不写进配置文件，并且配置文件里原有的那一份会被清除
+    //           （清除时会在日志抽屉里说一声）。
+    //
+    // 工具规则与同步规则不受它影响：那两组在各自的面板里，不在这个弹窗里。
+    //
+    // 原来的实现里这个勾选框只记录自己被勾没被勾，实际的落盘与恢复走的是
+    // 另一条路（saveTarget 无条件写、loadTarget 无条件读），所以它等于摆设。
+    // 现在 ConfigStore::saveTarget / loadTarget 两侧都加了闸门。
+    //
+    // 上面这段说明同时挂成 tooltip，让用户在界面上就能看到真实行为。
+    m_rememberBox->setToolTip(QString::fromUtf8(
+        u8"勾上：点「保存设置」后，目标电脑 IP、SSH 端口、登录账号、登录密码、私钥文件、"
+        u8"本机文件目录、目标落盘路径会写入本机配置文件，下次启动自动填回。\n"
+        u8"不勾：这些信息不写入本机配置文件；配置文件里原有的那一份会被清除。\n"
+        u8"工具规则与同步规则不受这个勾选框影响。"));
     fl->addWidget(m_rememberBox);
     fl->addSpacing(10);
 
@@ -352,14 +372,32 @@ void SettingsDialog::onSaveClicked()
 {
     emit settingsAccepted();
 
+    // 落盘结果必须**如实**反映。
+    //
+    // 原来这里无条件显示「✓ 设置已保存」，而 ConfigStore 里从头到尾没有一处
+    // 检查 QSettings::status() —— 写失败（盘满、目录只读、配置文件被锁住）
+    // 时错误被整个吞掉。用户看到「已保存」，关掉重开，
+    // IP / 端口 / 密码 / 规则全回到旧值，界面上却什么异常都没有。
+    //
+    // QSettings 的错误是**延迟**报的：setValue 全部返回 void，
+    // 只有 sync() 之后 status() 才说得出真话。所以那边补了 flushSettings()，
+    // 结果记在 ConfigStore::lastWriteError() 里。
+    const QString err = ConfigStore::lastWriteError();
+
     // 满足用户要求：显示已保存提示，但不自动关闭设置框
     if (m_saveTip) {
-        m_saveTip->setText(QString::fromUtf8(u8"\u2713 \u8BBE\u7F6E\u5DF2\u4FDD\u5B58")); // ✓ 设置已保存
+        if (err.isEmpty()) {
+            m_saveTip->setText(QString::fromUtf8(u8"\u2713 \u8BBE\u7F6E\u5DF2\u4FDD\u5B58")); // ✓ 设置已保存
+        } else {
+            m_saveTip->setText(QString::fromUtf8(u8"\u2717 \u8BBE\u7F6E\u672A\u4FDD\u5B58")
+                               + QString::fromUtf8(u8"\uFF1A") + err);
+        }
         m_saveTip->setVisible(true);
         QTimer::singleShot(3000, m_saveTip, &QLabel::hide);
     }
     if (m_btnSave) {
-        m_btnSave->setText(QString::fromUtf8(u8"\u5DF2\u4FDD\u5B58")); // 已保存
+        m_btnSave->setText(err.isEmpty() ? QString::fromUtf8(u8"\u5DF2\u4FDD\u5B58")   // 已保存
+                                         : QString::fromUtf8(u8"\u672A\u4FDD\u5B58")); // 未保存
         QTimer::singleShot(2000, this, [this]() {
             if (m_btnSave)
                 m_btnSave->setText(QString::fromUtf8(kTxtSave));
