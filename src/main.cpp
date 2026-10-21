@@ -105,18 +105,18 @@ const LayerCase kLayerCases[] = {
       "rsync error: unexplained error (code 255) [sender=3.1.1]" },
 
     { "auth-protected-key", 2,
-      "Enter passphrase for key '/home/Lei/vmtest/id_ed25519': \r\n"
+      "Enter passphrase for key '/home/tester/vmtest/id_ed25519': \r\n"
       "Permission denied (publickey)." },
 
     { "local-key-broken", 0,
-      "ssh-keygen -y -f '/home/Lei/vmtest/bad': Load key \"bad\": invalid format" },
+      "ssh-keygen -y -f '/home/tester/vmtest/bad': Load key \"bad\": invalid format" },
 
     { "local-source-gone", 0,
-      "link_stat \"/home/Lei/sendsrc/gone.spe\" failed: No such file or directory (2)\r\n"
+      "link_stat \"/home/tester/sendsrc/gone.spe\" failed: No such file or directory (2)\r\n"
       "rsync: [sender] send_files failed to open ..." },
 
     { "local-missing-key", 0,
-      "Warning: Identity file /home/Lei/vmtest/nokey not accessible: No such file or directory." },
+      "Warning: Identity file /home/tester/vmtest/nokey not accessible: No such file or directory." },
 
     // 真机原文（麒麟 V11，0849 任务打出来的）：包里 bin/ssh 的 wrapper
     // exec 的 ../libexec/ssh 不存在，rsync 连 ssh 都没拉起来。
@@ -756,7 +756,7 @@ int runSelfCheck()
         QTemporaryDir sandbox;
         const bool made = sandbox.isValid();
         const QString ini = sandbox.filePath(QStringLiteral("roundtrip.ini"));
-        const QString winPath  = QStringLiteral("D:\\AP\\AP7000\\keys\\id_valid");
+        const QString winPath  = QStringLiteral("D:\\work\\data\\keys\\id_valid");
         // 反斜杠**用程序拼**，不要直接写在字符串字面量里：
         // "\a" 是 BEL、"\t" 是制表符、"\子" 在 MSVC 下是未定义转义，
         // 测试数据自己带上这种歧义，判据就成了在测自己的字面量。
@@ -772,13 +772,13 @@ int runSelfCheck()
         // 与自己写的文件不同），那是另一件事，混进来这条判据就分不清
         // 是反斜杠坏了还是编码坏了 —— 判据必须一次只测一件事。
         const QStringList extShapes = QStringList()
-            << (QStringLiteral("D:") + bs + QStringLiteral("AP") + bs + QStringLiteral("AP7000")
+            << (QStringLiteral("D:") + bs + QStringLiteral("work") + bs + QStringLiteral("data")
                 + bs + QStringLiteral("keys") + bs + wd)
-            << (QStringLiteral("C:") + bs + QStringLiteral("Users") + bs + QStringLiteral("zhang")
+            << (QStringLiteral("C:") + bs + QStringLiteral("Users") + bs + QStringLiteral("tester")
                 + bs + QStringLiteral(".ssh") + bs + QStringLiteral("id_rsa"))
             << (bs + bs + QStringLiteral("srv") + bs + QStringLiteral("share") + bs
                 + QStringLiteral("a b") + bs + wd)
-            << (QStringLiteral("D:") + fs + QStringLiteral("AP") + fs + QStringLiteral("AP7000")
+            << (QStringLiteral("D:") + fs + QStringLiteral("work") + fs + QStringLiteral("data")
                 + fs + QStringLiteral("keys") + fs + wd)
             << QStringLiteral("/home/apuser/.ssh/id_real");
 
@@ -997,7 +997,7 @@ int runSelfCheck()
     // 立刻变红 —— 那会把用户填的每一个反斜杠都变成两个。
     {
         const QString bs = QString(QChar('\\'));
-        const QString path = QStringLiteral("D:") + bs + QStringLiteral("AP") + bs
+        const QString path = QStringLiteral("D:") + bs + QStringLiteral("work") + bs
                              + QStringLiteral("keys") + bs + QStringLiteral("id_valid");
         const QString rendered = QStringLiteral("%1").arg(path);
         const bool okArg = (rendered == path);
