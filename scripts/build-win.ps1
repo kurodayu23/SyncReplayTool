@@ -11,6 +11,12 @@
     machine's value. Adjust them for your environment; nothing else needs to
     change.
 
+    The build output directory is **not** hard-coded to any machine: it comes
+    from the -BuildRoot parameter, or from the SRTPROJ_BUILDROOT environment
+    variable. If neither is given, the script falls back to a 'build'
+    directory **next to** the repository (a sibling of the repo folder), so
+    that no build artifacts are ever produced inside the source tree.
+
     The project root defaults to the repository this script lives in, so the
     script keeps working wherever the repository is checked out.
 
@@ -24,7 +30,7 @@
 [CmdletBinding()]
 param(
     [string]$ProjectRoot = '',
-    [string]$BuildRoot   = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool',
+    [string]$BuildRoot   = $env:SRTPROJ_BUILDROOT,
     [string]$QtRoot      = 'C:\Qt\Qt5.9.6\5.9.6\msvc2015_64',
     [string]$Jom         = 'C:\Qt\Tools\QtCreator\bin\jom\jom.exe',
     [string]$VcVars      = 'C:\Program Files (x86)\Microsoft Visual Studio 14.0\VC\vcvarsall.bat'
@@ -34,6 +40,11 @@ $ErrorActionPreference = 'Stop'
 
 if (-not $ProjectRoot) {
     $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+}
+# 既没传 -BuildRoot、也没设环境变量 SRTPROJ_BUILDROOT 时：
+# 用仓库**旁边**（与仓库同级）的 build 目录，绝不在源码树里生成构建产物。
+if (-not $BuildRoot) {
+    $BuildRoot = Join-Path (Split-Path -Parent $ProjectRoot) 'build'
 }
 $Project = Join-Path $ProjectRoot 'SyncReplayTool.pro'
 

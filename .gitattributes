@@ -1,0 +1,22 @@
+# 统一换行与编码：仓库内一律 UTF-8，换行由 git 归一化，不受各机器 core.autocrlf 影响。
+* text=auto
+
+# C++ 源码：UTF-8（带 BOM 的保持带 BOM），入库存 UTF-8
+*.cpp text working-tree-encoding=UTF-8
+*.h   text working-tree-encoding=UTF-8
+
+# 文档：纯文本
+*.md  text
+
+# qmake 工程文件：强制 LF
+*.pro text eol=lf
+
+# PowerShell 脚本：强制 CRLF（Windows 记事本/PowerShell 友好）
+*.ps1 text eol=crlf
+
+# Shell 脚本：强制 LF
+*.sh  text eol=lf
+
+# 仓库自身的元数据文件：强制 LF（避免各机器 checkout 出 CRLF）
+.gitattributes text eol=lf
+LICENSE       text eol=lf

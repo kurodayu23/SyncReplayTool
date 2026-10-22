@@ -646,7 +646,7 @@ void SyncPanel::onToolMoreClicked(int row, int firstHidden)
         appendLogLine(QStringLiteral("WARN"), QObject::tr(kNoTool), 3);
         return;
     }
-    // 赵工原话：「同一个后缀配置了多个工具时，点击调用会弹出一个菜单让用户选择用哪一个工具打开。」
+    // 原始需求描述：「同一个后缀配置了多个工具时，点击调用会弹出一个菜单让用户选择用哪一个工具打开。」
     // 必须弹菜单，不许替他挑第一个。
     QMenu menu;
     for (int i = firstHidden; i < total; ++i) {

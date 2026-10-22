@@ -205,8 +205,8 @@ bool looksLikeWindowsPath(const QString &p)
 //
 // **先把机制说准**（2026-10-18 实测，Qt 5.9.6 QSettings INI，往返用真文件验证）：
 //
-//   Qt **写**的时候是会转义的。setValue("D:\AP\keys\id_rsa") 落盘得到的是
-//       keyPath=D:\\AP\\keys\\id_rsa
+//   Qt **写**的时候是会转义的。setValue("D:\path\to\keys\id_rsa") 落盘得到的是
+//       keyPath=D:\\path\\to\\keys\\id_rsa
 //   所以**程序自己存、自己读**这一轮往返是完好的 —— 程序写出来的文件不会被
 //   自己读坏。这一点一开始被判断反了，判据里也踩过（rawQt 应当是 1）。
 //
@@ -479,7 +479,7 @@ TargetConfig ConfigStore::loadTarget()
     // 所有**界面可填**的字段都要过一次自愈。原先只有 syncRules/remoteSubDir 走了
     // repairMojibake，host/user/keyPath/remoteRoot 这些同样是界面填进去、
     // 又被 saveTarget 原样写回来的值：坏值会一路躺在配置里，换多少个版本都
-    // 不会自己好，而且用户看到的是"连不上 10.20.30.41"（host 里的中文被吃成
+    // 不会自己好，而且用户看到的是"连不上 10.0.0.1"（host 里的中文被吃成
     // 一串错字），永远不会想到去检查配置文件。工具规则里的 exePath/argsTemplate
     // 同理，那两栏是用户从别的配置里抄过来的，最容易带进乱码。
     t.host              = repairMojibake(s->value(QStringLiteral("target/host")).toString());

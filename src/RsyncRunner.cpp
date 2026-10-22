@@ -199,10 +199,10 @@ bool subDirEscapesRoot(const QString &subDir)
 // 是**剥掉之后**的串，而越界校验查的是**原始**串 —— 两边看的不是同一个东西，
 // 于是 "~" 被当成一个普通目录段，正好抵消掉紧跟其后的那一个 ".."。
 //
-// 实测（2026-10-18，参数矩阵攻击）：远端目录填 `~/atk-sib`
-// （用户本意是家目录下的 atk-sib）→ 校验算出来 depth("~")=1、("..")=0、
-// ("atk-sib")=1，判定"没有越界"；而 remoteDir 剥掉 `~/` 之后实际拼出去的是
-// `../atk-sib`，文件真的落到了 /home/atk-sib/（家目录**之外**），
+// 实测（2026-10-18，参数矩阵攻击）：远端目录填 `~/app-data`
+// （用户本意是家目录下的 app-data）→ 校验算出来 depth("~")=1、("..")=0、
+// ("app-data")=1，判定"没有越界"；而 remoteDir 剥掉 `~/` 之后实际拼出去的是
+// `../app-data`，文件真的落到了 /home/app-data/（家目录**之外**），
 // 界面照样报"同步完成"。填 `~/../../` 两级则被正确拦住了。
 //
 // 剥 "~" 这件事只允许有一处实现：remoteDir() 和越界校验都调它。
@@ -882,7 +882,7 @@ int RsyncRunner::watchdogMs(int fileCount, qint64 totalBytes)
 //
 // 头一个是银河麒麟安全中心（应用执行控制 → 网络访问控制）拦下的连接。
 // 实测（麒麟 V11 2603）：
-//   ssh: connect to host 192.168.139.1 port 22: Operation not permitted
+//   ssh: connect to host 192.168.0.1 port 22: Operation not permitted
 // 通用建议是"ping 一下目标 IP、确认端口号、让对方放行防火墙"，三条一条都不对：
 //   - ping 得通（ICMP 不受这条控制管）
 //   - 端口号没错（同一时刻别的机器用同一个端口能连）
@@ -1023,7 +1023,7 @@ QString RsyncRunner::askpassDir()
 {
     // Windows OpenSSH 直接 CreateProcess 跑 SSH_ASKPASS 指向的那个 .bat，
     // 路径带空格时会被当成"程序名 + 参数"拆开：
-    //   'C:\Users\jss18\AppData\Local\Temp\srt' is not recognized ...
+    //   'C:\Users\<用户名>\AppData\Local\Temp\srt' is not recognized ...
     // 然后 ssh 拿不到口令，认证必然失败（255）。实测对照：同样内容放
     // %TEMP%\srt 密码测试\ 下必然失败，放 %TEMP%\srt_askpass_xxx.bat 下成功。
     //
@@ -1617,12 +1617,12 @@ QString RsyncRunner::remoteDir(const TargetConfig &target, const QString &subDir
     // 函数，两边看的串必须一致，否则 `~/../x` 会校验通过却写到 home 之外去。
     base = remoteRootWithoutTilde(base);
     // ~user/xxx 这种形式**必须明确拒绝**，不能悄悄放行。
-    // 实测：ssh "mkdir -p -- '~apuser/x'" 在远端 home 下建出的是一个字面量
-    // 名为 "~apuser" 的垃圾目录（单引号里 shell 不展开），而 rsync 那边
-    // 又把它当成 "~apuser" 用户的主目录，于是报
+    // 实测：ssh "mkdir -p -- '~appuser/x'" 在远端 home 下建出的是一个字面量
+    // 名为 "~appuser" 的垃圾目录（单引号里 shell 不展开），而 rsync 那边
+    // 又把它当成 "~appuser" 用户的主目录，于是报
     // "--files-from hostname is not the same as the transfer hostname"，
     // 这句话完全不像是在说用户输入的路径有问题，会把人带偏。
-    // 正确写法是填绝对路径（/home/apuser/x），或者干脆用 ~/ 走自己的家目录。
+    // 正确写法是填绝对路径（/home/appuser/x），或者干脆用 ~/ 走自己的家目录。
     if (base.startsWith(QLatin1Char('~')))
         return QStringLiteral("\x01~user\x01");   // 哨兵：调用方看到就报错
 

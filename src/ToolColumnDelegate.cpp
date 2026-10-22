@@ -405,7 +405,7 @@ bool ToolColumnDelegate::editorEvent(QEvent *event, QAbstractItemModel *model,
         // 不能顺手一起放行，否则双击会变成四次启动。
         if (press) {
             if (i == bc - 1 && total > 2)
-                // 「更多」：按赵工「同一个后缀配置了多个工具时，点击调用会弹出一个菜单
+                // 「更多」：按原始需求「同一个后缀配置了多个工具时，点击调用会弹出一个菜单
                 // 让用户选择用哪一个工具打开」。必须弹菜单，不许偷偷挑第一个。
                 emit toolMoreClicked(index.row(), bc - 1);
             else

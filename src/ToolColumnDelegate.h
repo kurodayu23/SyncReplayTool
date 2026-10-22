@@ -42,7 +42,7 @@ signals:
     // 点中了该行第 toolIndex 个工具按钮（toolIndex 从 0 起，按实际配置序）。
     void toolButtonClicked(int row, int toolIndex);
     // 点中了「更多」。view 必须弹 QMenu 让用户选，不许在 delegate 里替他挑第一个 ——
-    // 赵工原话：「点击调用会弹出一个菜单让用户选择用哪一个工具打开」。
+    // 原始需求描述：「点击调用会弹出一个菜单让用户选择用哪一个工具打开」。
     void toolMoreClicked(int row, int firstHiddenIndex);
 
 private slots:

@@ -19,7 +19,7 @@
 class Theme
 {
 public:
-    // ---- 主题模式定义与自适应色板（AP500BJ 官方工控深色标准为默认）----
+    // ---- 主题模式定义与自适应色板（工控深色标准为默认）----
     enum ThemeMode { DarkMode = 0, LightMode = 1 };
     static ThemeMode& modeRef()
     {
@@ -270,7 +270,7 @@ QWidget {
     font-size: 12px;
 }
 
-/* ---- AP500BJ 官方工控深色窗体（14px 柔和曲线感，对标图一） ---- */
+/* ---- 工控深色窗体（14px 柔和曲线感，对标图一） ---- */
 QWidget#rootFrame {
     background: #1e222b;
     border: 1px solid #374151;

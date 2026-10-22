@@ -37,7 +37,7 @@ struct SyncRule
 
 // 后缀 -> 本地可执行工具。argsTemplate 里用 {file} 代表选中文件的绝对路径。
 //
-// 赵工定稿：一个后缀可以配**多个**工具（spe 配「回放工具」+「分析工具」），
+// 定稿方案：一个后缀可以配**多个**工具（spe 配「回放工具」+「分析工具」），
 // 所以这里保留旧的单工具字段（兼容已存的 ini），同时用 tools 承载多条。
 // exePath/argsTemplate 非空时视为 tools 之前的那一条，读旧配置不会被丢掉。
 struct ToolRule

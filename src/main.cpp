@@ -69,17 +69,17 @@ struct LayerCase
 
 const LayerCase kLayerCases[] = {
     { "port-refused", 1,
-      "ssh: connect to host 192.168.139.1 port 65000: Connection refused\r\n"
+      "ssh: connect to host 192.168.0.1 port 65000: Connection refused\r\n"
       "rsync: connection unexpectedly closed (0 bytes received so far) [sender]\r\n"
       "rsync error: unexplained error (code 255) [sender=3.1.1]" },
 
     { "host-timeout", 1,
-      "ssh: connect to host 192.168.139.1 port 22: Connection timed out\r\n"
+      "ssh: connect to host 192.168.0.1 port 22: Connection timed out\r\n"
       "rsync: connection unexpectedly closed (0 bytes received so far) [sender]" },
 
     { "not-ssh-service", 1,
       "kex_exchange_identification: Connection closed by remote host\r\n"
-      "ssh: connect to host 192.168.139.1 port 22: Connection refused" },
+      "ssh: connect to host 192.168.0.1 port 22: Connection refused" },
 
     { "receiver-no-rsync", 3,
       "bash: line 1: rsync: command not found\r\n"
@@ -87,13 +87,13 @@ const LayerCase kLayerCases[] = {
       "rsync error: remote command not found (code 127) at io.c(226) [sender=3.1.1]" },
 
     { "receiver-disk-full", 3,
-      "rsync: [receiver] write failed on \"/home/apuser/tinyfs/big.spe\": "
+      "rsync: [receiver] write failed on \"/home/appuser/testfs/big.spe\": "
       "No space left on device (28)\r\n"
       "rsync error: error in file IO (code 11) at receiver.c(381) [receiver=3.2.7]\r\n"
       "rsync: [sender] write error: Broken pipe (32)" },
 
     { "receiver-readonly", 3,
-      "rsync: [receiver] mkstemp \"/home/apuser/rodir/.#hash#file.spe.bNEPzj\" failed: "
+      "rsync: [receiver] mkstemp \"/home/appuser/testdir/.#hash#file.spe.bNEPzj\" failed: "
       "Permission denied (13)" },
 
     { "receiver-mkdir", 3,
@@ -101,7 +101,7 @@ const LayerCase kLayerCases[] = {
       "rsync error: errors selecting input/output files, dirs (code 3)" },
 
     { "auth-badpassword", 2,
-      "apuser@192.168.139.1: Permission denied (publickey,password,keyboard-interactive).\r\n"
+      "appuser@192.168.0.1: Permission denied (publickey,password,keyboard-interactive).\r\n"
       "rsync error: unexplained error (code 255) [sender=3.1.1]" },
 
     { "auth-protected-key", 2,
@@ -118,7 +118,7 @@ const LayerCase kLayerCases[] = {
     { "local-missing-key", 0,
       "Warning: Identity file /home/tester/vmtest/nokey not accessible: No such file or directory." },
 
-    // 真机原文（麒麟 V11，0849 任务打出来的）：包里 bin/ssh 的 wrapper
+    // 真机原文（麒麟 V11 实机抓取）：包里 bin/ssh 的 wrapper
     // exec 的 ../libexec/ssh 不存在，rsync 连 ssh 都没拉起来。
     // 症状行 Broken pipe / connection unexpectedly closed 都在网络层，
     // 排在真因前面会把一次**本机文件缺失**带成"没连上目标电脑"。
@@ -687,8 +687,8 @@ int runSelfCheck()
     // ----------------------------------------------------------------
     // 远端根越界：校验必须用 remoteDir() 真正会用的那个串
     //
-    // 缺陷（2026-10-18 参数矩阵攻击）：远端目录填 `~/atk-sib` 通过校验、
-    // 文件真落到 /home/atk-sib/（家目录之外）、界面报"同步完成"。
+    // 缺陷（2026-10-18 参数矩阵攻击）：远端目录填 `~/app-data` 通过校验、
+    // 文件真落到 /home/app-data/（家目录之外）、界面报"同步完成"。
     // 原因是校验查的是用户填的**原始**串，而 "~" 被当成一个普通目录段，
     // 正好抵消掉紧跟其后的那一个 ".."。填 `~/../../` 两级则被正确拦住，
     // 所以只看"两级能不能拦住"是发现不了这个的。
@@ -698,12 +698,12 @@ int runSelfCheck()
     {
         const QString sTilde      = QStringLiteral("~");
         const QString sTildeSlash = QStringLiteral("~/");
-        // ~/atk-sib   → "atk-sib"，不越界（用户本意就是家目录下这一层）
-        const bool okHome      = !RsyncRunner::remoteRootEscapesHome(sTildeSlash + QStringLiteral("atk-sib"));
-        // ~/../atk-sib → "../atk-sib"，**越界**（这一条就是修复的那条）
-        const bool okEscape1   =  RsyncRunner::remoteRootEscapesHome(sTildeSlash + QStringLiteral("../atk-sib"));
-        // ~/../../atk-sib → "../../atk-sib"，越界（原来也能拦住）
-        const bool okEscape2   =  RsyncRunner::remoteRootEscapesHome(sTildeSlash + QStringLiteral("../../atk-sib"));
+        // ~/app-data   → "app-data"，不越界（用户本意就是家目录下这一层）
+        const bool okHome      = !RsyncRunner::remoteRootEscapesHome(sTildeSlash + QStringLiteral("app-data"));
+        // ~/../app-data → "../app-data"，**越界**（这一条就是修复的那条）
+        const bool okEscape1   =  RsyncRunner::remoteRootEscapesHome(sTildeSlash + QStringLiteral("../app-data"));
+        // ~/../../app-data → "../../app-data"，越界（原来也能拦住）
+        const bool okEscape2   =  RsyncRunner::remoteRootEscapesHome(sTildeSlash + QStringLiteral("../../app-data"));
 
         // 反向锁 1：~ 本身 == home 根，永远合法
         const bool okBare      = !RsyncRunner::remoteRootEscapesHome(sTilde)
@@ -715,8 +715,8 @@ int runSelfCheck()
         const bool okInner     = !RsyncRunner::subDirEscapesRoot(QStringLiteral("a/../b"))
                                  && !RsyncRunner::subDirEscapesRoot(QStringLiteral("vendor/spe"));
         // 反向锁 4：~user 这种形式必须原样保留，交给别处的显式拒绝处理
-        const bool okTildeUser = RsyncRunner::remoteRootWithoutTilde(QStringLiteral("~apuser/x"))
-                                 == QStringLiteral("~apuser/x");
+        const bool okTildeUser = RsyncRunner::remoteRootWithoutTilde(QStringLiteral("~appuser/x"))
+                                 == QStringLiteral("~appuser/x");
         // 反向锁 5：真正越界的几种写法仍然要拦住（cleanPath 会把 "/.." 归一成 "/"，
         // 所以判据必须靠逐段数深度，不能靠字符串比较）
         const bool okEscapes   =  RsyncRunner::subDirEscapesRoot(QStringLiteral("/.."))
@@ -780,7 +780,7 @@ int runSelfCheck()
                 + QStringLiteral("a b") + bs + wd)
             << (QStringLiteral("D:") + fs + QStringLiteral("work") + fs + QStringLiteral("data")
                 + fs + QStringLiteral("keys") + fs + wd)
-            << QStringLiteral("/home/apuser/.ssh/id_real");
+            << QStringLiteral("/home/appuser/.ssh/id_real");
 
         // 额外一个含中文的形态，只用于 Qt 自己写读的**反向锁**。
         const QString cjkShape = QStringLiteral("D:") + bs + QStringLiteral("data 目录")
@@ -887,7 +887,7 @@ int runSelfCheck()
         // 反向锁：好值一个都不能被误判，否则每次启动都弹一条"你的路径坏了"
         const bool okFlagGood = !ConfigStore::pathLooksCorrupted(QStringLiteral("C:/AP/x.spe"))
                                 && !ConfigStore::pathLooksCorrupted(QStringLiteral("C:\\Users\\x\\.ssh\\id_rsa"))
-                                && !ConfigStore::pathLooksCorrupted(QStringLiteral("/home/apuser/.ssh/id_real"))
+                                && !ConfigStore::pathLooksCorrupted(QStringLiteral("/home/appuser/.ssh/id_real"))
                                 && !ConfigStore::pathLooksCorrupted(QStringLiteral("~/keys/id_valid"))
                                 && !ConfigStore::pathLooksCorrupted(QStringLiteral("\\\\srv\\share\\a.spe"))
                                 && !ConfigStore::pathLooksCorrupted(QStringLiteral("D:"))
@@ -897,7 +897,7 @@ int runSelfCheck()
         // 而路径一点问题都没有。
         const bool okFlagLinuxColon = !ConfigStore::pathLooksCorrupted(QStringLiteral("/data/spe:2024"))
                                       && !ConfigStore::pathLooksCorrupted(QStringLiteral("/mnt/d:spe"))
-                                      && !ConfigStore::pathLooksCorrupted(QStringLiteral("/home/apuser/a:b:c"));
+                                      && !ConfigStore::pathLooksCorrupted(QStringLiteral("/home/appuser/a:b:c"));
         // 反向锁：Linux 路径里的反斜杠是**合法的文件名字符**，
         // 归一化把它换成正斜杠就等于把用户指向了另一个目录。
         // Windows 上规则相反 —— 那边必须换（Qt 读回时会掉字符）。
@@ -945,13 +945,13 @@ int runSelfCheck()
     // 而那等于把所有故障都指到同一个错误方向。
     {
         const QString badPort = QStringLiteral("ssh: Bad port '0'\r\n"
-                                               "ssh: connect to host 192.168.139.1: Connection refused");
-        const QString notDir  = QStringLiteral("rsync: [Receiver] mkdir \"/home/apuser/atka9/a9.spe\" failed: "
+                                               "ssh: connect to host 192.168.0.1: Connection refused");
+        const QString notDir  = QStringLiteral("rsync: [Receiver] mkdir \"/home/appuser/testa9/a9.spe\" failed: "
                                                "Not a directory (20)\r\n"
                                                "rsync error: errors selecting input/output files, dirs (code 3)");
-        const QString refused = QStringLiteral("ssh: connect to host 192.168.139.1 port 22: Connection refused");
+        const QString refused = QStringLiteral("ssh: connect to host 192.168.0.1 port 22: Connection refused");
         const QString noSpace = QStringLiteral("rsync: [receiver] write failed: No space left on device (28)");
-        const QString kylin   = QStringLiteral("ssh: connect to host 192.168.139.1 port 22: Operation not permitted");
+        const QString kylin   = QStringLiteral("ssh: connect to host 192.168.0.1 port 22: Operation not permitted");
 
         // 层：端口填错 -> 本机层（不是网络层）；路径填成文件 -> 接收端层
         const bool okLayerPort = (RsyncRunner::layerOf(badPort) == 0);
@@ -1057,15 +1057,15 @@ int runSelfCheck()
 
         // 反向锁 1/2：真实网络故障继续判网络层
         const bool okNetRefused = (RsyncRunner::layerOf(
-            QStringLiteral("ssh: connect to host 192.168.139.1 port 22: Connection refused")) == 1);
+            QStringLiteral("ssh: connect to host 192.168.0.1 port 22: Connection refused")) == 1);
         const bool okNetTimeout = (RsyncRunner::layerOf(
-            QStringLiteral("ssh: connect to host 192.168.139.1 port 22: Connection timed out\n"
+            QStringLiteral("ssh: connect to host 192.168.0.1 port 22: Connection timed out\n"
                            "rsync: connection unexpectedly closed (0 bytes received so far) [sender]")) == 1);
         // 反向锁 3：网络故障必须继续走通用建议（返回空串 = 不覆盖）
         const bool okNetGeneric = RsyncRunner::specialAdviceFor(
-            QStringLiteral("ssh: connect to host 192.168.139.1 port 22: Connection refused")).isEmpty()
+            QStringLiteral("ssh: connect to host 192.168.0.1 port 22: Connection refused")).isEmpty()
             && RsyncRunner::specialAdviceFor(
-            QStringLiteral("ssh: connect to host 192.168.139.1 port 22: Connection timed out")).isEmpty();
+            QStringLiteral("ssh: connect to host 192.168.0.1 port 22: Connection timed out")).isEmpty();
 
         // 反向锁 4：接收端层的真实故障不能被 ssh_config 这条误伤
         const bool okRecvStill = (RsyncRunner::layerOf(
