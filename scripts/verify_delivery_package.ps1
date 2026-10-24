@@ -43,6 +43,7 @@ param(
     [string[]]$FallbackRuntimeDirs = @('C:\Windows\System32'),
     [string]$PayloadDir = 'D:\AP\AP7000\ai-workspace\kylin-pkg\payload',
     [string]$BuildRoot = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\nightD',
+    [string]$KylinBinary = '',
     [string]$WorkRoot = 'D:\AP\AP7000\ai-workspace\pkg-preflight',
     [string]$ContainerImage = 'kylin-v10-real:latest',
     [string]$ContainerName = 'srt-nightd-verify',
@@ -73,6 +74,15 @@ if (-not $TarPath) { $TarPath = Join-Path $PackageDir '数据同步工具-麒麟
 
 $DeliverRoot = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool'
 $TrashCmd    = 'C:\Users\jss18\.minimax\bin\mavis-trash.cmd'
+
+# ---- 容器红线：这些容器不能碰（必须与 package-delivery.ps1 保持一致）----
+# 之前 verify 脚本自己**没有**这道红线：-ContainerName 可以传任意值，
+# 而脚本末尾会无条件 `docker rm -f $ContainerName`
+# ⇒ 可以把别人的验证容器删掉。这是"门禁脚本自己拆台"，且不可恢复。
+$ProtectedContainerNames = @(
+    'pkgacc11', 'srt-netfail', 'srtwin500', 'nightB-recv',
+    'srt-p0-verify', 'srt-p0-recv', 'srt-nighta-recv'
+)
 
 # 排除名单（必须与 package-delivery.ps1 保持一致）
 $ExcludedExeNames = @(
@@ -167,6 +177,10 @@ $report.zip = [ordered]@{
 Say ("   zip : {0}  {1} 字节" -f $zipItem.Name, $zipItem.Length)
 
 $hasTar = Test-Path -LiteralPath $TarPath
+# $verifyKylin 必须在 if ($hasTar) 之外先赋值：
+# tar 缺失时那段不会执行，而收尾的 Remove-Recyclable 会引用它
+# => 未定义变量报错、脚本崩在最后一步（原先总判定已经打印过 PASS 了）。
+$verifyKylin = Join-Path $WorkRoot 'verify-kylin'
 if ($hasTar) {
     $tarItem = Get-Item -LiteralPath $TarPath
     $report.tar = [ordered]@{
@@ -176,7 +190,7 @@ if ($hasTar) {
     }
     Say ("   tar : {0}  {1} 字节" -f $tarItem.Name, $tarItem.Length)
 } else {
-    Say "   tar : 缺失（$TarPath）—— 麒麟侧闸门将标记为 SKIP" -ForegroundColor Yellow
+    Say "   tar : 缺失（$TarPath）—— 麒麟侧三道闸门判 FAIL（缺包不等于通过）" -ForegroundColor Red
 }
 
 # =============================================================================
@@ -237,10 +251,27 @@ try {
         $contentOk = $true
         $entrySha = ''
         $srcSha = ''
+        $note = ''
         if ($IntentionallyModified.ContainsKey($e.FullName)) {
-            # 打包脚本**有意**改过的文件（例如启动器归一化）：不比内容，
-            # 只记录理由，并单独确认改完仍然指向包内真实存在的 exe。
-            $contentOk = $true
+            # 打包脚本**有意**改过的文件（例如启动器归一化）：内容本来就与源不同，
+            # 不能拿源做 sha256 对账 —— 改成**内容断言**：
+            #   启动器必须指向包内唯一存在的 SyncReplayTool.exe，
+            #   且不得引用任何排除名单里的 exe（SyncReplayTool2.exe 那个原始事故）。
+            # 断言不成立时**判 FAIL**：客户双击的就是这个文件。
+            $es = $e.Open()
+            try {
+                $ms = New-Object System.IO.MemoryStream
+                $es.CopyTo($ms)
+                $raw = $ms.ToArray()
+            } finally { $es.Dispose() }
+            $txt = [System.Text.Encoding]::UTF8.GetString($raw)
+            $bad = @($ExcludedExeNames | Where-Object { $txt -match [regex]::Escape($_) })
+            $wantsReal = [bool]($txt -match 'start\s+""\s+"SyncReplayTool\.exe"')
+            $contentOk = ($bad.Count -eq 0) -and $wantsReal
+            $badTxt = $(if ($bad.Count -gt 0) { $bad -join ',' } else { '无' })
+            $note = "启动器断言：指向 SyncReplayTool.exe=$wantsReal；引用排除名单=$badTxt"
+            $entrySha = ([BitConverter]::ToString(
+                [System.Security.Cryptography.SHA256]::Create().ComputeHash($raw))).Replace('-', '')
         } else {
             $es = $e.Open()
             try {
@@ -264,16 +295,21 @@ try {
             content_ok = $contentOk
             entry_sha256 = $entrySha
             src_sha256   = $srcSha
-            note        = $(if ($IntentionallyModified.ContainsKey($e.FullName)) { $IntentionallyModified[$e.FullName] } else { '' })
+            note        = $note
         }
     }
 } finally { $zip.Dispose() }
 
-if ($gate1Win.failed -gt 0) {
-    Say ("   FAIL：{0} 个文件没过（mtime 旧于源 / 内容与源不一致）" -f $gate1Win.failed) -ForegroundColor Red
+if ($gate1Win.failed -gt 0 -or $gate1Win.no_source -gt 0) {
+    Say ("   FAIL：{0} 个文件没过（mtime 旧于源 / 内容与源不一致），{1} 个包内条目在源里找不到对应文件" -f `
+        $gate1Win.failed, $gate1Win.no_source) -ForegroundColor Red
     foreach ($c in $gate1Win.checks | Where-Object { $_.status -eq 'FAIL' }) {
         Say ("     {0}  包内 {1}  源 {2}  Δ{3}s  mtime_ok={4} content_ok={5}" -f `
             $c.entry, $c.entry_mtime, $c.src_mtime, $c.delta_sec, $c.mtime_ok, $c.content_ok)
+        if ($c.note) { Say ("       {0}" -f $c.note) }
+    }
+    foreach ($c in $gate1Win.checks | Where-Object { $_.status -eq 'NO_SOURCE' }) {
+        Say ("     {0}  包里多出来的条目（源里没有对应文件）" -f $c.entry) -ForegroundColor Red
     }
 } else {
     Say ("   PASS：{0}/{1} 个文件不旧于源且内容与源逐字节一致（{2} 个无对照源，{3} 个为打包脚本有意改写）" -f `
@@ -426,6 +462,13 @@ find . -type f -print | LC_ALL=C sort | while IFS= read -r f; do
   fi
 done
 cp -f "$ROOT/SyncReplayTool" "$OUTDIR/SyncReplayTool" 2>/dev/null || true
+# 包内手册的 sha256（容器里解包后算，宿主 tar.exe 处理不了这个包的中文路径与符号链接）
+M=$(find "$ROOT" -maxdepth 1 -type f -name '*.md' | head -1)
+if [ -n "$M" ]; then
+  echo "MANUAL|$(b64 "$(sha256sum "$M" | cut -d' ' -f1)")|$(b64 "$(basename "$M")")"
+else
+  echo "MANUAL||"
+fi
 echo "DONE"
 '@
 
@@ -441,6 +484,17 @@ echo "DONE"
     # 只挂**只读**的目录（可写目录挂载会被本机安全策略拦下）；
     # 抽出来的二进制放在容器自己的 /out，再用 docker cp 拷回宿主。
     $selfB64 = To-B64 '自检.sh'
+    # 容器红线：绝不能碰受保护容器（否则末尾的 `docker rm -f` 会把别人的容器删掉）
+    if ($ContainerName -in $ProtectedContainerNames) {
+        throw "拒绝使用受保护容器名：$ContainerName"
+    }
+    # 预清理同名残留（上次被 Ctrl-C / 超时打断留下的）：
+    # 否则 docker create 永远失败、门禁跑不起来、报告里也不会有任何记录。
+    $stale = (& docker ps -a --filter "name=^/$ContainerName$" --format '{{.Names}}' 2>$null)
+    if ($stale) {
+        Say ("   清理同名残留容器 {0}" -f $ContainerName)
+        & docker rm -f $ContainerName | Out-Null
+    }
     docker create --name $ContainerName --entrypoint /bin/bash `
         -v "${TarPath}:/pkg.tgz:ro" `
         -v "${PayloadDir}:/payload:ro" `
@@ -461,6 +515,9 @@ echo "DONE"
         $tarEntries = @()
         $payloadChecks = @()
         $rootName = ''
+        # 必须**先**初始化：下面解析容器回传的 MANUAL| 行时会写这两个变量
+        $manualTarSha = ''
+        $manualTarName = ''
         foreach ($line in $inspectLog) {
             $s = [string]$line
             if ($s -like 'ENTRY|*') {
@@ -487,6 +544,10 @@ echo "DONE"
                 }
             } elseif ($s -like 'ROOT|*') {
                 $rootName = From-B64 ($s -split '\|')[1]
+            } elseif ($s -like 'MANUAL|*') {
+                $pm = $s -split '\|'
+                $manualTarSha = (From-B64 $pm[1])
+                $manualTarName = (From-B64 $pm[2])
             }
         }
         $report.tar.entries = $gate3Tar.entries
@@ -545,14 +606,69 @@ echo "DONE"
         if ($gate3Tar.dangling -gt 0) {
             Say ("     FAIL：包内有 {0} 个悬空符号链接" -f $gate3Tar.dangling) -ForegroundColor Red
         }
+
+        # ---- 麒麟主程序的**字节对账**（原来只有 mtime 与中文字符串两条判据）----
+        # 容器已经把包内 ELF 抽到 $verifyKylin\SyncReplayTool，
+        # 这里与"打包时用的那一份"比 sha256 —— 别的 ELF 混进包会被当场抓住。
+        $tarElf = Join-Path $verifyKylin 'SyncReplayTool'
+        if (Test-Path -LiteralPath $tarElf) {
+            $tarElfSha = (Get-FileHash -LiteralPath $tarElf -Algorithm SHA256).Hash
+            $gate3Tar.elf_sha256 = $tarElfSha
+            if ($KylinBinary -and (Test-Path -LiteralPath $KylinBinary)) {
+                $expectElf = (Get-FileHash -LiteralPath $KylinBinary -Algorithm SHA256).Hash
+                $gate3Tar.elf_expected_sha256 = $expectElf
+                if ($tarElfSha -eq $expectElf) {
+                    Say ("   麒麟主程序字节对账：一致（{0}…）" -f $tarElfSha.Substring(0, 16))
+                } else {
+                    $gate3Tar.status = 'FAIL'
+                    Say '   FAIL：包内 SyncReplayTool 与交付本体不是同一份' -ForegroundColor Red
+                    Say ("        包内 {0}" -f $tarElfSha) -ForegroundColor Red
+                    Say ("        期望 {0}" -f $expectElf) -ForegroundColor Red
+                }
+            } else {
+                Say ("   麒麟主程序 sha256：{0}…（未提供 -KylinBinary，跳过对账）" -f $tarElfSha.Substring(0, 16))
+            }
+        } else {
+            $gate3Tar.status = 'FAIL'
+            Say '   FAIL：容器没有抽出包内 SyncReplayTool' -ForegroundColor Red
+        }
+
+        # ---- 包内手册 vs 源码树手册：逐字节 ----
+        # 麒麟包里的手册是打包时用 awk 重写出来的（路径替换），
+        # 两边的内容必须仍然是**同一份**，否则客户拿到的说明书会与源码树脱节。
+        # （sha256 由容器算好回传：宿主 tar.exe 处理不了这个包的中文路径与符号链接。）
+        $repoManual = Get-ChildItem -LiteralPath $SrcRoot -File -Filter '*.md' |
+                      Where-Object { $_.Name -like '*步骤*' -or $_.Name -like '*注意事项*' } | Select-Object -First 1
+        if ($repoManual -and $manualTarSha) {
+            $b = (Get-FileHash -LiteralPath $repoManual.FullName -Algorithm SHA256).Hash
+            $gate3Tar.manual_sha256 = $manualTarSha
+            $gate3Tar.manual_source_sha256 = $b
+            if ($manualTarSha -eq $b) {
+                Say '   包内手册与源码树手册逐字节一致'
+            } else {
+                $gate3Tar.status = 'FAIL'
+                Say '   FAIL：包内手册与源码树手册不是同一份' -ForegroundColor Red
+                Say ("        包内 {0}" -f $manualTarSha) -ForegroundColor Red
+                Say ("        源码 {0}" -f $b) -ForegroundColor Red
+            }
+        }
     }
+}
+
+if (-not $hasTar) {
+    # 缺 tar 必须是 FAIL：原先三个麒麟闸门停在 SKIP，而汇总只把 FAIL 当失败
+    # => 一个**根本没有麒麟包**的交付目录也能拿到"三道闸门全 PASS"。
+    $gate1Tar.status = 'FAIL'
+    $gate2Tar.status = 'FAIL'
+    $gate3Tar.status = 'FAIL'
+    Say '   FAIL：麒麟包缺失，麒麟侧三道闸门判 FAIL（缺包 ≠ 通过）' -ForegroundColor Red
 }
 
 # =============================================================================
 # 汇总
 # =============================================================================
 
-$gate1Status = if (($gate1Win.failed + $gate1Tar.failed) -gt 0) { 'FAIL' } else { 'PASS' }
+$gate1Status = if (($gate1Win.failed + $gate1Win.no_source + $gate1Tar.failed) -gt 0) { 'FAIL' } else { 'PASS' }
 $gate2Status = if (($gate2Win.rc -ne 0) -or ($gate2Tar.status -eq 'FAIL')) { 'FAIL' } else { 'PASS' }
 $gate3Status = if (($gate3Win.missing.Count -gt 0) -or ($gate3Win.probe_hits.Count -gt 0) -or ($gate3Tar.status -eq 'FAIL')) { 'FAIL' } else { 'PASS' }
 

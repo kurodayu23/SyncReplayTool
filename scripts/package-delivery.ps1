@@ -176,7 +176,7 @@ $ForbiddenBuildRoots = @(
 )
 
 # ---- 受保护输出目录：正式包不能被预演覆盖 ----
-$ForbiddenOutDirs = @("$DeliverRoot\交付包-新")
+$ForbiddenOutDirs = @("$DeliverRoot\交付包-新", "$DeliverRoot\交付包-正式版-20261025")
 
 # ---- 容器红线：这些容器/端口不能碰 ----
 $ProtectedContainerNames = @(
