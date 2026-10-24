@@ -2653,7 +2653,21 @@ void SyncPanel::updateAutoSyncStatusUi()
 
 void SyncPanel::autoSyncScheduleNext(bool fromNow)
 {
-    const QDateTime now = QDateTime::currentDateTime();
+    // 排程基准**截到整秒**（与 autoSyncMarkRunStarted 同一口径）。
+    //
+    // 为什么这里也要截：fromNow=true 的两条路径（用户点「保存设置」、刚勾上「自动同步」）
+    // 算的是 now + interval，now 带毫秒 ⇒ 到点时刻也带毫秒。
+    // 心跳定时器的格子锚在**定时器启动时刻**上，而「保存设置」这条路**不会**重启定时器
+    // ⇒ 锚点与 now 无关 ⇒ 某一拍可能落在名义到点时刻之前几毫秒 ⇒ 那一拍判「未到点」跳过
+    // ⇒ 保存设置后的**第一轮**晚一个心跳（最坏 hb 秒，hb = clamp(N/2, 5, 60)）。
+    //
+    // 截到整秒后，名义到点时刻必然 ≤ 那一拍的实际唤醒时刻 ⇒ 第一轮也准时。
+    // 间隔最多提前不到 1 秒，误差在 1 秒以内。
+    //
+    // 截断不影响「时钟被往回调」的判定：m_autoSyncLastRunAt 本身就是整秒，
+    // `lastRunAt > now` 的比较结果不因截断而改变。
+    const QDateTime nowRaw = QDateTime::currentDateTime();
+    const QDateTime now = nowRaw.addMSecs(-nowRaw.time().msec());
     // 每天定点模式：与间隔模式**同构**（同一个 lastRunAt 落盘键、
     // 同一套"关机期间错过 → 开机补跑"语义），只是把
     // "lastRunAt + interval"换成"lastRunAt 之后的第一个 HH:mm"。

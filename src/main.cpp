@@ -912,7 +912,15 @@ int runSelfCheck()
             const bool okNoCatchUp = nxt.isValid()
                 && nxt > QDateTime::currentDateTime().addSecs(30);
 
-            const bool ok5 = okEmpty && okMax && okRt && okWholeSec && okNoCatchUp;
+            // 到点时刻必须落在**整秒**上。
+            //
+            // 这是「排程基准截整秒」这条规则的判据：applyFromSettings 走的是
+            // fromNow=true 那条路径，如果这里的基准还带毫秒，某一拍就可能落在
+            // 名义到点时刻之前几毫秒 ⇒ 那一拍判「未到点」跳过 ⇒ 第一轮晚一个心跳。
+            // 把 autoSyncScheduleNext 的截断改回去，上面几条照样全绿，只有这条会红。
+            const bool okNextWholeSec = nxt.isValid() && nxt.time().msec() == 0;
+
+            const bool ok5 = okEmpty && okMax && okRt && okWholeSec && okNextWholeSec && okNoCatchUp;
             if (!ok5) ++bad;
             out << (ok5 ? "PASS\t" : "FAIL\t") << "auto-sync-interval-and-persist"
                 << "\temptyField=" << emptyGot
@@ -920,6 +928,7 @@ int runSelfCheck()
                 << "\tmaxOk=" << (okMax ? 1 : 0)
                 << "\tlastRunRoundTrip=" << (okRt ? 1 : 0)
                 << "\tlastRunWholeSec=" << (okWholeSec ? 1 : 0)
+                << "\tnextWholeSec=" << (okNextWholeSec ? 1 : 0)
                 << "\tnoCatchUpAfterSave=" << (okNoCatchUp ? 1 : 0)
                 << "\n";
         }
