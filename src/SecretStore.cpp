@@ -347,7 +347,10 @@ QByteArray privateKeyMaterial()
 
     QFile in(keyPath);
     if (in.open(QIODevice::ReadOnly)) {
-        cached = in.readAll().trimmed();
+        // 密钥材料是 32 个**随机二进制字节**，不能先 trim 再判长度。
+        // 判定的口径统一放在 keyMaterialFromBytes() 里（两个平台同一份），
+        // 自检也直接调它 —— 免得「判据说一套、读路径做另一套」。
+        cached = SecretStore::keyMaterialFromBytes(in.readAll());
         in.close();
     }
     if (cached.size() == 32) {
@@ -599,3 +602,21 @@ QString SecretStore::unprotect(const QString &stored)
 }
 
 #endif
+
+// ---------------------------------------------------------------------------
+// 从磁盘读回来的字节里认出「这就是密钥材料」。
+//
+// 见 SecretStore.h 里的说明：这里**按字节原样**判 32 字节，
+// 只有在长度不对时才退一步按「早期可能写下的文本形态」去掉首尾空白再试。
+//
+// 为什么单独成函数（而不是就地 trim）：自检要能**直接**调它做阳性/阴性对照；
+// 而且这段逻辑两个平台都要对，不能各写一份。
+QByteArray SecretStore::keyMaterialFromBytes(const QByteArray &raw)
+{
+    if (raw.size() == 32)
+        return raw;                       // 正常形态：32 个随机字节，原样收下
+    const QByteArray legacy = raw.trimmed();
+    if (legacy.size() == 32)
+        return legacy;                    // 早期文本形态的兼容（去空白后正好 32 字节）
+    return QByteArray();                  // 不是密钥材料
+}

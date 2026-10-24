@@ -1,4 +1,5 @@
 ﻿#include <QApplication>
+#include <QByteArray>
 #include <QIcon>
 #include <QMetaType>
 #include <QCommandLineParser>
@@ -2515,6 +2516,29 @@ int runSelfCheck()
                 << "\tskippedText=" << skippedText << "\tcanceledText=" << canceledText << "\n";
             ++bad;
         }
+    }
+
+    // ---- 判据：密钥材料必须**按字节原样**认出，不能先 trim 再判长度 ----
+    //
+    // 密钥文件里躺的是 32 个随机二进制字节。首/尾各有约 2.7% 的概率
+    // 恰好是空白字节（0x09~0x0D / 0x20 / 0xA0），任意一端命中时
+    // 「先 trim() 再判长度」会把长度削到 31 ⇒ 被误判成「密钥损坏」
+    // ⇒ 重新生成并覆盖 ⇒ ini 里已存的密文口令当场解不开。
+    // 这里用「首字节是空格、尾字节是换行」把那个边界钉死。
+    {
+        QByteArray edge(32, 'A');
+        edge[0]  = char(0x20);   // 空格
+        edge[31] = char(0x0A);   // 换行
+        const QByteArray got = SecretStore::keyMaterialFromBytes(edge);
+        const bool okEdge = (got.size() == 32) && (got == edge);
+        // 反向：真的只有 31 字节时必须**不认**（否则会拿短材料去加密）。
+        const bool okShort = SecretStore::keyMaterialFromBytes(QByteArray(31, 'A')).isEmpty();
+        const bool ok = okEdge && okShort;
+        if (!ok) ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "secret-key-material-bytes"
+            << "\tedgeKept=" << (okEdge ? 1 : 0)
+            << "\tshortRejected=" << (okShort ? 1 : 0)
+            << "\n";
     }
 
     // 口令加密后端**此刻**能不能用。

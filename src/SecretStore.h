@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include <QByteArray>
 #include <QString>
 
 // 密码持久化。
@@ -36,5 +37,19 @@ bool    cryptoBackendAvailable();
 
 // 界面提示里用的加密方式名称，避免在 Linux 上显示"DPAPI"这种假信息。
 QString backendName();
+
+// 从磁盘读回来的字节里认出「这就是密钥材料」。
+//
+// 返回空 QByteArray = 不是密钥材料（调用方应当重新生成一份新的）。
+//
+// 为什么必须单独抽成函数、而且**不能先 trim 再判长度**：
+// 密钥材料是 32 个**随机二进制字节**（不是文本）。随机字节的首/尾
+// 各有约 2.7% 的概率恰好是空白字节（QChar::isSpace 认的那几个：
+// 0x09~0x0D、0x20、0xA0），任意一端命中时先 trim() 就会把长度削到 31
+// ⇒ 被误判成「密钥损坏」⇒ 重新生成并覆盖 ⇒ ini 里已存的密文口令
+// **当场解不开**（用户得重新输一遍密码）。约 5% 的机器每次启动都会抽中。
+//
+// 这个判定必须**按字节原样**做，所以它得有自己的、可被自检直接调用的入口。
+QByteArray keyMaterialFromBytes(const QByteArray &raw);
 
 } // namespace SecretStore
