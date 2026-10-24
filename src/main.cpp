@@ -11,13 +11,21 @@
 #include <QThread>
 #include <QEventLoop>
 #include <QElapsedTimer>
+#include <QLineEdit>
+#include <QTimeEdit>
+#include <QRadioButton>
 #include <QProcess>
 #include <QFontMetrics>
 #include <QStandardPaths>
+#include <QLockFile>
+#include <QMessageBox>
+#include <QGuiApplication>
 #include "MainWindow.h"
 #include "SyncPanel.h"
+#include "SettingsDialog.h"
 #include "RsyncRunner.h"
 #include "ConfigStore.h"
+#include "AutoSyncScheduler.h"
 #include "SecretStore.h"
 #include "Theme.h"
 #include "Model.h"
@@ -80,6 +88,16 @@ const LayerCase kLayerCases[] = {
     { "not-ssh-service", 1,
       "kex_exchange_identification: Connection closed by remote host\r\n"
       "ssh: connect to host 192.168.0.1 port 22: Connection refused" },
+
+    // F-1：远端同名非空目录挡住了源文件。rsync 这条报错不带 [sender] 前缀，
+    // 措辞也跟表里别的接收端规则都不同 —— 原来归因落到兜底分支、打成「未能归因」。
+    //
+    // 期望归到**专用的第 6 层**（LayerReceiverNameConflict = 6），不是笼统的接收端层：
+    // 这一类的下一步只有一件事（把远端那个挡路的同名目录删掉或改名），
+    // 接收端层自带的那套建议（查目录是否存在、写权限、磁盘空间）一条都不沾边。
+    { "remote-name-conflict", 6,
+      "could not make way for new regular file: probe.spe\r\n"
+      "rsync error: some files/attrs were not transferred (see previous errors) (code 23) at main.c(1183) [sender=3.1.1]" },
 
     { "receiver-no-rsync", 3,
       "bash: line 1: rsync: command not found\r\n"
@@ -535,12 +553,15 @@ int runSelfCheck()
     // 「改了文件不重传」反复出现，界面上却没有任何地方解释为什么。
     //
     // 正向：勾掉 -> 落盘 -> 读回来是 false；勾上 -> 读回来是 true。
-    // 反向锁 2 条：
-    //   1) 老配置（没有这个键）必须读成 true。改成 false 等于「升级即行为变更」：
-    //      老用户什么都没干，突然开始覆盖远端同名文件。
+    // 反向锁 3 条：
+    //   1) 全新配置（没有这个键）必须读成 **false**。
+    //      需求 2「只同步新增**或修改**的文件」要求默认走 --checksum：
+    //      勾上 = --ignore-existing = 远端同名文件整个跳过 = 改过的文件永远传不过去。
+    //      手册步骤 5「不勾（默认）」也是这么写的，代码必须与之一致。
     //   2) 面板上取消勾选必须真的落盘（只测 ConfigStore 读写往返的话，
     //      把 SyncPanel 里那行 connect 删掉，本项照样全绿）。
-    // 变异锁：把 loadOnlyNewFiles() 的默认 return true 改成 false，反向锁 1 立刻红。
+    //   3) 全新机器上界面上的勾选框必须**真的是不勾**（构造时读配置那一行）。
+    // 变异锁：把 loadOnlyNewFiles() 的默认 return false 改成 true，反向锁 1/3 立刻红。
     {
         QTemporaryDir sandbox;
         const QByteArray oldDir = qgetenv("SRT_CONFIG_DIR");
@@ -562,8 +583,8 @@ int runSelfCheck()
             probeIni.remove(QStringLiteral("sync/onlyNewFiles"));
             probeIni.sync();
 
-            // 反向锁 1：老配置必须是 true
-            const bool defTrue = ConfigStore::loadOnlyNewFiles();
+            // 反向锁 1：全新配置（没有这个键）必须读成 false
+            const bool defFalse = !ConfigStore::loadOnlyNewFiles();
             // 正向 1：落 false 读得回 false
             ConfigStore::saveOnlyNewFiles(false);
             const bool gotFalse = !ConfigStore::loadOnlyNewFiles();
@@ -578,28 +599,587 @@ int runSelfCheck()
             // toggled）删掉，本项照样全绿 —— 那正是这个缺陷当初能溜过去的原因。
             bool panelReads = false, panelWrites = false;
             {
-                ConfigStore::saveOnlyNewFiles(false);
-                SyncPanel probe;               // 构造时读配置，应当读成「没勾选」
-                panelReads = !probe.onlyNewForTest();
-                probe.setOnlyNewForTest(true); // 切换，应当立刻落盘
-                panelWrites = ConfigStore::loadOnlyNewFiles();
+                ConfigStore::saveOnlyNewFiles(true);
+                SyncPanel probe;                // 构造时读配置，应当读成「勾上」
+                panelReads = probe.onlyNewForTest();
+                probe.setOnlyNewForTest(false); // 切换，应当立刻落盘
+                panelWrites = !ConfigStore::loadOnlyNewFiles();
             }
 
-            const bool ok = defTrue && gotFalse && gotTrue && panelReads && panelWrites;
+            // 反向锁 3：全新机器（配置里没有这个键）上，界面上的勾选框必须不勾。
+            // 只测 ConfigStore 的话，把 SyncPanel 构造里那行 setChecked 删掉本项照样全绿。
+            bool freshPanelUnchecked = false;
+            {
+                QSettings freshIni(sandbox.filePath(QStringLiteral("SyncReplayTool.ini")),
+                                   QSettings::IniFormat);
+                freshIni.setIniCodec("UTF-8");
+                freshIni.remove(QStringLiteral("sync/onlyNewFiles"));
+                freshIni.sync();
+                SyncPanel fresh;
+                freshPanelUnchecked = !fresh.onlyNewForTest();
+            }
+
+            const bool ok = defFalse && gotFalse && gotTrue && panelReads && panelWrites
+                            && freshPanelUnchecked;
             if (!ok)
                 ++bad;
             out << (ok ? "PASS\t" : "FAIL\t") << "only-new-persist"
-                << "\tdefaultTrue=" << (defTrue ? 1 : 0)
+                << "\tdefaultFalse=" << (defFalse ? 1 : 0)
+                << "\tfreshPanelUnchecked=" << (freshPanelUnchecked ? 1 : 0)
                 << "\tfalseRoundTrip=" << (gotFalse ? 1 : 0)
                 << "\ttrueRoundTrip=" << (gotTrue ? 1 : 0)
                 << "\tpanelReadsCfg=" << (panelReads ? 1 : 0)
                 << "\tpanelWritesCfg=" << (panelWrites ? 1 : 0)
                 << "\n";
 
+            // 自动同步状态与周期的持久化验证
+            const bool asDefFalse = !ConfigStore::loadAutoSyncEnabled();
+            ConfigStore::saveAutoSyncEnabled(true);
+            const bool asGotTrue = ConfigStore::loadAutoSyncEnabled();
+            ConfigStore::saveAutoSyncEnabled(false);
+            const bool asGotFalse = !ConfigStore::loadAutoSyncEnabled();
+
+            const int asDefInterval = ConfigStore::loadAutoSyncInterval(); // 默认 30
+            ConfigStore::saveAutoSyncInterval(60);
+            const bool asGotInterval = (ConfigStore::loadAutoSyncInterval() == 60);
+            ConfigStore::saveAutoSyncInterval(1); // 越下限截断为 10
+            const bool asMinLimit = (ConfigStore::loadAutoSyncInterval() == 10);
+            ConfigStore::saveAutoSyncInterval(999999); // 越上限截断为 86400
+            const bool asMaxLimit = (ConfigStore::loadAutoSyncInterval() == 86400);
+            ConfigStore::saveAutoSyncInterval(30);
+
+            bool asPanelReads = false, asPanelWrites = false;
+            {
+                ConfigStore::saveAutoSyncEnabled(true);
+                SyncPanel probeAs;
+                asPanelReads = probeAs.autoSyncForTest();
+                probeAs.setAutoSyncForTest(false);
+                asPanelWrites = !ConfigStore::loadAutoSyncEnabled();
+            }
+
+            const bool okAs = asDefFalse && asGotTrue && asGotFalse && (asDefInterval == 30)
+                              && asGotInterval && asMinLimit && asMaxLimit && asPanelReads && asPanelWrites;
+            if (!okAs)
+                ++bad;
+            out << (okAs ? "PASS\t" : "FAIL\t") << "auto-sync-persist"
+                << "\tdefaultFalse=" << (asDefFalse ? 1 : 0)
+                << "\ttrueRoundTrip=" << (asGotTrue ? 1 : 0)
+                << "\tintervalLimit=" << (asMinLimit && asMaxLimit ? 1 : 0)
+                << "\tpanelReadsCfg=" << (asPanelReads ? 1 : 0)
+                << "\tpanelWritesCfg=" << (asPanelWrites ? 1 : 0)
+                << "\n";
+
             if (oldDir.isEmpty())
                 qunsetenv("SRT_CONFIG_DIR");
             else
                 qputenv("SRT_CONFIG_DIR", oldDir);
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // 自动同步（需求 10）：调度语义 + 心跳跟随 + 触发链路 + 去重 + 边界
+    //
+    // 为什么必须加这一组：原有 auto-sync-persist 只验「配置写进去能读回来」。
+    // 把 SyncPanel::autoSyncFire() 整段删掉、或把 heartbeatMsFor()
+    // 改成 return 1000，那一条照样全绿 —— 排程逻辑一条都没被盖到。
+    //
+    // 下面每条都调用**产品自己那份实现**：
+    //   - 调度语义 → AutoSyncScheduler（纯函数，产品类）
+    //   - 心跳跟随 → SyncPanel::autoSyncHeartbeatMsForTest()
+    //   - 触发链路 → SyncPanel::triggerAutoSyncTickForTest()（产品自己的心跳入口）
+    //   - 去重     → SyncPanel::forceAutoSyncFireForTest()
+    // 不另写影子算法 —— 影子算法会和产品实现漂移，判据变假绿灯。
+    {
+        // ---- 判据 1：纯调度语义 ----
+        {
+            const QDateTime nowRef = QDateTime::currentDateTime();
+            const QDateTime nextFromNow = AutoSyncScheduler::nextRunAt(60, nowRef, QDateTime());
+            const bool okNoLast = (nextFromNow == nowRef.addSecs(60));
+
+            const QDateTime last = nowRef.addSecs(-300);
+            const QDateTime nextFromLast = AutoSyncScheduler::nextRunAt(60, nowRef, last);
+            // 必须是 last+interval（绝对时间点），不能是 now+interval
+            const bool okAbsolute = (nextFromLast == last.addSecs(60));
+
+            // fromNow=true：忽略 lastRunAt，一律 now+interval
+            // （用户点「保存设置」后要的是这个，不是"立刻补跑"）
+            const QDateTime nextForced = AutoSyncScheduler::nextRunAt(60, nowRef, last, true);
+            const bool okFromNow = (nextForced == nowRef.addSecs(60));
+
+            // 跨天：23:59 + 120s -> 次日 00:01
+            const QDateTime lateNight = QDateTime(QDate(2026, 10, 22), QTime(23, 59, 0));
+            const QDateTime nextDay = AutoSyncScheduler::nextRunAt(120, lateNight, lateNight);
+            const bool okCrossDay = (nextDay.date() == QDate(2026, 10, 23)
+                                  && nextDay.time() == QTime(0, 1, 0));
+
+            const bool okHeartbeat = (AutoSyncScheduler::heartbeatMsFor(10) == 5000
+                                   && AutoSyncScheduler::heartbeatMsFor(60) == 30000
+                                   && AutoSyncScheduler::heartbeatMsFor(86400) == 60000);
+            // 反向锁：心跳必须随间隔单调变化
+            const bool okHbMono = (AutoSyncScheduler::heartbeatMsFor(10)
+                                 < AutoSyncScheduler::heartbeatMsFor(86400));
+
+            const bool okClamp = (AutoSyncScheduler::clampIntervalSec(1)
+                                   == AutoSyncScheduler::MinIntervalSec)
+                               && (AutoSyncScheduler::clampIntervalSec(999999)
+                                   == AutoSyncScheduler::MaxIntervalSec);
+            const bool okDue = AutoSyncScheduler::isDue(nowRef, nowRef)
+                            && !AutoSyncScheduler::isDue(nowRef, nowRef.addMSecs(1));
+            // 反向锁：无效 next 必须判成"没到点"
+            const bool okDueInvalid = !AutoSyncScheduler::isDue(nowRef, QDateTime());
+
+            // 系统时间被往回调（lastRunAt 在将来）→ 不能静默停摆，
+            // 必须按"从现在重新开始一个周期"处理。
+            const QDateTime future = nowRef.addSecs(3600);
+            const QDateTime nextAfterRollback = AutoSyncScheduler::nextRunAt(60, nowRef, future);
+            const bool okRollback = (nextAfterRollback == nowRef.addSecs(60));
+
+            const bool ok1 = okNoLast && okAbsolute && okFromNow && okCrossDay
+                          && okHeartbeat && okHbMono && okClamp && okDue
+                          && okDueInvalid && okRollback;
+            if (!ok1) ++bad;
+            out << (ok1 ? "PASS\t" : "FAIL\t") << "auto-sync-schedule"
+                << "\tnoLast="        << (okNoLast    ? 1 : 0)
+                << "\tabsoluteFromLast=" << (okAbsolute ? 1 : 0)
+                << "\tfromNow="        << (okFromNow  ? 1 : 0)
+                << "\tcrossDay="       << (okCrossDay  ? 1 : 0)
+                << "\theartbeat="      << (okHeartbeat ? 1 : 0)
+                << "\thbMonotone="     << (okHbMono    ? 1 : 0)
+                << "\tclamp="          << (okClamp     ? 1 : 0)
+                << "\tdueBoundary="    << (okDue       ? 1 : 0)
+                << "\tclockRollback="  << (okRollback  ? 1 : 0)
+                << "\n";
+        }
+
+        // ---- 判据 2：心跳周期必须跟着间隔走（接线，不是算法）----
+        //
+        // 这是实测最疼的一个：原来 applyFromSettings 只更新了
+        // m_autoSyncIntervalSec，没更新 m_autoSyncTimer，
+        // 客户把间隔改成 10 秒后，实际 59 秒才第一次跑
+        //（界面照样显示"下次同步 10s 后"，倒计时在走，就是不触发）。
+        {
+            ConfigStore::saveAutoSyncEnabled(false);
+            ConfigStore::saveAutoSyncInterval(86400);
+            SyncPanel hbPanel;
+            const int hb0 = hbPanel.autoSyncHeartbeatMsForTest();
+            ConfigStore::saveAutoSyncInterval(10);
+            TargetConfig ht;
+            ht.host = QStringLiteral("127.0.0.1");
+            ht.user = QStringLiteral("u");
+            ht.port = 22;
+            hbPanel.applyFromSettings(ht, QString(), QVector<ToolRule>(), QVector<SyncRule>());
+            const int hb1 = hbPanel.autoSyncHeartbeatMsForTest();
+            const bool okHb = (hb0 == AutoSyncScheduler::heartbeatMsFor(86400))
+                           && (hb1 == AutoSyncScheduler::heartbeatMsFor(10));
+            if (!okHb) ++bad;
+            out << (okHb ? "PASS\t" : "FAIL\t") << "auto-sync-heartbeat-follows-interval"
+                << "\thbBefore=" << hb0 << "\thbAfter=" << hb1
+                << "\texpected=" << AutoSyncScheduler::heartbeatMsFor(10) << "\n";
+        }
+
+        // ---- 判据 3：自动触发链路（到点 -> 重扫 -> 全选 -> 真跑）----
+        //
+        // 走的是产品自己的 onAutoSyncTick / autoSyncFire，不是模拟回调。
+        {
+            QTemporaryDir dataDir;
+            {
+                QFile f1(dataDir.path() + QStringLiteral("/a.dat"));
+                f1.open(QIODevice::WriteOnly); f1.write("x"); f1.close();
+                QFile f2(dataDir.path() + QStringLiteral("/b.dat"));
+                f2.open(QIODevice::WriteOnly); f2.write("y"); f2.close();
+            }
+
+            ConfigStore::saveAutoSyncEnabled(false);
+            ConfigStore::saveAutoSyncInterval(10);
+            SyncPanel p;
+            p.setHostForTest(QStringLiteral("127.0.0.1"));
+            p.setPortForTest(1);
+            p.setUserForTest(QStringLiteral("u"));
+            p.setLocalRootForTest(dataDir.path());
+            p.setAutoSyncForTest(true);
+            p.setAutoSyncNextAtForTest(QDateTime::currentDateTime().addSecs(-1));
+            const bool armed = p.triggerAutoSyncTickForTest();   // 产品自己的心跳入口
+
+            QElapsedTimer et; et.start();
+            while (p.syncFinishedCountForTest() == 0 && et.elapsed() < 20000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                QThread::msleep(5);
+            }
+            int fired = 0, rescanned = 0;
+            const QStringList recs = p.logRecordsForTest();
+            for (int i = 0; i < recs.size(); ++i) {
+                if (recs.at(i).contains(QString::fromUtf8(
+                        "\xE8\x87\xAA\xE5\x8A\xA8\xE5\x90\x8C\xE6\xAD\xA5"
+                        "\xE5\xB7\xB2\xE5\x88\xB0\xE7\x82\xB9")))
+                    ++fired;
+                if (recs.at(i).contains(QString::fromUtf8(
+                        "\xE8\x87\xAA\xE5\x8A\xA8\xE5\x90\x8C\xE6\xAD\xA5"
+                        "\xE5\xB7\xB2\xE9\x87\x8D\xE6\x96\xB0\xE6\x89\xAB\xE6\x8F\x8F")))
+                    ++rescanned;
+            }
+            const bool okChain = armed && fired >= 1 && rescanned >= 1
+                              && p.syncFinishedCountForTest() > 0
+                              && p.tableModel() && p.fileCountForTest() == 2
+                              && p.tableModel()->checkedCount() == p.fileCountForTest();
+            if (!okChain) ++bad;
+            out << (okChain ? "PASS\t" : "FAIL\t") << "auto-sync-fire-chain"
+                << "\tarmed=" << (armed ? 1 : 0)
+                << "\tfiredLog=" << fired << "\trescanLog=" << rescanned
+                << "\tsyncFinished=" << p.syncFinishedCountForTest()
+                << "\tchecked=" << (p.tableModel() ? p.tableModel()->checkedCount() : -1)
+                << "\tfiles=" << p.fileCountForTest() << "\n";
+        }
+
+        // ---- 判据 4：失败去重 + 排程推进 + 改配置后重新提示 ----
+        {
+            ConfigStore::saveAutoSyncEnabled(false);
+            ConfigStore::saveAutoSyncInterval(10);
+            SyncPanel q;                       // 故意不配目标 -> 触发失败
+            q.setLocalRootForTest(QDir::tempPath());
+            q.setAutoSyncForTest(true);
+            auto countNotRun = [&q]() {
+                int c = 0;
+                const QStringList recs = q.logRecordsForTest();
+                for (int i = 0; i < recs.size(); ++i)
+                    if (recs.at(i).contains(QString::fromUtf8(
+                            "\xE8\x87\xAA\xE5\x8A\xA8\xE5\x90\x8C\xE6\xAD\xA5"
+                            "\xE6\x9C\xAA\xE8\xB7\x91\xE8\xB5\xB7\xE6\x9D\xA5")))
+                        ++c;
+                return c;
+            };
+            q.forceAutoSyncFireForTest();
+            const int n1 = countNotRun();
+            q.forceAutoSyncFireForTest();
+            const int n2 = countNotRun();        // 同因 -> 不刷屏
+            const bool advanced = (q.autoSyncNextAtForTest() > QDateTime::currentDateTime());
+            // 反向锁：改了配置（去重标记应被清掉）-> 同因也要再提示一次
+            TargetConfig it;                     // 仍然不配目标
+            it.host = QString();
+            it.user = QString();
+            q.applyFromSettings(it, QDir::tempPath(), QVector<ToolRule>(), QVector<SyncRule>());
+            q.forceAutoSyncFireForTest();
+            const int n3 = countNotRun();
+            const bool okDedup = (n1 == 1 && n2 == 1 && n3 == 2 && advanced);
+            if (!okDedup) ++bad;
+            out << (okDedup ? "PASS\t" : "FAIL\t") << "auto-sync-fail-dedup"
+                << "\tfirstWarn=" << n1 << "\tsecondWarn=" << n2
+                << "\tafterCfgWarn=" << n3 << "\tscheduleAdvanced=" << (advanced ? 1 : 0)
+                << "\n";
+        }
+
+        // ---- 判据 5：间隔输入框边界 + lastRunAt 落盘往返 + 保存后不立刻跑 ----
+        {
+            SettingsDialog dlg;
+            QLineEdit *le = dlg.findChild<QLineEdit *>(QStringLiteral("settingAutoSyncInterval"));
+            le->setText(QStringLiteral(""));
+            const int emptyGot = dlg.autoSyncInterval();
+            // 空输入必须回默认值，不能静默落到下限 10
+            // （原来 toInt() 对空串返回 0 → clamp → 10，
+            //   客户清空输入框再保存，自动同步变成每 10 秒一轮，
+            //   而界面上输入框是空的，他完全不知道自己改了什么）。
+            const bool okEmpty = (emptyGot == AutoSyncScheduler::DefaultIntervalSec);
+            le->setText(QStringLiteral("86400"));
+            const int maxGot = dlg.autoSyncInterval();
+            const bool okMax = (maxGot == AutoSyncScheduler::MaxIntervalSec);
+
+            const QDateTime t = QDateTime::currentDateTime();
+            ConfigStore::saveAutoSyncLastRunAt(t);
+            const QDateTime back = ConfigStore::loadAutoSyncLastRunAt();
+            const bool okRt = back.isValid() && qAbs(back.secsTo(t)) <= 1;
+
+            // 排程基准必须是**整秒**。
+            //
+            // 老版本写进 ini 的时刻带毫秒（ISODate 在 msec≠0 时带 ".zzz"），
+            // 读回来若不截，第一次排程的「名义到点时刻」会落在心跳某一拍之后
+            // 几毫秒 ⇒ 那一拍判「未到点」跳过 ⇒ 升级后第一轮晚一个心跳
+            // （间隔 N 秒跑成 N+N/2）。这条判据把"读出来必须是整秒"锁住。
+            const QDateTime withMs(QDate(2026, 10, 24), QTime(10, 0, 0, 123));
+            ConfigStore::saveAutoSyncLastRunAt(withMs);
+            const QDateTime backMs = ConfigStore::loadAutoSyncLastRunAt();
+            const bool okWholeSec = backMs.isValid() && backMs.time().msec() == 0;
+
+            // 保存设置后**不应该**立刻补跑：
+            // lastRunAt 是很久以前 → next 若按 lastRunAt+interval 算就在过去，
+            // 心跳一醒来就开跑。注释承诺的是"从这一刻起算下一个周期"。
+            ConfigStore::saveAutoSyncEnabled(false);
+            ConfigStore::saveAutoSyncInterval(60);
+            ConfigStore::saveAutoSyncLastRunAt(QDateTime::currentDateTime().addSecs(-7200));
+            SyncPanel sp;
+            TargetConfig tc;                      // 不配目标，避免真跑
+            sp.setLocalRootForTest(QDir::tempPath());
+            sp.applyFromSettings(tc, QDir::tempPath(), QVector<ToolRule>(), QVector<SyncRule>());
+            const QDateTime nxt = sp.autoSyncNextAtForTest();
+            const bool okNoCatchUp = nxt.isValid()
+                && nxt > QDateTime::currentDateTime().addSecs(30);
+
+            const bool ok5 = okEmpty && okMax && okRt && okWholeSec && okNoCatchUp;
+            if (!ok5) ++bad;
+            out << (ok5 ? "PASS\t" : "FAIL\t") << "auto-sync-interval-and-persist"
+                << "\temptyField=" << emptyGot
+                << "\tdefault=" << AutoSyncScheduler::DefaultIntervalSec
+                << "\tmaxOk=" << (okMax ? 1 : 0)
+                << "\tlastRunRoundTrip=" << (okRt ? 1 : 0)
+                << "\tlastRunWholeSec=" << (okWholeSec ? 1 : 0)
+                << "\tnoCatchUpAfterSave=" << (okNoCatchUp ? 1 : 0)
+                << "\n";
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // 每天定点模式（需求 10 的"日历定点"）+ 两种模式互斥 + 老 ini 兼容
+    //
+    // 为什么必须加这一组：上面 auto-sync-schedule 只验了**间隔**模式。
+    // 把 nextDailyRunAt() 整个删掉、或者让它退化成 now+interval，
+    // 那几条照样全绿 —— 定点模式的排程一条都没被盖到。
+    //
+    // 全部调用**产品自己那份实现**（AutoSyncScheduler / ConfigStore /
+    // SettingsDialog），不另写影子算法：影子算法会和产品实现漂移，
+    // 判据变假绿灯。
+    {
+        // ---- 判据 1：daily 的 next 计算（纯函数）----
+        {
+            // 基准时刻**写死**，不用真实时钟。
+            //
+            // 为什么必须写死：判据 (c) 断言“lastRunAt 恰好是今天 03:00 →
+            // next = 明天 03:00”，这条只在“now 已经过了今天 03:00”时成立。
+            // 用真实时钟时，凌晨 3 点前跑自检：lastRunAt(=今天 03:00) 落在**将来**
+            // → nextDailyRunAt() 按设计以 now 为基准 → 返回今天 03:00
+            // （今天还没到，确实该今天跑）→ 判据 (c) 反而判 FAIL。
+            //
+            // 产品逻辑没错，是**判据依赖钟点**：同一份代码每天 00:00~03:00
+            // 自检必 FAIL、03:00 之后又必 PASS。交付给客户的自检绝不能这样飘。
+            //
+            // 基准取 2026-10-24 10:00（当天 03:00 已过）：10 条子判据全部与
+            // 钟点无关，任何时刻跑结果完全一致。
+            const QDateTime nowRef(QDate(2026, 10, 24), QTime(10, 0, 0));
+            const QTime t0300(3, 0);
+
+            // (a) 从没跑过（lastRunAt 无效）→ now 之后的第一个 03:00
+            const QDateTime nextFresh = AutoSyncScheduler::nextDailyRunAt(t0300, nowRef, QDateTime());
+            const bool okFresh = nextFresh.isValid()
+                && nextFresh.time() == QTime(3, 0)
+                && nextFresh > nowRef;
+
+            // (b) lastRunAt 在今天 03:00 之前 → next = 今天 03:00
+            const QDateTime lastEarly = QDateTime(nowRef.date(), QTime(1, 0));
+            const QDateTime nextEarly = AutoSyncScheduler::nextDailyRunAt(t0300, nowRef, lastEarly);
+            const bool okEarly = (nextEarly == QDateTime(nowRef.date(), QTime(3, 0)));
+
+            // (c) lastRunAt 恰好落在今天 03:00:00 → next = **明天** 03:00。
+            //     取 ">= base" 会算回今天 03:00（已过去）→ 无限快跑。
+            const QDateTime lastExact = QDateTime(nowRef.date(), QTime(3, 0, 0));
+            const QDateTime nextExact = AutoSyncScheduler::nextDailyRunAt(t0300, nowRef, lastExact);
+            const bool okExact = (nextExact == QDateTime(nowRef.date().addDays(1), QTime(3, 0)));
+
+            // (d) 跨天：lastRunAt 是昨天 04:00 → next = 今天 03:00
+            const QDateTime lastYest = QDateTime(nowRef.date().addDays(-1), QTime(4, 0));
+            const QDateTime nextYest = AutoSyncScheduler::nextDailyRunAt(t0300, nowRef, lastYest);
+            const bool okYest = (nextYest == QDateTime(nowRef.date(), QTime(3, 0)));
+
+            // (e) 跨月：base = 2026-01-31 10:00 → 2026-02-01 03:00
+            const QDateTime monthBase(QDate(2026, 1, 31), QTime(10, 0));
+            const QDateTime nextMonth = AutoSyncScheduler::nextDailyRunAt(t0300, monthBase, monthBase);
+            const bool okMonth = (nextMonth == QDateTime(QDate(2026, 2, 1), QTime(3, 0)));
+
+            // (f) 跨年：base = 2025-12-31 22:00 → 2026-01-01 03:00
+            const QDateTime yearBase(QDate(2025, 12, 31), QTime(22, 0));
+            const QDateTime nextYear = AutoSyncScheduler::nextDailyRunAt(t0300, yearBase, yearBase);
+            const bool okYear = (nextYear == QDateTime(QDate(2026, 1, 1), QTime(3, 0)));
+
+            // (g) 闰年 2 月：base = 2028-02-28 23:00 → 2028-02-29 03:00
+            const QDateTime leapBase(QDate(2028, 2, 28), QTime(23, 0));
+            const QDateTime nextLeap = AutoSyncScheduler::nextDailyRunAt(t0300, leapBase, leapBase);
+            const bool okLeap = (nextLeap == QDateTime(QDate(2028, 2, 29), QTime(3, 0)));
+
+            // (h) fromNow：改完时刻**不立刻跑** —— next 必须严格晚于 now
+            const QDateTime nextFromNow = AutoSyncScheduler::nextDailyRunAt(QTime(4, 30), nowRef,
+                                                                            QDateTime(), true);
+            const bool okFromNow = nextFromNow.isValid()
+                && nextFromNow > nowRef
+                && nextFromNow.time() == QTime(4, 30);
+
+            // (i) 时钟被往回调（lastRunAt 在将来）→ 不能停摆
+            const QDateTime future = nowRef.addSecs(3600);
+            const QDateTime nextRollback = AutoSyncScheduler::nextDailyRunAt(t0300, nowRef, future);
+            const bool okRollback = nextRollback.isValid() && nextRollback > nowRef;
+
+            // (j) 时刻串：写出来两位补零、读回来一致；非法值一律拒收
+            QTime parsed;
+            const bool okParse =
+                AutoSyncScheduler::parseDailyTime(QStringLiteral("03:00"), &parsed)
+                    && parsed == QTime(3, 0)
+                && AutoSyncScheduler::parseDailyTime(QStringLiteral("3:00"), &parsed)
+                    && parsed == QTime(3, 0)
+                && !AutoSyncScheduler::parseDailyTime(QStringLiteral("24:00"), &parsed)
+                && !AutoSyncScheduler::parseDailyTime(QStringLiteral("03:60"), &parsed)
+                && !AutoSyncScheduler::parseDailyTime(QStringLiteral("3:0"), &parsed)
+                && !AutoSyncScheduler::parseDailyTime(QStringLiteral("0300"), &parsed)
+                && !AutoSyncScheduler::parseDailyTime(QString(), &parsed)
+                && AutoSyncScheduler::dailyTimeToString(QTime(3, 0)) == QStringLiteral("03:00")
+                && AutoSyncScheduler::dailyTimeToString(QTime(23, 5)) == QStringLiteral("23:05")
+                && AutoSyncScheduler::defaultDailyTime() == QTime(3, 0);
+
+            const bool ok1 = okFresh && okEarly && okExact && okYest && okMonth
+                          && okYear && okLeap && okFromNow && okRollback && okParse;
+            if (!ok1) ++bad;
+            out << (ok1 ? "PASS\t" : "FAIL\t") << "auto-sync-daily-schedule"
+                << "\tfresh="        << (okFresh    ? 1 : 0)
+                << "\tearly="        << (okEarly    ? 1 : 0)
+                << "\tstrictlyAfter=" << (okExact    ? 1 : 0)
+                << "\tcrossDay="     << (okYest     ? 1 : 0)
+                << "\tcrossMonth="   << (okMonth    ? 1 : 0)
+                << "\tcrossYear="    << (okYear     ? 1 : 0)
+                << "\tleapDay="      << (okLeap     ? 1 : 0)
+                << "\tfromNow="      << (okFromNow  ? 1 : 0)
+                << "\tclockRollback=" << (okRollback ? 1 : 0)
+                << "\ttimeParse="    << (okParse    ? 1 : 0)
+                << "\tnextFresh="    << nextFresh.toString(Qt::ISODate)
+                << "\n";
+        }
+
+        // ---- 判据 2：错过补跑（关机 3 天再开机）----
+        {
+            const QDateTime nowRef = QDateTime::currentDateTime();
+            // lastRunAt = 3 天前 → 它之后的第一个 03:00 已经落在过去
+            const QDateTime last3 = nowRef.addDays(-3);
+            const QDateTime next = AutoSyncScheduler::nextDailyRunAt(QTime(3, 0), nowRef, last3);
+            // 必须"已到点" → 心跳一醒来就补跑一轮
+            const bool okDue = AutoSyncScheduler::isDue(nowRef, next);
+            // 补跑完 lastRunAt = now → next = 明天 03:00
+            //   （今天 03:00 还没到时，下一次就是今天 03:00）
+            const QDateTime next2 = AutoSyncScheduler::nextDailyRunAt(QTime(3, 0), nowRef, nowRef);
+            const bool okNext = next2.isValid()
+                && next2 > nowRef
+                && next2.time() == QTime(3, 0)
+                && (nowRef.time() < QTime(3, 0)
+                        ? next2.date() == nowRef.date()
+                        : next2.date() == nowRef.date().addDays(1));
+            const bool ok2 = okDue && okNext;
+            if (!ok2) ++bad;
+            out << (ok2 ? "PASS\t" : "FAIL\t") << "auto-sync-daily-catchup"
+                << "\tdueImmediately=" << (okDue ? 1 : 0)
+                << "\tnextAfterRun=" << (okNext ? 1 : 0)
+                << "\tnext=" << next.toString(Qt::ISODate)
+                << "\tnextAfter=" << next2.toString(Qt::ISODate)
+                << "\n";
+        }
+
+        // ---- 判据 3：模式 / 时刻的持久化 ----
+        {
+            ConfigStore::saveAutoSyncMode(AutoSyncScheduler::ModeDaily);
+            const bool modeDaily = (ConfigStore::loadAutoSyncMode() == AutoSyncScheduler::ModeDaily);
+            ConfigStore::saveAutoSyncMode(AutoSyncScheduler::ModeInterval);
+            const bool modeInterval = (ConfigStore::loadAutoSyncMode() == AutoSyncScheduler::ModeInterval);
+            ConfigStore::saveAutoSyncDailyTime(QTime(4, 30));
+            const bool timeOk = (ConfigStore::loadAutoSyncDailyTime() == QTime(4, 30));
+            // 还原成默认，别把后面的用例带偏
+            ConfigStore::saveAutoSyncDailyTime(AutoSyncScheduler::defaultDailyTime());
+
+            // 「开机自动启动」开关的往返
+            ConfigStore::saveAutoStartEnabled(true);
+            const bool asTrue = ConfigStore::loadAutoStartEnabled();
+            ConfigStore::saveAutoStartEnabled(false);
+            const bool asFalse = !ConfigStore::loadAutoStartEnabled();
+
+            const bool ok3 = modeDaily && modeInterval && timeOk && asTrue && asFalse;
+            if (!ok3) ++bad;
+            out << (ok3 ? "PASS\t" : "FAIL\t") << "auto-sync-mode-persist"
+                << "\tdailyRoundTrip="   << (modeDaily    ? 1 : 0)
+                << "\tintervalRoundTrip=" << (modeInterval ? 1 : 0)
+                << "\tdailyTimeRoundTrip=" << (timeOk      ? 1 : 0)
+                << "\tautoStartTrue="    << (asTrue       ? 1 : 0)
+                << "\tautoStartFalse="   << (asFalse      ? 1 : 0)
+                << "\n";
+        }
+
+        // ---- 判据 4：老 ini 兼容 —— 缺键按默认值读，且**不把文件写回去**----
+        //
+        // 这一条防的是"升级到新版本顺手把用户的老配置改写了一遍"。
+        // 老配置里没有 autoSyncMode / autoSyncDailyTime / autoStartEnabled，
+        // 读的时候按默认值（间隔 / 03:00 / 关），**且一个字都不许写回去**。
+        {
+            const QByteArray savedDir = qgetenv("SRT_CONFIG_DIR");
+            QTemporaryDir legacyBox;
+            const QString legacyDir = legacyBox.path() + QStringLiteral("/legacy");
+            QDir().mkpath(legacyDir);
+            const QString legacyIni = legacyDir + QStringLiteral("/SyncReplayTool.ini");
+
+            const QByteArray legacyBytes("[sync]\nautoSyncEnabled=true\nautoSyncIntervalSec=60\n");
+            {
+                QFile f(legacyIni);
+                if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                    out << "FAIL\tauto-sync-legacy-ini\tcannot create " << legacyIni << "\n";
+                    ++bad;
+                }
+                f.write(legacyBytes);
+                f.close();
+            }
+            // 读回来存一份"读之前的字节"，用来做逐字节比对
+            QByteArray beforeBytes;
+            {
+                QFile f(legacyIni);
+                if (f.open(QIODevice::ReadOnly))
+                    beforeBytes = f.readAll();
+                f.close();
+            }
+
+            qputenv("SRT_CONFIG_DIR", legacyDir.toLocal8Bit());
+            const bool modeDefault = (ConfigStore::loadAutoSyncMode() == AutoSyncScheduler::ModeInterval);
+            const bool timeDefault = (ConfigStore::loadAutoSyncDailyTime() == QTime(3, 0));
+            const bool asDefault = !ConfigStore::loadAutoStartEnabled();
+            QByteArray afterBytes;
+            {
+                QFile f(legacyIni);
+                if (f.open(QIODevice::ReadOnly))
+                    afterBytes = f.readAll();
+                f.close();
+            }
+            qputenv("SRT_CONFIG_DIR", savedDir);
+
+            const bool notRewritten = (beforeBytes == afterBytes);
+            const bool ok4 = modeDefault && timeDefault && asDefault && notRewritten;
+            if (!ok4) ++bad;
+            out << (ok4 ? "PASS\t" : "FAIL\t") << "auto-sync-legacy-ini"
+                << "\tmodeDefaultInterval=" << (modeDefault ? 1 : 0)
+                << "\ttimeDefault0300="    << (timeDefault ? 1 : 0)
+                << "\tautoStartDefaultOff=" << (asDefault   ? 1 : 0)
+                << "\tnotRewritten="       << (notRewritten ? 1 : 0)
+                << "\tbytesBefore=" << beforeBytes.size()
+                << "\tbytesAfter="  << afterBytes.size()
+                << "\n";
+        }
+
+        // ---- 判据 5：界面互斥（选 daily 时看不到/用不了间隔输入框）----
+        //
+        // 用 isHidden() 而不是 isVisible()：自检里这个弹窗**从来没有显示过**，
+        // QWidget::isVisible() 对"父窗口没显示"的子控件一律返回 false ——
+        // 那样两条判据都会假绿。
+        // isHidden() 反映的是控件**自己**被 setVisible(false) 过的状态。
+        {
+            SettingsDialog dlg;
+            QLineEdit *le = dlg.findChild<QLineEdit *>(QStringLiteral("settingAutoSyncInterval"));
+            QTimeEdit *te = dlg.findChild<QTimeEdit *>(QStringLiteral("settingAutoSyncDailyTime"));
+            QRadioButton *ri = dlg.findChild<QRadioButton *>(QStringLiteral("chkAutoSyncModeInterval"));
+            QRadioButton *rd = dlg.findChild<QRadioButton *>(QStringLiteral("chkAutoSyncModeDaily"));
+            const bool found = (le && te && ri && rd);
+            bool okDaily = false, okInterval = false;
+            if (found) {
+                // 切到「每天定时」
+                rd->setChecked(true);
+                okDaily = le->isHidden() && !le->isEnabled()
+                          && !te->isHidden() && te->isEnabled();
+                // 切回「按间隔重复」
+                ri->setChecked(true);
+                okInterval = !le->isHidden() && le->isEnabled()
+                             && te->isHidden() && !te->isEnabled();
+            }
+            const bool ok5 = found && okDaily && okInterval;
+            if (!ok5) ++bad;
+            out << (ok5 ? "PASS\t" : "FAIL\t") << "auto-sync-mode-exclusive-ui"
+                << "\twidgetsFound=" << (found ? 1 : 0)
+                << "\tdailyHidesInterval=" << (okDaily ? 1 : 0)
+                << "\tintervalHidesDaily=" << (okInterval ? 1 : 0)
+                << "\n";
         }
     }
 
@@ -783,8 +1363,8 @@ int runSelfCheck()
             << QStringLiteral("/home/appuser/.ssh/id_real");
 
         // 额外一个含中文的形态，只用于 Qt 自己写读的**反向锁**。
-        const QString cjkShape = QStringLiteral("D:") + bs + QStringLiteral("data 目录")
-                                 + bs + QStringLiteral("子目录") + bs + QStringLiteral("a b.spe");
+        const QString cjkShape = QStringLiteral("D:") + bs + QString::fromUtf8(u8"data 目录")
+                                 + bs + QString::fromUtf8(u8"子目录") + bs + QStringLiteral("a b.spe");
 
         int rawQt = -1;
         int handWritten = -1;
@@ -2046,7 +2626,13 @@ static int runSecretCheck(QApplication &app, int rounds)
     sc.panel->setHostForTest(QString::fromLocal8Bit(host));
     sc.panel->setPortForTest(port.isEmpty() ? 22 : port.toInt());
     sc.panel->setUserForTest(QString::fromLocal8Bit(user));
-    applySecretCheckAuth(sc.panel, QString::fromLocal8Bit(pass));
+    // 口令从 fromLocal8Bit 改为 fromUtf8：
+    // 口令变量来自环境变量，非 UTF-8 locale 下（麒麟 V10 里是 POSIX/C）
+    // 口令的 UTF-8 字节会被按本机代码页解一遍，
+    // 解不出来的字节变成 U+FFFD —— 产品把这个值原样写进口令文件发给 ssh，
+    // “产品发给 ssh 的值”与“设定的口令”不是同一个东西。
+    // ASCII 口令两者完全一致（不改变任何行为）。
+    applySecretCheckAuth(sc.panel, QString::fromUtf8(pass));
     sc.panel->setRemoteRootForTest(QString::fromLocal8Bit(remote));
 
     // 先扫出文件，否则走的是"没有匹配到要同步的文件"分支，
@@ -2150,6 +2736,61 @@ int main(int argc, char *argv[])
         MainWindow::setSplashDuration(parser.value(optSplashMs).toInt());
     if (parser.isSet(optSkip) || parser.isSet(optSplashMs) || parser.isSet(optShot) || parser.isSet(optShotSettings))
         MainWindow::setSkipSplash(true);
+
+    // ----------------------------------------------------------------
+    // 单实例保护
+    //
+    // 为什么必须有：开机自启 + 桌面图标会让程序被拉起两次，
+    // 两个进程抢同一份配置文件和同一份同步任务 —— 谁写 ini 谁说了算，
+    // 而且两轮同步会同时往同一个远端目录里传。
+    //
+    // 锁放在**配置目录**里（ConfigStore::configDir()，默认 %APPDATA%\AP）：
+    // 同一份配置 = 同一把锁；不同配置目录（测试沙箱、并行用例）= 互不干扰。
+    //
+    // setStaleLockTime(0)：Qt 默认 30 秒就把"看起来很久没动过"的锁当陈旧锁清掉。
+    // 客户机上一次同步跑几 GB 时，第二个实例会在 30 秒后**误判**锁失效并闯进来，
+    // 两个进程同时写同一个 ini。设成 0 = 永不做时间启发式判断，
+    // 只认"进程还活着没有"（进程真死了，Qt 仍会按 PID 判定锁已失效并接管，
+    // 不会留下死锁）。
+    //
+    // **命令行自检/探针模式一律跳过**：这些模式本来就要并发跑
+    // （--selfcheck / --selfcheck-secrets / --screenshot / --screenshot-settings），
+    // 走单实例逻辑会互相踢掉，主会话的回归会全挂。
+    // --no-splash / --splash-ms 自己的帮助文本就写着 "(automation only)"，
+    // 同样按探针处理。
+    const bool probeMode = parser.isSet(optSelfCheck) || parser.isSet(optSecretCheck)
+                        || parser.isSet(optShot) || parser.isSet(optShotSettings)
+                        || parser.isSet(optSkip) || parser.isSet(optSplashMs);
+    // QLockFile **必须活到 main() 结束**。
+    //
+    // 它是个会**在析构时解锁并删掉锁文件**的对象 —— 把它声明在 if 块里，
+    // 块一结束锁就放了，第二个实例照样能进来（这一条是实测踩出来的：
+    // 第一个实例活着、锁文件却不见了、第二个实例不被拦）。
+    // 所以声明在 main() 这一层，不在 if 块里。
+    //
+    // 探针模式下只是"构造对象、不 tryLock"，不会产生锁文件。
+    QLockFile instanceLock(ConfigStore::configDir()
+                           + QStringLiteral("/.srt-single-instance.lock"));
+    if (!probeMode) {
+        instanceLock.setStaleLockTime(0);
+        if (!instanceLock.tryLock(0)) {
+            const QString msg = QString::fromUtf8(u8"程序已在运行。\n\n"
+                                                 u8"请先关闭已经打开的窗口再试。");
+            // stderr 永远打一份：脚本和日志里能看见，不依赖界面。
+            QTextStream err(stderr);
+            err << msg << "\n";
+            err.flush();
+            // 界面提示只在**能显示窗口**时弹（offscreen/minimal 平台不弹）。
+            const QString platform = QGuiApplication::platformName();
+            if (platform != QLatin1String("offscreen") && platform != QLatin1String("minimal")) {
+                QMessageBox::warning(nullptr,
+                                     QString::fromUtf8(u8"数据同步工具"), msg);
+            }
+            return 2;
+        }
+        // instanceLock 是栈对象：main 返回时析构 → 解锁。
+        // 进程被强杀时锁文件会留下，但 Qt 下次按 PID 判定它已失效并接管。
+    }
 
     MainWindow w;
     if (parser.isSet(optShotSettings)) {

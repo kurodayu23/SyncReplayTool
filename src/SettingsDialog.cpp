@@ -1,4 +1,4 @@
-#include "SettingsDialog.h"
+﻿#include "SettingsDialog.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -6,12 +6,15 @@
 #include <QFrame>
 #include <QScrollArea>
 #include <QFileDialog>
+#include <QMessageBox>
 #include <QHeaderView>
 #include <QTableWidgetItem>
 #include <QLabel>
 #include <QPushButton>
 #include <QLineEdit>
 #include <QCheckBox>
+#include <QRadioButton>
+#include <QTimeEdit>
 #include <QIntValidator>
 #include <QStyle>
 #include <QMouseEvent>
@@ -23,6 +26,7 @@
 #include <QGraphicsDropShadowEffect>
 #include "Theme.h"
 #include "ConfigStore.h"
+#include "AutoSyncScheduler.h"
 
 namespace {
 const char *kTxtHost       = "\xE7\x9B\xAE\xE6\xA0\x87\xE7\x94\xb5\xE8\x84\x91 IP";      // 目标电脑 IP
@@ -43,6 +47,13 @@ const char *kTxtColSuffix  = "\xE6\x96\x87\xE4\xBB\xB6\xE7\xB1\xBB\xE5\x9E\x8B";
 const char *kTxtColTool    = "\xE5\xB7\xA5\xE5\x85\xB7\xE5\x90\x8D\xE7\xA7\xB0";      // 工具名称
 const char *kTxtColPath    = "\xE5\x85\xB3\xE8\x81\x94\xE7\xA8\x8B\xE5\xBA\x8F\xE8\xB7\xAF\xE5\xBE\x84";  // 关联程序路径
 const char *kTxtHint       = "\xE6\x8F\x90\xE7\xA4\xBA\xEF\xBC\x9A\xE5\x88\x97\xE8\xA1\xA8\xE4\xB8\xAD\xE7\x9A\x84\xE5\xB7\xA5\xE5\x85\xB7\xE6\x8C\x89\xE9\x92\xAE\xE7\x9B\xB4\xE6\x8E\xA5\xE4\xBD\x9C\xE7\x94\xA8\xE4\xBA\x8E\xE5\xBD\x93\xE5\x89\x8D\xE9\x80\x89\xE4\xB8\xAD\xE7\x9A\x84\xE6\x96\x87\xE4\xBB\xB6\xE3\x80\x82";  // 提示：在列表中点击对应的工具按钮，即可直接打开选中文件。
+// 带上范围：客户看得出可以填多少。
+// 原来这里只有"自动同步间隔"，而输入框挂了 QIntValidator(10, 86400)
+// —— 客户想填 5 秒会被**静默拒绝**（输入框不反应），以为软件坏了。
+const char *kTxtAutoInterval = "自动同步间隔（10 ~ 86400 秒）";  // 自动同步间隔（10~86400 秒）
+const char *kTxtSec          = "\xE7\xA7\x92";  // 秒
+// 每天定点的时刻标签。
+const char *kTxtDailyTime    = "每天定时时刻";  // 每天定时时刻
 
 QLabel *mkLabel(const char *text, const char *objName)
 {
@@ -160,7 +171,7 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     QHBoxLayout *srcRow = new QHBoxLayout;
     srcRow->setSpacing(8);
     m_sourceDir = mkInput("settingSourceDir", QString(),
-                          QString::fromUtf8("\xE4\xBE\x8B\xE5\xA6\x82\xEF\xBC\x9A\x44:/Data"));  // 例如: D:/Data
+                          QString::fromUtf8("\xE4\xBE\x8B\xE5\xA6\x82\xEF\xBC\x9A/home/\xE7\x94\xA8\xE6\x88\xB7\xE5\x90\x8D/\xE6\x95\xB0\xE6\x8D\xAE \xE6\x88\x96 ~/data"));  // 例如: /home/用户名/数据 或 ~/data
     QPushButton *browse = new QPushButton(QString::fromUtf8(kTxtBrowse));
     browse->setObjectName(QStringLiteral("btnBrowse"));
     browse->setFixedHeight(28);
@@ -236,6 +247,109 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     m_remoteRoot = mkInput("settingRemoteRoot", QString(),
                            QString::fromUtf8("\xE4\xBE\x8B\xE5\xA6\x82\xEF\xBC\x9A\x44:/Data"));  // 例如: D:/Data
     bl->addWidget(m_remoteRoot);
+
+    // 4b. 自动同步：**两种互斥模式**（需求 10 的"类似 cron"）
+    //
+    //   「按间隔重复」—— 老版本的行为，每 N 秒一次（默认 30 秒）
+    //   「每天定时」  —— 每天 HH:MM 一次（默认 03:00）
+    //
+    // 为什么不给 cron 表达式：需求 10 原文「不要让用户手填 cron」。
+    // 表达式会带出"看起来对但永远不触发"的组合，客户填错一个字段就静默停摆。
+    // 为什么默认 03:00：客户机多半晚上不干活、凌晨带宽空闲 ——
+    // 但这**只是默认值**，客户可以改（不同客户的上传/维护窗口不一样）。
+    //
+    // 两套控件**互斥**：当前模式之外的那一套被**藏起来并禁用**，
+    // 免得用户填了一个不生效的值还以为软件坏了。
+    QHBoxLayout *modeRow = new QHBoxLayout;
+    modeRow->setSpacing(16);
+    m_modeInterval = new QRadioButton(QString::fromUtf8(u8"按间隔重复"));
+    m_modeInterval->setObjectName(QStringLiteral("chkAutoSyncModeInterval"));
+    m_modeDaily = new QRadioButton(QString::fromUtf8(u8"每天定时"));
+    m_modeDaily->setObjectName(QStringLiteral("chkAutoSyncModeDaily"));
+    modeRow->addWidget(m_modeInterval);
+    modeRow->addWidget(m_modeDaily);
+    modeRow->addStretch(1);
+    bl->addLayout(modeRow);
+
+    // 4b-1. 间隔输入（只有「按间隔重复」时可见可用）
+    QHBoxLayout *intervalRow = new QHBoxLayout;
+    intervalRow->setSpacing(8);
+    QLabel *intervalLabel = mkLabel(kTxtAutoInterval, "settingLabel");
+    m_autoSyncInterval = mkInput("settingAutoSyncInterval",
+                                 QString::number(AutoSyncScheduler::DefaultIntervalSec),
+                                 QString::number(AutoSyncScheduler::DefaultIntervalSec));
+    m_autoSyncInterval->setValidator(new QIntValidator(AutoSyncScheduler::MinIntervalSec,
+                                                       AutoSyncScheduler::MaxIntervalSec,
+                                                       m_autoSyncInterval));
+    m_autoSyncInterval->setMaximumWidth(96);
+    // tooltip 必须和**实测行为**一致，不能给客户一个做不到的承诺。
+    //
+    // 实测（Qt 5.9.6 的 QIntValidator(10, 86400)）：
+    //   · 它只卡**上限**，不卡下限 —— 5、0 都能输进去（低于下限属于"还可能补成合法值"的中间态）
+    //   · 超上限不是"输不进去"，而是**把多出来的位数丢掉**：键入 999999，框里会剩 9999
+    //   · 字母输不进去（键入 abc，框里是空的）
+    //   · 越界/非法值最终会被 autoSyncInterval() 归一：<10 → 10，空/非数字 → 30
+    // 旧文案写的是"超出范围的数字输入框不会接受"，实测**不成立** ——
+    // 照着它操作的人（填 5、填 999999）会得到与承诺相反的结果。
+    m_autoSyncInterval->setToolTip(QString::fromUtf8(
+        u8"可填 10 ~ 86400 秒（约 10 秒 ~ 24 小时）。\n"
+        u8"留空用默认 30 秒；填 1~9 按 10 秒算。\n"
+        u8"只能填数字，超上限的数字会少几位（999999 会变成 9999）。\n"
+        u8"保存时输入框会被回填成真正生效的秒数。"));
+    m_autoSyncInterval->setAlignment(Qt::AlignCenter);
+    QLabel *secLabel = mkLabel(kTxtSec, "settingLabel");
+    intervalRow->addWidget(intervalLabel);
+    intervalRow->addStretch(1);
+    intervalRow->addWidget(m_autoSyncInterval);
+    intervalRow->addWidget(secLabel);
+    bl->addLayout(intervalRow);
+
+    // 4b-2. 定点时刻选择（只有「每天定时」时可见可用）
+    QHBoxLayout *dailyRow = new QHBoxLayout;
+    dailyRow->setSpacing(8);
+    QLabel *dailyLabel = mkLabel(kTxtDailyTime, "settingLabel");
+    m_autoSyncDailyTime = new QTimeEdit(AutoSyncScheduler::defaultDailyTime());
+    m_autoSyncDailyTime->setObjectName(QStringLiteral("settingAutoSyncDailyTime"));
+    m_autoSyncDailyTime->setDisplayFormat(QStringLiteral("HH:mm"));
+    m_autoSyncDailyTime->setMaximumWidth(96);
+    m_autoSyncDailyTime->setToolTip(QString::fromUtf8(
+        u8"每天在这个时刻自动同步一次（按本机本地时间）。\n"
+        u8"关机期间错过的那一次，开机后会自动补跑一轮。"));
+    dailyRow->addWidget(dailyLabel);
+    dailyRow->addStretch(1);
+    dailyRow->addWidget(m_autoSyncDailyTime);
+    bl->addLayout(dailyRow);
+
+    // 模式的初始状态来自配置（老配置没有模式键 → 按间隔重复 = 老版本行为）。
+    //
+    // 顺序很重要：先 setChecked 再 connect。
+    // 反过来的话，构造时的 setChecked 会触发 toggled →
+    // onAutoSyncModeChanged() 把"读到的状态"当成"用户刚点的"处理。
+    // （这里不会落盘 —— 模式只在点「保存设置」时才写。）
+    m_modeInterval->setChecked(ConfigStore::loadAutoSyncMode() != AutoSyncScheduler::ModeDaily);
+    connect(m_modeInterval, &QRadioButton::toggled, this, &SettingsDialog::onAutoSyncModeChanged);
+    connect(m_modeDaily, &QRadioButton::toggled, this, &SettingsDialog::onAutoSyncModeChanged);
+    onAutoSyncModeChanged();
+
+    // 4c. 开机自动启动
+    //
+    // **只负责启动程序**，不擅自开启自动同步：程序被自启拉起来后，
+    // 沿用用户上次勾选的「自动同步」状态（sync/autoSyncEnabled）。
+    // 这一点必须写在界面上 —— 否则客户会以为"开了开机自启就等于每天自动传"。
+    m_autoStartBox = new QCheckBox(QString::fromUtf8(u8"开机自动启动"));
+    m_autoStartBox->setObjectName(QStringLiteral("chkAutoStart"));
+    m_autoStartBox->setCursor(Qt::PointingHandCursor);
+    m_autoStartBox->setToolTip(QString::fromUtf8(
+        u8"勾上以后，每次开机都会自动打开本程序。\n"
+        u8"注意：这**只是把程序打开**，是否自动同步仍按你在同步页上的勾选状态走。\n"
+        u8"取消勾选会把这个开机项删掉，不留残留。"));
+    // 初始状态来自配置（用户意图）。老配置里没有 app/autoStartEnabled → false。
+    //
+    // setChecked 必须在 connect **之前**：否则构造时就触发 toggled，
+    // 把"读到的状态"当成"用户点的"写回配置 —— 老配置会被写脏。
+    m_autoStartBox->setChecked(ConfigStore::loadAutoStartEnabled());
+    connect(m_autoStartBox, &QCheckBox::toggled, this, &SettingsDialog::onAutoStartToggled);
+    bl->addWidget(m_autoStartBox);
 
     // 5. 文件打开工具规则表（图四）
     QHBoxLayout *toolsHead = new QHBoxLayout;
@@ -370,6 +484,31 @@ void SettingsDialog::mouseReleaseEvent(QMouseEvent *event)
 
 void SettingsDialog::onSaveClicked()
 {
+    // 生效值必须**看得见**。
+    //
+    // 原来这一段是"用户填什么就悄悄按什么算"：填 5 实际按 10 跑、
+    // 填 abc / 0 实际按 30 跑，界面上除了「✓ 设置已保存」之外一个字都不说。
+    // 用户以为自己填的就是生效的，下一轮的节奏和心里想的对不上，
+    // 而且要等到界面上的「下次同步 Ns 后」和预期不一样才会发现。
+    //
+    // 这里做两件事，都不新增控件、不动布局：
+    //   1) 把真正生效的秒数**回填进输入框**（用户当场就看得见）；
+    //   2) 保存提示里带上"按 N 秒生效"，把差异说清楚。
+    const int effective = autoSyncInterval();
+    const QString typed = m_autoSyncInterval ? m_autoSyncInterval->text().trimmed() : QString();
+    const bool corrected = (typed != QString::number(effective));
+    if (corrected && m_autoSyncInterval)
+        m_autoSyncInterval->setText(QString::number(effective));
+
+    ConfigStore::saveAutoSyncInterval(effective);
+    // 自动同步模式与定点时刻：也在「保存设置」这一刻落盘。
+    //
+    // 必须在 emit settingsAccepted() **之前** ——
+    // 那条信号会走到 SyncPanel::applyFromSettings()，它会重新排程
+    // （autoSyncScheduleNext(true)），而排程要读的就是这两个键。
+    // 顺序反了的话，这一轮排程用的还是旧模式，要等下次开设置才对。
+    ConfigStore::saveAutoSyncMode(autoSyncMode());
+    ConfigStore::saveAutoSyncDailyTime(autoSyncDailyTime());
     emit settingsAccepted();
 
     // 落盘结果必须**如实**反映。
@@ -386,8 +525,19 @@ void SettingsDialog::onSaveClicked()
 
     // 满足用户要求：显示已保存提示，但不自动关闭设置框
     if (m_saveTip) {
+        // 生效值必须看得见。两种模式各说一句：
+        //   按间隔 → 间隔被规整过才提示（保持原口径）
+        //   每天定时 → 一定提示"每天几点生效"，否则客户不知道自己改没改成
+        QString effectiveNote;
+        if (autoSyncMode() == AutoSyncScheduler::ModeDaily) {
+            effectiveNote = QString::fromUtf8(u8"（每天定时 %1 生效）")
+                               .arg(autoSyncDailyTime().toString(QStringLiteral("HH:mm")));
+        } else if (corrected) {
+            effectiveNote = QString::fromUtf8(u8"（自动同步间隔按 %1 秒生效）").arg(effective);
+        }
         if (err.isEmpty()) {
-            m_saveTip->setText(QString::fromUtf8(u8"\u2713 \u8BBE\u7F6E\u5DF2\u4FDD\u5B58")); // ✓ 设置已保存
+            m_saveTip->setText(QString::fromUtf8(u8"\u2713 \u8BBE\u7F6E\u5DF2\u4FDD\u5B58") // ✓ 设置已保存
+                               + effectiveNote);
         } else {
             m_saveTip->setText(QString::fromUtf8(u8"\u2717 \u8BBE\u7F6E\u672A\u4FDD\u5B58")
                                + QString::fromUtf8(u8"\uFF1A") + err);
@@ -403,6 +553,82 @@ void SettingsDialog::onSaveClicked()
                 m_btnSave->setText(QString::fromUtf8(kTxtSave));
         });
     }
+}
+
+// 两种模式互斥：当前模式之外的那一套控件**藏起来并禁用**。
+//
+// 为什么不是"只置灰"：两个可填的框同时摆在那里，客户填了不生效的那一个，
+// 会以为软件坏了（"我明明设了每天 3 点，怎么还是每 30 秒一次"）。
+// 藏起来 + 禁用，两个保险。
+void SettingsDialog::onAutoSyncModeChanged()
+{
+    const bool daily = (m_modeDaily && m_modeDaily->isChecked());
+    if (m_autoSyncInterval) {
+        m_autoSyncInterval->setVisible(!daily);
+        m_autoSyncInterval->setEnabled(!daily);
+    }
+    if (m_autoSyncDailyTime) {
+        m_autoSyncDailyTime->setVisible(daily);
+        m_autoSyncDailyTime->setEnabled(daily);
+    }
+}
+
+AutoSyncScheduler::Mode SettingsDialog::autoSyncMode() const
+{
+    if (m_modeDaily && m_modeDaily->isChecked())
+        return AutoSyncScheduler::ModeDaily;
+    return AutoSyncScheduler::ModeInterval;
+}
+
+QTime SettingsDialog::autoSyncDailyTime() const
+{
+    if (m_autoSyncDailyTime)
+        return m_autoSyncDailyTime->time();
+    return AutoSyncScheduler::defaultDailyTime();
+}
+
+bool SettingsDialog::autoStartEnabled() const
+{
+    return m_autoStartBox && m_autoStartBox->isChecked();
+}
+
+// 「开机自动启动」：勾上立刻写系统，取消立刻删，不等「保存设置」。
+//
+// 写/删失败必须**看得见**：
+//   · 界面上的勾选状态回滚成"真实状态"（不能勾着而系统里没有）；
+//   · 弹一句人话，写清楚落到哪儿、为什么失败 —— 部署人员要能据此排查；
+//   · 同时进日志抽屉（ConfigStore::notice）。
+void SettingsDialog::onAutoStartToggled(bool on)
+{
+    QString err;
+    const bool ok = ConfigStore::applyAutoStart(on, &err);
+    if (!ok) {
+        // 回滚勾选状态：界面上的"当前状态"必须等于系统里的真实状态。
+        if (m_autoStartBox) {
+            m_autoStartBox->blockSignals(true);
+            m_autoStartBox->setChecked(!on);
+            m_autoStartBox->blockSignals(false);
+        }
+        const QString where = ConfigStore::autoStartLocation();
+        const QString reason = err.isEmpty()
+            ? (on ? QString::fromUtf8(u8"写入失败") : QString::fromUtf8(u8"删除失败"))
+            : err;
+        const QString msg = (on ? QString::fromUtf8(u8"开机自动启动设置失败：%1")
+                               : QString::fromUtf8(u8"取消开机自动启动失败：%1"))
+                            .arg(reason);
+        const QString full = msg + QString::fromUtf8(u8"\n位置：%1").arg(where);
+        if (m_saveTip) {
+            m_saveTip->setText(QString::fromUtf8(u8"\u2717 ") + msg);   // ✗
+            m_saveTip->setVisible(true);
+            QTimer::singleShot(6000, m_saveTip, &QLabel::hide);
+        }
+        ConfigStore::notice(full);
+        QMessageBox::warning(this, QString::fromUtf8(u8"开机自动启动"), full);
+        return;
+    }
+    // 只有真的落到系统里了，才把"用户意图"记进配置。
+    // 反过来的话，配置说"已开"而系统里没有 → 界面显示已开、开机不启动。
+    ConfigStore::saveAutoStartEnabled(on);
 }
 
 void SettingsDialog::browseSourceDir()
@@ -469,6 +695,18 @@ void SettingsDialog::loadConfig(const TargetConfig &target,
     m_internalKeyPath = target.keyPath;
     m_keyPath->setText(m_internalKeyPath);
     m_remoteRoot->setText(target.remoteRoot);
+    if (m_autoSyncInterval)
+        m_autoSyncInterval->setText(QString::number(ConfigStore::loadAutoSyncInterval()));
+    // 自动同步模式与定点时刻：每次打开弹窗都按**已存的值**回填。
+    // 老配置没有这两个键 → 按间隔重复 / 03:00（= 老版本行为，一个字都不写回去）。
+    if (m_modeInterval && m_modeDaily) {
+        const bool daily = (ConfigStore::loadAutoSyncMode() == AutoSyncScheduler::ModeDaily);
+        m_modeInterval->setChecked(!daily);
+        m_modeDaily->setChecked(daily);
+    }
+    if (m_autoSyncDailyTime)
+        m_autoSyncDailyTime->setTime(ConfigStore::loadAutoSyncDailyTime());
+    onAutoSyncModeChanged();
     if (m_rememberBox)
         m_rememberBox->setChecked(ConfigStore::loadRememberSettings());
 
@@ -670,5 +908,31 @@ TargetConfig SettingsDialog::currentTargetConfig() const
     TargetConfig t;
     applyConfig(&t, nullptr, nullptr);
     return t;
+}
+
+int SettingsDialog::autoSyncInterval() const
+{
+    if (!m_autoSyncInterval)
+        return AutoSyncScheduler::DefaultIntervalSec;
+    // 空/非法输入 → 回默认值，**不能**落到下限。
+    //
+    // toInt() 对空串返回 0（且 ok=false），clampIntervalSec(0) 会截成下限 10。
+    // 于是"把输入框清空想重填"再点保存，自动同步就变成**每 10 秒**一轮
+    // ——全目录深度扫描 + SSH + rsync 背靠背连跑，是最激进的一档，
+    // 而输入框里是空的，客户完全不知道自己改了什么（重开设置才看得到 10）。
+    //
+    // QIntValidator 的 Intermediate 态允许空串，所以这不是理论问题。
+    bool ok = false;
+    const int v = m_autoSyncInterval->text().trimmed().toInt(&ok);
+    if (!ok || v <= 0)
+        return AutoSyncScheduler::DefaultIntervalSec;
+    // 范围**必须**引用共享常量，不能在这里另写一份。
+    // 这里原来写的是 [5, 3600]，而输入框的校验器已经改成
+    // AutoSyncScheduler::MinIntervalSec..MaxIntervalSec（10~86400）——
+    // 两处口径不一致的后果是：输入框只让填 10~86400，
+    // 但这个函数把读到的值截到 5~3600，于是 3601~86400 的合法输入会被截成 3600
+    // ——客户填"每天一次"(86400)，实际存成"每小时一次"(3600)，
+    // 而且界面上还显示着他填的 86400。**完全察觉不到的静默改写。**
+    return AutoSyncScheduler::clampIntervalSec(v);
 }
 

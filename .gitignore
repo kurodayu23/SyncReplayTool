@@ -25,6 +25,8 @@ release/
 # ---- IDE / 本机配置（含本机绝对路径，不该进仓库）----
 *.pro.user
 *.user
+.qtc_clangd/
+.qtcreator/
 .vs/
 .vscode/
 *.sln
@@ -71,3 +73,7 @@ zz_probe.txt
 *.orig
 *.rej
 *.bak
+
+# ---- Python 字节码缓存 ----
+__pycache__/
+*.pyc

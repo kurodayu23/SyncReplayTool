@@ -29,6 +29,7 @@ SOURCES += \
     src/SettingsDialog.cpp \
     src/SyncPanel.cpp \
     src/ToolPanel.cpp \
+    src/AutoSyncScheduler.cpp \
     src/MainWindow.cpp
 
 HEADERS += \
@@ -44,6 +45,7 @@ HEADERS += \
     src/SettingsDialog.h \
     src/SyncPanel.h \
     src/ToolPanel.h \
+    src/AutoSyncScheduler.h \
     src/MainWindow.h \
     src/Theme.h
 

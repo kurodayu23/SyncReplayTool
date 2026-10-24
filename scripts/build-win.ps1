@@ -51,6 +51,30 @@ $Project = Join-Path $ProjectRoot 'SyncReplayTool.pro'
 $SdkHeaders = '10.0.10240.0'
 $SdkTools   = '10.0.19041.0'
 
+# ---- 构建前门禁：源码里不许有「QStringLiteral + 裸中文」----
+#
+# 原因：Qt5 的 QStringLiteral 展开成 u"..."（char16_t 字面量），
+# MSVC 编译 u"" "中文" 时按**当前代码页**解码窄串再转 UTF-16，
+# /utf-8 在 VS2015 上救不了 —— 实测产物里 "data 目录" 存成了
+# UTF-16 的 29 94 BC E1 8D 7D（U+9429 U+E1BC U+7D8D），编译期就错了。
+# 本工程约定中文一律用 QString::fromUtf8(u8"…")（见 FileTableModel.cpp 顶部注释）。
+#
+# 扫描器不存在或 python 不可用时**只警告不拦截**，别让别的机器编不了。
+$scanTool = Join-Path $ProjectRoot 'scripts\scan_no_cjk_qstringliteral.py'
+if (Test-Path $scanTool) {
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if ($py) {
+        & $py.Source $scanTool (Join-Path $ProjectRoot 'src')
+        if ($LASTEXITCODE -ne 0) {
+            throw '构建前门禁未通过：源码里存在 QStringLiteral + 裸中文（会被 MSVC 按 GBK 误解码）'
+        }
+    } else {
+        Write-Warning '没找到 python，跳过「QStringLiteral + 裸中文」门禁扫描。'
+    }
+} else {
+    Write-Warning '没找到 scripts\scan_no_cjk_qstringliteral.py，跳过该门禁。'
+}
+
 New-Item -ItemType Directory -Force -Path $BuildRoot | Out-Null
 
 # ---- load VS2015 x64 environment ----

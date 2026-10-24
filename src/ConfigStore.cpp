@@ -1,11 +1,39 @@
-#include "ConfigStore.h"
+﻿#include "ConfigStore.h"
 
 #include <QSettings>
 #include <QTimer>
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QStandardPaths>
+#include <QCoreApplication>
 #include <QTextCodec>
 #include <memory>
 #include "SecretStore.h"
+#include "AutoSyncScheduler.h"
+
+#ifdef _WIN32
+// 写注册表要 windows.h。
+//
+// 为什么**不用** QSettings(NativeFormat) 写 Run 键：
+// 那个后端会把该键下**所有**已有值读进来再整体写回，且一律按 REG_SZ 写 ——
+// 别人的 REG_EXPAND_SZ（带 %ProgramFiles% 的那种）会被写死成 REG_SZ，
+// 那条自启就此报废，而且是**别的软件**的，出了事没人会想到是这个程序干的。
+// 直接用 RegSetValueExW 只动**我们自己那一个值**，别的值一个字节都不碰。
+//
+// NOMINMAX：windows.h 的 min/max 宏会跟 Qt 头文件打架。
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+// advapi32.lib **不是** MSVC 的默认链接库（kernel32/user32/gdi32 才是），
+// 而本工程的 .pro 里只显式加了 crypt32 —— 直接调 RegSetValueExW 会 LNK2019。
+// 改 .pro 不在本次改动范围内，所以用 #pragma comment 在本文件里就地补上。
+#pragma comment(lib, "advapi32.lib")
+#endif
 
 namespace {
 
@@ -315,7 +343,7 @@ QString ConfigStore::invalidPortNotice(const QString &rawPort)
     // 空值单独说一句话。原措辞是「（当前内容：XXX）」，端口空的时候括号里什么都没有，
     // 现场人员看到的是一句没头没尾的话，反而不知道要往那一栏里填。
     if (rawPort.isEmpty()) {
-        return QString::fromUtf8(u8"设置里的 SSH 端口是空的。程序会按默认端口 22 处理。"
+        return QString::fromUtf8(u8"配置里还没有 SSH 端口（当前按默认端口 22 处理）。"
                                  u8"请填 1-65535 的纯数字，例如 2226。");
     }
     return QString::fromUtf8(u8"设置里的 SSH 端口不是有效的端口号（当前内容：")
@@ -401,15 +429,50 @@ QString ConfigStore::iniPath()
 // 而这种漂移的表现是「保存了但读不回来」，判据照样可能全绿。
 static const char *kOnlyNewKey = "sync/onlyNewFiles";
 static const char *kRememberKey = "app/rememberSettings";
+static const char *kAutoSyncEnabledKey = "sync/autoSyncEnabled";
+static const char *kAutoSyncIntervalKey = "sync/autoSyncIntervalSec";
+// 上一次**真正开跑**的时刻。用绝对时间点算下一次，
+// 这样"程序关掉三天后再开"会立刻补跑一次，而不是再等一个完整周期。
+static const char *kAutoSyncLastRunKey = "sync/autoSyncLastRunAt";
+// 自动同步模式：interval（按间隔重复）/ daily（每天定点）。默认 interval。
+// 每天定点的时刻："HH:mm"。默认 03:00。
+//
+// 注意这两个键在 **sync/** 段（和已有的 autoSyncEnabled / autoSyncIntervalSec 同段），
+// 而「开机自动启动」在 **app/** 段 —— 两类东西不要混。
+static const char *kAutoSyncModeKey = "sync/autoSyncMode";
+static const char *kAutoSyncDailyTimeKey = "sync/autoSyncDailyTime";
+// 「开机自动启动」的开关。它是**用户意图**；系统里实际有没有落地
+// 由 applyAutoStart() / isAutoStartActive() 单独回答。
+static const char *kAutoStartKey = "app/autoStartEnabled";
+
+// 自启项在 Windows 注册表里的位置与值名。
+#ifdef _WIN32
+static const wchar_t *kWinRunSubKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+static const wchar_t *kWinRunValue  = L"SyncReplayTool";
+#endif
+
+// Linux 自启项文件（XDG autostart 规范：~/.config/autostart/*.desktop）。
+QString autostartFilePath()
+{
+    return QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation)
+        + QStringLiteral("/autostart/syncreplaytool.desktop");
+}
 
 bool ConfigStore::loadOnlyNewFiles()
 {
     auto s = openSettings();
-    // 键不存在 = 老配置。第一次启动时保持「勾上」这一档不变，
-    // 否则升级即行为变更：老用户没做任何事，突然变成会覆盖远端同名文件。
+    // 键不存在 = 还没配过 → 默认**不勾**，走 --checksum（按内容比对）。
+    //
+    // 为什么默认不勾：需求 2「只同步新增**或修改**的文件」——
+    // "修改"这两个字决定了远端同名文件内容变了必须重传。
+    // 勾上「仅同步新增文件」= --ignore-existing，远端只要有同名路径就整个跳过，
+    // **改过的文件永远传不过去**，接收端（B 包）拿到的永远是旧内容。
+    //
+    // 手册《使用步骤与注意事项.md》步骤 5 写的也是「不勾（默认）= 按内容逐个比对」，
+    // 交付包里代码和手册必须一致，不能各说各话。
     if (!s->contains(QLatin1String(kOnlyNewKey)))
-        return true;
-    return s->value(QLatin1String(kOnlyNewKey), true).toBool();
+        return false;
+    return s->value(QLatin1String(kOnlyNewKey), false).toBool();
 }
 
 void ConfigStore::saveOnlyNewFiles(bool onlyNew)
@@ -430,6 +493,305 @@ void ConfigStore::saveRememberSettings(bool remember)
 {
     auto s = openSettings();
     s->setValue(QLatin1String(kRememberKey), remember);
+}
+
+bool ConfigStore::loadAutoSyncEnabled()
+{
+    auto s = openSettings();
+    if (!s->contains(QLatin1String(kAutoSyncEnabledKey)))
+        return false;
+    return s->value(QLatin1String(kAutoSyncEnabledKey), false).toBool();
+}
+
+void ConfigStore::saveAutoSyncEnabled(bool enabled)
+{
+    auto s = openSettings();
+    s->setValue(QLatin1String(kAutoSyncEnabledKey), enabled);
+}
+
+int ConfigStore::loadAutoSyncInterval()
+{
+    auto s = openSettings();
+    // 键不存在 = 还没配过。用默认值，不写盘（保持"没配就是没配"的事实）。
+    if (!s->contains(QLatin1String(kAutoSyncIntervalKey)))
+        return AutoSyncScheduler::DefaultIntervalSec;
+    int sec = s->value(QLatin1String(kAutoSyncIntervalKey),
+                       AutoSyncScheduler::DefaultIntervalSec).toInt();
+    // 范围**必须**与 UI 输入框的校验范围一致。
+    // 这里曾经是 [5, 3600]，而 UI 的 QIntValidator 也是 [5, 3600] ——
+    // 两侧一致，但这个范围本身是错的：5 秒一次全目录扫描 + 起 rsync
+    // + 建 SSH，会把客户机器打满；3600 秒上限又让"每天同步一次"
+    // （86400 秒）在界面上根本填不出来。
+    // 现在两边都引用 AutoSyncScheduler 的同一份常量，改一处两边同时变，
+    // 不会出现"界面填 5、后台存 60"这种客户完全察觉不到的错位。
+    return AutoSyncScheduler::clampIntervalSec(sec);
+}
+
+void ConfigStore::saveAutoSyncInterval(int seconds)
+{
+    seconds = AutoSyncScheduler::clampIntervalSec(seconds);
+    auto s = openSettings();
+    s->setValue(QLatin1String(kAutoSyncIntervalKey), seconds);
+}
+
+QDateTime ConfigStore::loadAutoSyncLastRunAt()
+{
+    auto s = openSettings();
+    if (!s->contains(QLatin1String(kAutoSyncLastRunKey)))
+        return QDateTime();
+    // 存的是 ISO 字符串。用 QDateTime::fromString 而不是 toSecsSinceEpoch，
+    // 因为后者对超出 2038 的时间会溢出，而客户机器的时间不一定靠谱。
+    QString raw = s->value(QLatin1String(kAutoSyncLastRunKey)).toString();
+    if (raw.isEmpty())
+        return QDateTime();
+    QDateTime dt = QDateTime::fromString(raw, Qt::ISODate);
+    if (!dt.isValid())
+        return QDateTime();
+    // 统一成本地时区比较。
+    //
+    // 存的是 **UTC**（写侧 toUTC()），读出来再 toLocalTime()。
+    //
+    // 为什么不能存本地墙钟：客户改系统时区（或跨夏令时）时，
+    // 裸墙钟串 "2026-10-22T18:16:39" 会被**按新时区**重新解释，
+    // 下次触发时刻最多偏 ±14 小时，方向还可能相反。
+    // 存 UTC 则只有一个绝对时刻，改时区不影响排程。
+    //
+    // 兼容旧数据：老版本存的是裸本地串，fromString 解析出来没有时区信息，
+    // Qt 按 LocalTime 解释 —— 读回来再 toLocalTime() 结果不变，
+    // 旧配置不会被这次改动弄坏。
+    const QDateTime local = dt.toLocalTime();
+
+    // **截到整秒**：排程基准必须是整秒（原因见 SyncPanel::autoSyncMarkRunStarted）。
+    //
+    // 老版本写进 ini 的时刻带毫秒（Qt::ISODate 在 msec≠0 时会带 ".zzz"），
+    // 读回来若不截，第一次排程的「名义到点时刻」就落在某一拍之后几毫秒 ⇒
+    // 那一拍醒来时 now < next ⇒ 判「未到点」跳过 ⇒ 升级后第一轮晚一个心跳。
+    //
+    // 截断只舍去毫秒，不改变日期与秒数 ⇒ 不影响定点模式的跨天判定。
+    return local.addMSecs(-local.time().msec());
+}
+
+void ConfigStore::saveAutoSyncLastRunAt(const QDateTime &dt)
+{
+    auto s = openSettings();
+    if (!dt.isValid()) {
+        s->remove(QLatin1String(kAutoSyncLastRunKey));
+        return;
+    }
+    // 存 UTC：见 loadAutoSyncLastRunAt() 里关于时区的说明。
+    // Qt::ISODate 对 UTC 会带 "Z" 后缀，fromString 能正确还原成 UTC。
+    s->setValue(QLatin1String(kAutoSyncLastRunKey), dt.toUTC().toString(Qt::ISODate));
+}
+
+// ------------------------------------------------------------------
+// 自动同步的两种模式：按间隔重复 / 每天定点
+// ------------------------------------------------------------------
+
+AutoSyncScheduler::Mode ConfigStore::loadAutoSyncMode()
+{
+    auto s = openSettings();
+    // 老 ini 没有这个键 → 老版本的行为（按间隔），**一个字都不写回去**。
+    if (!s->contains(QLatin1String(kAutoSyncModeKey)))
+        return AutoSyncScheduler::ModeInterval;
+    const QString raw = s->value(QLatin1String(kAutoSyncModeKey)).toString().trimmed().toLower();
+    if (raw == QLatin1String("daily"))
+        return AutoSyncScheduler::ModeDaily;
+    // 认不出来的值一律当 interval：宁可退回老行为，也不要停摆。
+    return AutoSyncScheduler::ModeInterval;
+}
+
+void ConfigStore::saveAutoSyncMode(AutoSyncScheduler::Mode mode)
+{
+    auto s = openSettings();
+    s->setValue(QLatin1String(kAutoSyncModeKey),
+                mode == AutoSyncScheduler::ModeDaily ? QStringLiteral("daily")
+                                                     : QStringLiteral("interval"));
+}
+
+QTime ConfigStore::loadAutoSyncDailyTime()
+{
+    auto s = openSettings();
+    // 老 ini 没有这个键 → 默认 03:00，且**不写回去**。
+    if (!s->contains(QLatin1String(kAutoSyncDailyTimeKey)))
+        return AutoSyncScheduler::defaultDailyTime();
+    QTime t;
+    // 存的值认不出来（有人手改坏了）→ 退回默认值，同样不写回去。
+    if (!AutoSyncScheduler::parseDailyTime(
+            s->value(QLatin1String(kAutoSyncDailyTimeKey)).toString(), &t))
+        return AutoSyncScheduler::defaultDailyTime();
+    return t;
+}
+
+void ConfigStore::saveAutoSyncDailyTime(const QTime &t)
+{
+    auto s = openSettings();
+    s->setValue(QLatin1String(kAutoSyncDailyTimeKey),
+                AutoSyncScheduler::dailyTimeToString(t));
+}
+
+// ------------------------------------------------------------------
+// 「开机自动启动」
+// ------------------------------------------------------------------
+
+bool ConfigStore::loadAutoStartEnabled()
+{
+    auto s = openSettings();
+    // 老 ini 里没有这个键 → 视为 false（自启默认关闭）。
+    // **不要因为读不到就把文件写回去**：只有用户真正点过勾选框才落盘。
+    if (!s->contains(QLatin1String(kAutoStartKey)))
+        return false;
+    return s->value(QLatin1String(kAutoStartKey), false).toBool();
+}
+
+void ConfigStore::saveAutoStartEnabled(bool enabled)
+{
+    auto s = openSettings();
+    s->setValue(QLatin1String(kAutoStartKey), enabled);
+}
+
+QString ConfigStore::configDir()
+{
+    // ini 实际所在目录 = 配置目录。锁文件放这里：
+    // 同一份配置 = 同一把锁；不同配置目录（测试沙箱、并行用例）= 互不干扰。
+    const QString dir = QFileInfo(iniPath()).absolutePath();
+    QDir().mkpath(dir);
+    return dir;
+}
+
+QString ConfigStore::autoStartCommand()
+{
+    const QString exe = QCoreApplication::applicationFilePath();
+    if (exe.isEmpty())
+        return QString();
+#ifdef _WIN32
+    // Windows：直接跑 exe。带引号 —— 装在 "C:\Program Files\..." 下时，
+    // 不加引号注册表这一行会被 Windows 截断成 "C:\Program"。
+    return QStringLiteral("\"%1\"").arg(exe);
+#else
+    // 麒麟交付包里**必须**走 run.sh：
+    // 直接跑二进制会缺 LD_LIBRARY_PATH / QT_PLUGIN_PATH，
+    // Qt 找不到平台插件直接 abort(134)，一个字符都不输出。
+    const QString runSh = QDir::cleanPath(QCoreApplication::applicationDirPath()
+                                         + QStringLiteral("/run.sh"));
+    if (QFile::exists(runSh))
+        return QStringLiteral("sh \"%1\"").arg(runSh);
+    return QStringLiteral("\"%1\"").arg(exe);
+#endif
+}
+
+QString ConfigStore::autoStartLocation()
+{
+#ifdef _WIN32
+    return QString::fromUtf8(u8"注册表 HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\SyncReplayTool");
+#else
+    return autostartFilePath();
+#endif
+}
+
+bool ConfigStore::isAutoStartActive()
+{
+#ifdef _WIN32
+    HKEY hKey = NULL;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kWinRunSubKey, 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+        return false;
+    bool found = false;
+    wchar_t buf[2048];
+    DWORD type = 0;
+    DWORD cb = sizeof(buf);
+    if (RegQueryValueExW(hKey, kWinRunValue, NULL, &type,
+                         reinterpret_cast<LPBYTE>(buf), &cb) == ERROR_SUCCESS) {
+        found = (type == REG_SZ || type == REG_EXPAND_SZ);
+    }
+    RegCloseKey(hKey);
+    return found;
+#else
+    return QFile::exists(autostartFilePath());
+#endif
+}
+
+bool ConfigStore::applyAutoStart(bool enable, QString *errorOut)
+{
+    QString err;
+    bool ok = false;
+
+#ifdef _WIN32
+    HKEY hKey = NULL;
+    // 只申请 KEY_SET_VALUE：只写值，不读整个键。
+    const LSTATUS r = RegCreateKeyExW(HKEY_CURRENT_USER, kWinRunSubKey, 0, NULL,
+                                      REG_OPTION_NON_VOLATILE, KEY_SET_VALUE,
+                                      NULL, &hKey, NULL);
+    if (r != ERROR_SUCCESS) {
+        err = QString::fromUtf8(u8"打不开注册表项 HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run（错误码 %1）")
+                  .arg(static_cast<uint>(r));
+    } else {
+        if (enable) {
+            const QString cmd = autoStartCommand();
+            if (cmd.isEmpty()) {
+                err = QString::fromUtf8(u8"取不到本程序的绝对路径，无法写自启项");
+            } else {
+                // Qt 5.9 的 QString::utf16() 返回 const ushort*（Qt 6 才改成 char16_t*）。
+                const ushort *w = cmd.utf16();
+                const LSTATUS wr = RegSetValueExW(
+                    hKey, kWinRunValue, 0, REG_SZ,
+                    reinterpret_cast<const BYTE *>(w),
+                    static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t)));
+                if (wr != ERROR_SUCCESS) {
+                    err = QString::fromUtf8(u8"写注册表自启项失败（错误码 %1）")
+                              .arg(static_cast<uint>(wr));
+                } else {
+                    ok = true;
+                }
+            }
+        } else {
+            const LSTATUS dr = RegDeleteValueW(hKey, kWinRunValue);
+            // ERROR_FILE_NOT_FOUND = 本来就没有 = 本来就处于"没开自启"，算成功。
+            if (dr != ERROR_SUCCESS && dr != ERROR_FILE_NOT_FOUND) {
+                err = QString::fromUtf8(u8"删除注册表自启项失败（错误码 %1）")
+                          .arg(static_cast<uint>(dr));
+            } else {
+                ok = true;
+            }
+        }
+        RegCloseKey(hKey);
+    }
+#else
+    const QString file = autostartFilePath();
+    if (enable) {
+        const QDir dir = QFileInfo(file).absoluteDir();
+        if (!dir.mkpath(QStringLiteral("."))) {
+            err = QString::fromUtf8(u8"创建自启目录失败：%1").arg(dir.absolutePath());
+        } else {
+            QFile f(file);
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+                err = QString::fromUtf8(u8"写自启文件失败：%1").arg(file);
+            } else {
+                QString text;
+                text += QStringLiteral("[Desktop Entry]\n");
+                text += QStringLiteral("Type=Application\n");
+                text += QString::fromUtf8(u8"Name=数据同步工具\n");
+                text += QStringLiteral("Exec=") + autoStartCommand() + QStringLiteral("\n");
+                text += QStringLiteral("X-GNOME-Autostart-enabled=true\n");
+                text += QStringLiteral("Terminal=false\n");
+                f.write(text.toUtf8());
+                f.close();
+                ok = true;
+            }
+        }
+    } else {
+        QFile f(file);
+        if (!f.exists()) {
+            ok = true;   // 本来就没有 = 本来就处于"没开自启"
+        } else if (!f.remove()) {
+            err = QString::fromUtf8(u8"删除自启文件失败：%1").arg(file);
+        } else {
+            ok = true;
+        }
+    }
+#endif
+
+    if (errorOut)
+        *errorOut = err;
+    return ok;
 }
 
 // 端口字符串是不是「合格的端口号」。

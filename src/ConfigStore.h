@@ -4,7 +4,10 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <QDateTime>
+#include <QTime>
 #include "Model.h"
+#include "AutoSyncScheduler.h"
 
 // 配置落盘到 ini，路径由 QSettings 决定：%APPDATA%/AP/SyncReplayTool.ini（win）
 class ConfigStore : public QObject
@@ -30,13 +33,92 @@ public:
     // 关掉程序再打开又变回勾上，于是「改了文件不重传」这件事会**反复出现**，
     // 而界面上没有任何地方说明它为什么不生效 —— 用户只会认为软件坏了。
     //
-    // 老配置里没有这个键时按 true 处理，保持「开箱即用」那一档不变。
+    // 老配置里没有这个键时按 false 处理（默认不勾 → --checksum 按内容比对），
+    // 与需求 2「新增**或修改**」和手册步骤 5「不勾（默认）」一致。
     static bool                    loadOnlyNewFiles();
     static void                    saveOnlyNewFiles(bool onlyNew);
 
     // 「记住设置」勾选框的持久化（默认 true，允许用户选择下次是否沿用/记住设置）
     static bool                    loadRememberSettings();
     static void                    saveRememberSettings(bool remember);
+
+    // 「自动同步」启用状态与检测周期的持久化（默认关闭）
+    //
+    // 周期的**合法范围**定义在 AutoSyncScheduler 里（10 ~ 86400 秒），
+    // UI 的输入框校验也引用那同一份常量 ——
+    // 两边各写一份范围，迟早会漂移成"界面填 5、后台存 60"，
+    // 客户既看不出来也察觉不到。
+    static bool                    loadAutoSyncEnabled();
+    static void                    saveAutoSyncEnabled(bool enabled);
+    static int                     loadAutoSyncInterval();
+    static void                    saveAutoSyncInterval(int seconds);
+    // 上一次自动同步**真正开跑**的时刻。
+    // 用来算下一次（next = last + interval），也用来跨程序重启延续节奏。
+    static QDateTime               loadAutoSyncLastRunAt();
+    static void                    saveAutoSyncLastRunAt(const QDateTime &dt);
+
+    // ---- 自动同步的两种模式：按间隔重复 / 每天定点 ----
+    //
+    // 参照物是 crontab，但**不给 cron 表达式**（需求 10 原文：
+    // 「不要让用户手填 cron」）。只有两档，界面二选一：
+    //
+    //   sync/autoSyncMode      = "interval" | "daily"，默认 "interval"
+    //   sync/autoSyncDailyTime = "HH:mm"，默认 "03:00"
+    //
+    // 老 ini 里没有这两个键 → 一律按默认值读（interval / 03:00），
+    // **且不要因为读不到就把文件写回去** —— 老配置必须**逐字节不变**，
+    // 否则"升级到新版本"就变成"顺手改了我的配置"。
+    //
+    // 两种模式互斥：切到 daily 时 interval 的数值保留但不生效，
+    // 切回 interval 时 daily 的时刻保留但不影响调度。
+    static AutoSyncScheduler::Mode  loadAutoSyncMode();
+    static void                    saveAutoSyncMode(AutoSyncScheduler::Mode mode);
+    static QTime                   loadAutoSyncDailyTime();
+    static void                    saveAutoSyncDailyTime(const QTime &t);
+
+    // ---- 「开机自动启动」----
+    //
+    // 持久化开关（app/autoStartEnabled，默认 false）。
+    //
+    // 三条口径（缺一不可）：
+    //   1. **默认关闭**。客户机上的同步程序会主动连远端、起 rsync、建 SSH，
+    //      开机就自动跑起来意味着"人还没坐下，网络已经在传数据"。
+    //      crontab 也是管理员显式写进去才生效，不是装上就跑。
+    //   2. **只负责启动程序**，不擅自开启自动同步。
+    //      程序被自启拉起来后沿用用户上次勾选的「自动同步」状态
+    //      （sync/autoSyncEnabled），"上次没勾"就只是把程序打开、不开始同步。
+    //   3. 老 ini 里没有这个键 → 视为 false，
+    //      **且不要因为读不到就把文件写回去**（只有用户真正点过勾选框才落盘）。
+    static bool                    loadAutoStartEnabled();
+    static void                    saveAutoStartEnabled(bool enabled);
+
+    // 把「开机自动启动」真正落到系统上。
+    //
+    // Windows：HKCU\Software\Microsoft\Windows\CurrentVersion\Run 下的一个值，
+    //          值 = 程序的绝对路径（带引号）。**免管理员权限**（HKCU 不需要提权）。
+    // Linux  ：~/.config/autostart/ 下的 .desktop 文件（XDG autostart 规范）。
+    //
+    // 失败时把原因写进 errorOut 并返回 false —— 界面必须给用户看得见的提示，
+    // 部署人员要能据此排查（路径不对？目录只读？）。
+    static bool                    applyAutoStart(bool enable, QString *errorOut);
+
+    // 系统里**当前实际**是不是处于自启状态（读注册表 / 读 .desktop）。
+    // 与 loadAutoStartEnabled()（用户意图）分开：用户手工删了注册表值时，
+    // 两者会不一致，界面据此提示"系统里已经没有了"。
+    static bool                    isAutoStartActive();
+
+    // 自启项的命令行（带引号的绝对路径；Linux 上优先用同目录的 run.sh）。
+    static QString                 autoStartCommand();
+
+    // 自启项落在哪里（给错误信息用，例如
+    // 「HKCU\Software\Microsoft\Windows\CurrentVersion\Run\SyncReplayTool」）。
+    static QString                 autoStartLocation();
+
+    // 配置目录（单实例锁文件放这里）。
+    //
+    // 锁必须**跟着配置目录走**：同一份配置 = 同一个目录 = 同一把锁；
+    // 不同配置目录（测试沙箱、并行用例）= 不同的实例，互不干扰。
+    static QString                 configDir();
 
     // 「记住设置」到底管什么：
     // 勾上   —— 目标连接信息（IP、端口、账号、密码、私钥、本机目录、远端路径）

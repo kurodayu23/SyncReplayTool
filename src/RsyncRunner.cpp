@@ -1,6 +1,7 @@
 #include "RsyncRunner.h"
 
 #include "ToolRunner.h"
+#include "FileScanner.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -240,7 +241,19 @@ enum FailLayer {
     LayerNetwork = 1,    // 网络 / 连接
     LayerAuth = 2,       // 认证
     LayerReceiver = 3,   // 接收端
-    LayerUnknown = 4
+    LayerUnknown = 4,
+    // 第 5 类（2026-10-24 补）：**对端 SSH 服务未应答**。
+    //
+    // 为什么追加在**末尾**而不是插在中间：层号 0~4 已经被
+    // --selfcheck 的判据表（main.cpp 的 kLayerCases）
+    // 和对外接口 RsyncRunner::layerOf() 钉死，插在中间会把既有判据全部打翻。
+    // 新值追加在末尾，0~4 一个都不动。
+    LayerReceiverSsh = 5,
+    // 第 6 类（2026-10-24 补，C 线 F-1）：**接收端同名目录挡住普通文件**。
+    //
+    // 和第 5 类一样只能追加在末尾：0~4 被 main.cpp 的 kLayerCases 钉死，
+    // 5 是上面这一条，新值只能继续往后排，既有判据一个都不动。
+    LayerReceiverNameConflict = 6
 };
 
 struct FailRule { int layer; const char *needle; };
@@ -330,7 +343,9 @@ const char *kLayerName[] = {
     u8"\u7F51\u7EDC\u94FE\u8DEF\u95EE\u9898\uFF08\u672A\u8FDE\u901A\uFF09",
     u8"\u8EAB\u4EFD\u8BA4\u8BC1\u95EE\u9898\uFF08\u8D26\u53F7\u5BC6\u7801/\u79C1\u94A5\uFF09",
     u8"\u63A5\u6536\u7AEF\u95EE\u9898\uFF08\u76EE\u6807\u7535\u8111\uFF09",
-    u8"\u672A\u80FD\u5F52\u56E0"
+    u8"\u672A\u80FD\u5F52\u56E0",
+    u8"\u5BF9\u7AEF SSH \u670D\u52A1\u672A\u5E94\u7B54\uFF08\u76EE\u6807\u7535\u8111 sshd \u6CA1\u5728\u670D\u52A1\uFF09",
+    u8"\u63A5\u6536\u7AEF\u540C\u540D\u51B2\u7A81\uFF08\u76EE\u6807\u7535\u8111\u4E0A\u5DF2\u6709\u540C\u540D\u76EE\u5F55\uFF09",
 };
 
 const char *kLayerMeaning[] = {
@@ -338,7 +353,9 @@ const char *kLayerMeaning[] = {
     u8"\u3010\u8D23\u4EFB\u5F52\u5C5E\uFF1A\u7F51\u7EDC\u94FE\u8DEF/\u9632\u706B\u5899\u3011\u62A5\u9519\u539F\u6587\u547D\u4E2D\u7F51\u7EDC\u5C42\u5339\u914D\u3002",
     u8"\u3010\u8D23\u4EFB\u5F52\u5C5E\uFF1A\u767B\u5F55\u51ED\u8BC1\u3011\u5DF2\u8FDE\u4E0A\u76EE\u6807\u7535\u8111\uFF0C\u4F46\u8D26\u53F7\u3001\u5BC6\u7801\u6216\u79C1\u94A5\u88AB\u5BF9\u65B9\u62D2\u7EDD\u3002",
     u8"\u3010\u8D23\u4EFB\u5F52\u5C5E\uFF1A\u63A5\u6536\u7AEF\u7535\u8111\u3011\u62A5\u9519\u539F\u6587\u7531\u63A5\u6536\u7AEF rsync \u8FDB\u7A0B\u8F93\u51FA\u3002",
-    u8"\u672A\u80FD\u4ECE\u539F\u59CB\u62A5\u9519\u91CC\u5224\u65AD\u51FA\u5177\u4F53\u5F52\u5C5E\u3002"
+    u8"\u672A\u80FD\u4ECE\u539F\u59CB\u62A5\u9519\u91CC\u5224\u65AD\u51FA\u5177\u4F53\u5F52\u5C5E\u3002",
+    u8"\u3010\u8D23\u4EFB\u5F52\u5C5E\uFF1A\u63A5\u6536\u7AEF\u7535\u8111\u3011\u7AEF\u53E3\u80FD\u8FDE\u4E0A\uFF0C\u4F46\u5BF9\u7AEF\u6CA1\u6709 SSH \u670D\u52A1\u5E94\u7B54\uFF08sshd \u6CA1\u542F\u52A8 / \u6B63\u5728\u91CD\u542F / \u7AEF\u53E3\u4E0A\u8DD1\u7684\u4E0D\u662F SSH \u670D\u52A1\uFF09\u3002",
+    u8"\u3010\u8D23\u4EFB\u5F52\u5C5E\uFF1A\u63A5\u6536\u7AEF\u7535\u8111\u3011\u8FDC\u7AEF\u540C\u4E00\u8DEF\u5F84\u4E0A\u5DF2\u7ECF\u5B58\u5728\u4E00\u4E2A\u540C\u540D\u76EE\u5F55\uFF0Crsync \u65E0\u6CD5\u628A\u5B83\u66FF\u6362\u6210\u540C\u540D\u666E\u901A\u6587\u4EF6\uFF08code 23\uFF09\u3002",
 };
 
 const char *kLayerAdvice[] = {
@@ -346,7 +363,9 @@ const char *kLayerAdvice[] = {
     u8"\u8BF7\u5728\u672C\u673A ping \u76EE\u6807 IP\u3001\u6838\u5BF9\u7AEF\u53E3\u53F7\uFF0C\u5E76\u8054\u7CFB\u7BA1\u7406\u5458\u786E\u8BA4\u5BF9\u7AEF\u662F\u5426\u5F00\u673A\u53CA\u9632\u706B\u5899\u662F\u5426\u653E\u884C SSH \u7AEF\u53E3\u3002",
     u8"\u8BF7\u6838\u5BF9\u76EE\u6807\u7535\u8111\u7684\u767B\u5F55\u8D26\u53F7\u548C\u5BC6\u7801\uFF1B\u82E5\u4F7F\u7528\u79C1\u94A5\uFF0C\u786E\u8BA4\u76F8\u5E94\u516C\u94A5\u5DF2\u6DFB\u52A0\u81F3\u76EE\u6807\u7535\u8111\u7684 authorized_keys\u3002",
     u8"\u8BF7\u8BA9\u76EE\u6807\u7535\u8111\u8D1F\u8D23\u4EBA\u68C0\u67E5\uFF1A\u76EE\u6807\u76EE\u5F55\u662F\u5426\u5B58\u5728\u3001\u8D26\u53F7\u662F\u5426\u5177\u5907\u5199\u6743\u9650\u3001\u78C1\u76D8\u7A7A\u95F4\u662F\u5426\u5145\u8DB3\u3001\u76EE\u6807\u7AEF\u662F\u5426\u5DF2\u5B89\u88C5 rsync\u3002",
-    u8"\u8BF7\u5C06\u4EE5\u4E0A\u539F\u59CB\u62A5\u9519\u53D1\u9001\u7ED9\u6280\u672F\u652F\u6301\u4EBA\u5458\u6392\u67E5\u3002"
+    u8"\u8BF7\u5C06\u4EE5\u4E0A\u539F\u59CB\u62A5\u9519\u53D1\u9001\u7ED9\u6280\u672F\u652F\u6301\u4EBA\u5458\u6392\u67E5\u3002",
+    u8"\u8BF7\u8BA9\u76EE\u6807\u7535\u8111\u7684\u8D1F\u8D23\u4EBA\u786E\u8BA4 sshd \u6B63\u5728\u8FD0\u884C\uFF08systemctl status sshd\uFF09\uFF0C\u5FC5\u8981\u65F6\u91CD\u542F\u5B83\uFF1B\u5982\u679C\u7AEF\u53E3\u53F7\u586B\u9519\u4E86\uFF0C\u6838\u5BF9\u4E00\u4E0B\u662F\u4E0D\u662F\u5199\u6210\u4E86\u522B\u7684\u670D\u52A1\u7684\u7AEF\u53E3\u3002\u8FD9\u4E00\u6B65\u4E0D\u9700\u8981 ping \u76EE\u6807 IP\uFF0C\u4E5F\u4E0D\u9700\u8981\u67E5\u9632\u706B\u5899 \u2014\u2014 \u7AEF\u53E3\u5DF2\u7ECF\u8FDE\u4E0A\u4E86\u3002",
+    u8"\u8BF7\u5230\u76EE\u6807\u7535\u8111\u4E0A\u628A\u90A3\u4E2A\u6321\u8DEF\u7684\u540C\u540D\u76EE\u5F55\u6539\u540D\u6216\u5220\u6389\uFF08\u76EE\u5F55\u91CC\u6709\u6587\u4EF6\u7684\u5148\u79FB\u8D70\uFF09\uFF0C\u518D\u91CD\u8DD1\u4E00\u6B21\uFF1B\u4E5F\u53EF\u4EE5\u5728\u8BBE\u7F6E\u91CC\u7ED9\u8FD9\u4E00\u7EC4\u6362\u4E00\u4E2A\u8FDC\u7AEF\u5B50\u76EE\u5F55\u3002\u8FD9\u4E00\u6B65\u4E0D\u9700\u8981 ping \u76EE\u6807 IP\uFF0C\u4E5F\u4E0D\u9700\u8981\u67E5\u9632\u706B\u5899\u3002",
 };
 
 
@@ -366,6 +385,19 @@ const char *kBlockedAdvice =
 // 但要分别去查两个方向，所以这条建议把两边都点一遍，而不是二选一乱猜。
 const char *kStallAdvice =
     u8"\u5B50\u8FDB\u7A0B\u957F\u65F6\u95F4\u6CA1\u6709\u8F93\u51FA\uFF0C\u5DF2\u7EC8\u6B62\u3002";
+
+// "核对远端目录卡住"专用的建议（2026-10-24 补）。
+//
+// 为什么单独一条：核对命令是**在远端执行的**，而同一条 ssh 通道
+// 刚刚成功传完整个组 —— 链路已经被证明是好的。
+// 这种时候给"查防火墙 / ping 目标 IP"（网络层建议）或
+// "查本机 rsync 和 ssh 齐不齐"（本机层建议）都会把人引到错的方向。
+//
+// 残余不确定性必须一起说出来：链路中途断开也会表现为"ssh 无响应"，
+// 现象上区分不了，所以文案同时点到"远端无响应"和"链路可能中断"，
+// 不替用户断言。
+const char *kVerifyTimeoutAdvice =
+    u8"\u672C\u7EC4\u6587\u4EF6\u5DF2\u4F20\u8F93\u5B8C\u6210\uFF1B\u6838\u5BF9\u8FDC\u7AEF\u76EE\u5F55\u7684 ssh \u547D\u4EE4\u957F\u65F6\u95F4\u6CA1\u6709\u54CD\u5E94\uFF0C\u6838\u5BF9\u7ED3\u679C\u672A\u786E\u8BA4\u3002\u8BF7\u5230\u8FDC\u7AEF\u786E\u8BA4\u6587\u4EF6\u662F\u5426\u9F50\u5168\uFF0C\u5E76\u786E\u8BA4\u94FE\u8DEF\u4E2D\u9014\u662F\u5426\u65AD\u5F00\u3002";
 
 // 强证据：只可能由**接收端进程自己**打出来的字样。
 //
@@ -455,9 +487,123 @@ const char *kHardLocal[] = {
     "bad configuration option"
 };
 
+// 第 5 类：**对端 SSH 服务未应答**。
+//
+// 症状：端口能连上（TCP 握手成功），但对端没有 SSH 服务应答 ——
+//       sshd 没在服务 / 正在重启 / 端口上跑的根本不是 ssh。
+// 实测（麒麟 VM 里把 sshd 停掉）：
+//   kex_exchange_identification: Connection closed by remote host
+//   rsync error: unexplained error (code 255) at main.c(1338) [sender=3.1.1]
+//
+// 为什么原来判成"网络链路问题（未连通）"是错的：
+//   那一层的通用建议是"ping 目标 IP、核对端口号、确认防火墙放行"，
+//   而端口明明是通的、链路明明是好的 —— 照这条提示去查防火墙会白跑一趟，
+//   真正该做的是"让对面把 sshd 起来"。
+//
+// **不能拿 "unexplained error (code 255)" 当触发条件**：
+//   code 255 是 rsync 对"ssh 子进程非零退出"的笼统说法，
+//   端口不通（Connection refused）和口令错（publickey,password）
+//   都会带上它 —— 而那两种的归属分别是网络层和认证层。
+//   --selfcheck 的判据表（main.cpp 的 kLayerCases）里就有这两条原文，
+//   拿 code 255 当条件会把它们一起带偏。
+//   所以这里只认"对端主动关闭连接 / 不是 SSH 协议"这一族原文。
+//
+// **也不能只看 kex_exchange_identification 就无条件判第 5 类**：
+//   "kex_exchange_identification: Connection closed by remote host" 与
+//   "ssh: connect to host ... Connection refused" 同时出现时，
+//   真正的原因是**端口上根本没有服务在听**（TCP 拒连），
+//   那属于网络层，必须让 kFailRules 去判。
+//   所以这里先把"硬网络症状"排除掉，剩下的才是第 5 类。
+bool isReceiverSshNotAnswering(const QString &text)
+{
+    // 对端主动关闭 / 没接 SSH 协议 —— 只有接收端自己会写出这些字样。
+    static const char *kReceiverSshNeedles[] = {
+        "Connection closed by remote host",
+        "kex_exchange_identification",
+        "Bad protocol version identification"
+    };
+    // 硬网络症状：出现这些就是"根本没连上"，归网络层，不是第 5 类。
+    static const char *kHardNetworkNeedles[] = {
+        "Connection refused",
+        "Connection timed out",
+        "Operation timed out",
+        "No route to host",
+        "Network is unreachable",
+        "Could not resolve hostname"
+    };
+    bool hit = false;
+    for (const char *n : kReceiverSshNeedles) {
+        if (text.contains(QLatin1String(n), Qt::CaseInsensitive)) {
+            hit = true;
+            break;
+        }
+    }
+    if (!hit)
+        return false;
+    for (const char *n : kHardNetworkNeedles) {
+        if (text.contains(QLatin1String(n), Qt::CaseInsensitive))
+            return false;
+    }
+    return true;
+}
+
+
+// 第 6 类：**接收端同名目录挡住普通文件**（C 线 F-1，2026-10-24 补）。
+//
+// 实测（远端已存在同名**非空目录**，要传的是同名普通文件）：
+//   rsync: could not make way for new regular file: probe.spe
+//   rsync: cannot delete non-empty directory: probe.spe
+//   rsync error: some files/attrs were not transferred (see previous errors) (code 23)
+//
+// 原来落到「未能归因」，给用户的建议是"把原始报错发给技术支持人员排查"——
+// 而真正该做的只有一件事：把远端那个挡路的同名目录处理掉。
+// 归属是接收端（错在目标电脑上），但接收端这一层自带的那套建议
+// （查目录是否存在、写权限、磁盘空间、有没有装 rsync）一条都不沾边，
+// 所以**单独分一层**，给专门的下一步。
+//
+// 为什么必须放在 classifyLayer 的**最前面**：
+//   这句原文可能被 "[sender]" 前缀抢先命中（rsync 3.x 会给发送端的
+//   消息加 [sender] 前缀），落到本机层就完全带偏了。
+//   这两句原文本身极精确（只有"目标端同名目录挡路"才会出现），先判它最安全。
+bool isReceiverNameConflict(const QString &text)
+{
+    static const char *kNeedles[] = {
+        "could not make way for new regular file",
+        "cannot delete non-empty directory"
+    };
+    for (const char *n : kNeedles) {
+        if (text.contains(QLatin1String(n), Qt::CaseInsensitive))
+            return true;
+    }
+    return false;
+}
+
 // 原文落在哪一层。判据全在 kFailRules 里，逐条匹配英文原文。
+// 路径里的最后一个分隔符位置（/ 或 \\）。
+//
+// 为什么两种都要认：rsync 在 Windows 上报的路径可能是
+// "C:/data/x.spe"，也可能是 "C:\\data\\x.spe"。
+// 只认 '/' 的话，后一种取不到 basename → 整条被丢掉，
+// 本机读不到的文件永远归不了因、永远显示「✓ 已完成」。
+int lastSeparatorIndex(const QString &path)
+{
+    const int slash = path.lastIndexOf(QLatin1Char('/'));
+    const int bslash = path.lastIndexOf(QLatin1Char('\\'));
+    return (bslash > slash) ? bslash : slash;
+}
+
+// 路径的文件名部分。没有分隔符时返回空串。
+QString baseNameOf(const QString &path)
+{
+    const int slash = lastSeparatorIndex(path);
+    return slash < 0 ? QString() : path.mid(slash + 1);
+}
+
 int classifyLayer(const QString &text)
 {
+    // 第 6 类最先判（理由见 isReceiverNameConflict 的注释）。
+    if (isReceiverNameConflict(text))
+        return LayerReceiverNameConflict;
     for (const char *needle : kHardReceiver) {
         if (text.contains(QLatin1String(needle), Qt::CaseInsensitive))
             return LayerReceiver;
@@ -466,6 +612,11 @@ int classifyLayer(const QString &text)
         if (text.contains(QLatin1String(needle), Qt::CaseInsensitive))
             return LayerLocal;
     }
+    // 第 5 类要在 kFailRules **之前**判：kFailRules 里
+    // "Connection closed by remote host" 和 "kex_exchange_identification"
+    // 都在网络层，先命中它们就轮不到这里了。
+    if (isReceiverSshNotAnswering(text))
+        return LayerReceiverSsh;
     for (const FailRule &r : kFailRules) {
         if (text.contains(QLatin1String(r.needle), Qt::CaseInsensitive))
             return r.layer;
@@ -618,7 +769,45 @@ RsyncRunner::ProgressFrame RsyncRunner::parseProgressFrame(const QString &line)
         }
     }
     f.speedBps *= kMul[unitIdx];
+
+    // 帧尾的 "(xfr#N, to-chk=a/b)"：N = **rsync 已经完成传输的文件数**。
+    //
+    // 它是 rsync 自己报出来的权威数字，比"下一个 %n == 上一个结束"这种推断准得多：
+    //   - 推断要求"后面还有下一个 %n"，失败轮里最后一个文件永远等不到；
+    //   - xfr# 在文件**传完**的那一刻就递增，与后面还有没有 %n 无关。
+    //
+    // 0 = 这一帧里没有 xfr#（并不是每一帧都带这个计数）。
+    {
+        static const QRegularExpression xfrRe(QStringLiteral("\\(xfr#(\\d+)"));
+        const QRegularExpressionMatch xm = xfrRe.match(line);
+        if (xm.hasMatch())
+            f.xfr = xm.captured(1).toInt();
+    }
     return f;
+}
+
+// 把被进度帧粘住的 %n 文件名从一行里剥出来。
+//
+// 实测（2026-10-23 真机 stdout 原文）：
+//     <CR>             13   0%    0.00kB/s    0:00:00 (xfr#1, to-chk=4/5)b.dat<CR><LF>
+// --out-format=%n 与 --info=progress2 共用 stdout，行边界被进度帧吃掉，
+// 文件名直接跟在帧的尾巴上。handleLine 一认出帧就 return，这个名字就被整段丢掉 ——
+// 它拿不到"传输完成"事件，失败轮收尾时被当成"没传成的"刷成「✕ 失败」
+// （实测远端 md5 与本机完全一致，界面却是失败）。
+//
+// 帧的形态是固定的：<字节> <百分比> <速度> <用时> (xfr#N, to-chk=a/b)
+// 用正则把整帧吃掉，剩下的非空文本就是文件名。
+QString RsyncRunner::nameAfterProgressFrame(const QString &line)
+{
+    static const QRegularExpression frameRe(
+        QStringLiteral("^\\s*[\\d,.]+\\s+\\d{1,3}%\\s+[\\d,.]+[KkMmGgTtPp]?B/s"
+                       "(?:\\s+[0-9:.]+)?(?:\\s*\\(xfr#\\d+,\\s*to-chk=\\d+/\\d+\\))?"));
+    const QRegularExpressionMatch m = frameRe.match(line);
+    if (!m.hasMatch())
+        return QString();
+    // 尾巴**不 trim**：文件名首尾带空格是合法的，
+    // resolveRsyncName 会把原样与 trim 两份都试一遍。
+    return line.mid(m.capturedEnd());
 }
 
 // 把 rsync 转义过的文件名还原成真实文件名。
@@ -930,12 +1119,12 @@ QString specialAdvice(const QString &raw)
     return QString::fromUtf8(
         u8"\u62A5\u9519\u539F\u6587\u91CC\u7684\u201COperation not permitted\u201D\u610F\u601D\u662F"
         u8"\u201C\u672C\u673A\u62D2\u7EDD\u4E86\u8FD9\u4E2A\u8FDE\u63A5\u201D\u3002"
-        u8"\u5728\u8FD9\u53F0\u7535\u8111\u4E0A\u6253\u5F00\u3010\u5B89\u5168\u4E2D\u5FC3\u3011"
-        u8"\u2192\u3010\u5E94\u7528\u6267\u884C\u63A7\u5236\u3011"
+        u8"在这台电脑上把本程序加进安全软件的允许运行名单"
+        u8"（Windows 杀毒软件、麒麟安全中心等）"
         u8"\uFF0C\u628A\u672C\u7A0B\u5E8F\u8BBE\u4E3A\u3010\u59CB\u7EC8\u5141\u8BB8\u3011"
-        u8"\uFF08\u8FDE\u540C\u76EE\u5F55\u4E0B\u7684 plugins\u3001lib\u3001libexec\u3001bin \u4E00\u8D77\u653E\u884C\uFF09\uFF0C"
+        u8"（连同程序目录下的运行库一起放行），"
         u8"\u7136\u540E\u91CD\u65B0\u542F\u52A8\u7A0B\u5E8F\u3002"
-        u8"\u82E5\u679C\u4E0D\u80FD\u6539\u8BBE\u7F6E\uFF0C\u628A\u6574\u4E2A\u89E3\u538B\u76EE\u5F55"
+        u8"如果不能改设置，把整个解压目录"
         u8"\u590D\u5236\u5230\u684C\u9762\u6216\u4E0B\u8F7D\u76EE\u5F55\u518D\u8FD0\u884C\u4E00\u6B21\u2014\u2014"
         u8"\u65B0\u590D\u5236\u7684\u6587\u4EF6\u4F1A\u88AB\u91CD\u65B0\u8BC4\u4F30\u3002");
 }
@@ -1443,6 +1632,21 @@ QStringList RsyncRunner::sshArgs(const TargetConfig &target, bool quotePath) con
     QStringList a;
     a << QStringLiteral("-p") << QString::number(target.port);
 
+    // 连接超时。
+    //
+    // OpenSSH 默认**不限制** TCP 连接时间：目标地址不可达时它会一直等到
+    // 操作系统的 SYN 重试耗尽（实测麒麟 V10 上约 130 秒）。这 130 秒里界面只显示
+    // 「同步中」，用户既看不到原因、也等不到报错，看起来就是"软件卡住了"；
+    // 最后靠看门狗（最少 180 秒）才被杀，弹一句"长时间没有任何输出"——
+    // **方向全错**：客户会去查私钥、查网络、查磁盘，
+    // 而真实原因只是"这台机器的地址填错了"。
+    //
+    // 加上之后：不可达时 20 秒内明确失败，ssh 会打印
+    // "connect to host X port 22: Connection timed out"，
+    // 产品已有的**网络层归因**随即命中，用户看到的是"目标电脑连不上"。
+    // 可达时没有任何影响 —— 它只约束 TCP 连接与 SSH 握手。
+    a << QStringLiteral("-o") << QStringLiteral("ConnectTimeout=20");
+
     if (target.useKey()) {
         // 私钥路径可能带空格；交给 rsync -e 时要带引号，自己拼路径时不能带。
         const QString key = quotePath
@@ -1676,6 +1880,10 @@ void RsyncRunner::start(const TargetConfig &target,
     m_total = files.size();
     m_failed = false;
     m_cancelRequested = false;
+    // 上一轮若因看门狗超时而中止，这一轮必须清掉旗标，
+    // 否则第二轮会在 launchNext() 开头直接走收尾分支，一组都不跑。
+    m_watchdogAborted = false;
+    m_abortedUnfinished = false;
     // 复用同一个 RsyncRunner 连跑多次时，上一轮的标记不能带过来，
     // 否则会把这一轮正常同步判成"目录被换掉"。
     m_verifyToken.clear();
@@ -1688,6 +1896,33 @@ void RsyncRunner::start(const TargetConfig &target,
     m_localRoot = localRoot;
     cleanupListFiles();
 
+    // 扫描阶段的"跳过清单"写进同步日志（**跳过必须留痕**，D-1 起）。
+    //
+    // 为什么在这里播报、而不是扫描刚结束的地方：扫描结果送回界面的是
+    // SyncPanel（面板自己管日志面板），而本线只允许改 RsyncRunner / FileScanner /
+    // FileTableModel 这几个文件 —— SyncPanel.cpp 一个字节都不能动。
+    // RsyncRunner 的 logText 走的是同一个日志控件，用户看到的是同一份日志。
+    //
+    // 每轮只播报一次（按扫描代次记）：自动同步是一轮一轮跑的，
+    // 每轮都刷一遍同样的清单会把日志刷爆。
+    const int skipGen = FileScanner::scanGeneration();
+    if (skipGen != m_lastSkipGeneration) {
+        m_lastSkipGeneration = skipGen;
+        const QStringList notes = FileScanner::skippedNotes();
+        const int total = FileScanner::skippedCount();
+        if (total > 0) {
+            emit logText(QString::fromUtf8(
+                u8"扫描阶段跳过 %1 个条目（这些不会同步，明细如下）：").arg(total));
+            for (int i = 0; i < notes.size(); ++i)
+                emit logText(notes.at(i));
+            const int more = total - notes.size();
+            if (more > 0) {
+                emit logText(QString::fromUtf8(
+                    u8"另有 %1 条同类跳过未逐条列出（总数见上一行）。").arg(more));
+            }
+        }
+    }
+
     // 主机名 / 账号的字符校验放在最前面：这两个字段拼进的是 "user@host:path"，
     // 里面有空格或冒号时 rsync 会把这一串拆开，可能报一堆看不懂的错，
     // 也可能安静地连到别的地方去。必须在起任何子进程之前拦下来。
@@ -1695,6 +1930,41 @@ void RsyncRunner::start(const TargetConfig &target,
         emit logText(QString::fromUtf8(u8"\u4E3B\u673A\u540D\u6216\u8D26\u53F7\u91CC\u542B\u4E0D\u5141\u8BB8\u7684\u5B57\u7B26\uFF08\u7A7A\u683C\u3001\u5192\u53F7\u3001\u5F15\u53F7\u3001\u5206\u53F7\u7B49\uFF09\u3002"));
         emit allFinished(false);
         return;
+    }
+
+    // 路径里带 U+FFFD（REPLACEMENT CHARACTER）= 路径里有**非法字节**。
+    //
+    // 背景（F-2）：配置里写的非法 UTF-8 字节（例如 0xFF）在解码时会被替换成
+    // U+FFFD。用户配的是 A 目录，产品却按 A'（非法字节被换成 �）建目录，
+    // 然后报「同步完成」—— **落点与用户配置不一致，界面一句告警都没有**。
+    // 这种"成功"比失败更坏：用户以为数据进了 A，实际全躺在 A' 里。
+    //
+    // 这里必须**拒绝并说清楚**，不能静默改写后照跑。
+    // 用 U+FFFD 的 UTF-8 字节序列构造，避开 QChar 构造函数的版本差异。
+    {
+        static const QString kReplacement = QString::fromUtf8("\xEF\xBF\xBD");
+        const bool badRemote = target.remoteRoot.contains(kReplacement);
+        const bool badLocal  = localRoot.contains(kReplacement);
+        // 规则里的**远端子目录**也是远端路径的一部分
+        // （remoteDir = 远端根 + 远端子目录，两段拼起来才是真正要用的路径）。
+        // 原来只看远端根，于是"根是干净的、子目录带非法字节"这一种会被放过去 ——
+        // 照样是静默改写后照传，一样落到用户没填过的目录。
+        bool badSubDir = false;
+        for (const SyncRule &r : rules) {
+            if (r.remoteSubDir.contains(kReplacement)) {
+                badSubDir = true;
+                break;
+            }
+        }
+        if (badRemote || badLocal || badSubDir) {
+            emit logText(QString::fromUtf8(
+                u8"\u8FDC\u7AEF\u6216\u672C\u673A\u8DEF\u5F84\u91CC\u6709\u975E\u6CD5\u5B57\u7B26\uFF08\u89E3\u7801\u540E\u663E\u793A\u4E3A U+FFFD \u66FF\u6362\u7B26\uFF09\uFF0C\u5DF2\u53D6\u6D88\u540C\u6B65\u3002"));
+            if (badRemote || badSubDir)
+                emit logText(QString::fromUtf8(
+                    u8"\u8BF7\u5728\u8BBE\u7F6E\u91CC\u628A\u8FDC\u7AEF\u8DEF\u5F84\u91CD\u65B0\u9009\u4E00\u6B21\uFF0C\u4E0D\u8981\u76F4\u63A5\u624B\u5199\u914D\u7F6E\u6587\u4EF6\u3002"));
+            emit allFinished(false);
+            return;
+        }
     }
 
     const QString rsyncBin = locateTool(QStringLiteral("rsync"));
@@ -1841,6 +2111,29 @@ void RsyncRunner::start(const TargetConfig &target,
     //
     // 控制字符（\r \n \t DEL 之类）同样必须拒，理由见下面循环里的注释。
     auto reject = [this, &target](const QString &raw) {
+        // Windows 盘符开头的路径（"C:/test"、"d:\\data"）：在 Linux 远端上
+        // ':' 和 '/' 都是合法目录名字符，所以上面那圈字符检查放它过去了，
+        // 结果是远端 home 下凭空多出一个字面名叫 "C:" 的目录，
+        // 文件老老实实传进去、退出码 0、界面显示"同步完成"——
+        // 全程没有任何提示，用户以为传到了 D 盘其实根本没这回事。
+        //
+        // 明确按"盘符 + 冒号 + 路径分隔符"的完整形态拒绝，而不是见 ':' 就拒：
+        // Linux 上 ": " 开头的目录名并不罕见，无差别拒绝会把正常用户挡在门外。
+        // 判据取自本机填写的那一份，用户填的是 Windows 路径才命中。
+        const QString t = raw.trimmed();
+        if (t.size() >= 3
+            && t.at(0).isLetter() && t.at(1) == QLatin1Char(':')
+            && (t.at(2) == QLatin1Char('/') || t.at(2) == QLatin1Char('\\'))) {
+            emit logText(QString::fromUtf8(u8"\u8FDC\u7AEF\u8DEF\u5F84 [%1] \u770B\u8D77\u6765\u50CF Windows \u76D8\u7B26\u3002")
+                             .arg(t));
+            emit logText(QString::fromUtf8(u8"\u8FD9\u53F0\u8FDC\u7AEF\u662F Linux\uFF0C\u5B83\u4F1A\u5728\u5BB6\u76EE\u5F55\u4E0B\u5EFA\u4E00\u4E2A\u5B57\u9762\u540D"
+                                 u8"\u53EB %1 \u7684\u76EE\u5F55\u3002"
+                                 u8"\u8BF7\u6539\u6210\u7EDD\u5BF9\u8DEF\u5F84\uFF08\u5982 /home/\u7528\u6237\u540D/\u76EE\u5F55\uFF09"
+                                 u8"\u6216\u8005\u7528 ~ \u8868\u793A\u5F53\u524D\u8D26\u53F7\u7684\u5BB6\u76EE\u5F55\u3002")
+                             .arg(t.section(QLatin1Char(':'), 0, 0)));
+            emit allFinished(false);
+            return true;
+        }
         for (const QChar c : raw) {
             // 控制字符：判据直接搬 isSafeLoginField 里那一条
             // （本文件 "if (u < 0x20 || u == 0x7F) return false;"），
@@ -1870,29 +2163,6 @@ void RsyncRunner::start(const TargetConfig &target,
             return true;
         }
 
-        // Windows 盘符开头的路径（"C:/test"、"d:\\data"）：在 Linux 远端上
-        // ':' 和 '/' 都是合法目录名字符，所以上面那圈字符检查放它过去了，
-        // 结果是远端 home 下凭空多出一个字面名叫 "C:" 的目录，
-        // 文件老老实实传进去、退出码 0、界面显示"同步完成"——
-        // 全程没有任何提示，用户以为传到了 D 盘其实根本没这回事。
-        //
-        // 明确按"盘符 + 冒号 + 路径分隔符"的完整形态拒绝，而不是见 ':' 就拒：
-        // Linux 上 ": " 开头的目录名并不罕见，无差别拒绝会把正常用户挡在门外。
-        // 判据取自本机填写的那一份，用户填的是 Windows 路径才命中。
-        const QString t = raw.trimmed();
-        if (t.size() >= 3
-            && t.at(0).isLetter() && t.at(1) == QLatin1Char(':')
-            && (t.at(2) == QLatin1Char('/') || t.at(2) == QLatin1Char('\\'))) {
-            emit logText(QString::fromUtf8(u8"\u8FDC\u7AEF\u8DEF\u5F84 [%1] \u770B\u8D77\u6765\u50CF Windows \u76D8\u7B26\u3002")
-                             .arg(t));
-            emit logText(QString::fromUtf8(u8"\u8FD9\u53F0\u8FDC\u7AEF\u662F Linux\uFF0C\u5B83\u4F1A\u5728\u5BB6\u76EE\u5F55\u4E0B\u5EFA\u4E00\u4E2A\u5B57\u9762\u540D"
-                                 u8"\u53EB %1 \u7684\u76EE\u5F55\u3002"
-                                 u8"\u8BF7\u6539\u6210\u7EDD\u5BF9\u8DEF\u5F84\uFF08\u5982 /home/\u7528\u6237\u540D/\u76EE\u5F55\uFF09"
-                                 u8"\u6216\u8005\u7528 ~ \u8868\u793A\u5F53\u524D\u8D26\u53F7\u7684\u5BB6\u76EE\u5F55\u3002")
-                             .arg(t.section(QLatin1Char(':'), 0, 0)));
-            emit allFinished(false);
-            return true;
-        }
         return false;
     };
     // glob 元字符：--protect-args 挡不住 rsync 自己对远端路径做 glob 展开，
@@ -1937,9 +2207,9 @@ void RsyncRunner::start(const TargetConfig &target,
             && trimmed != QLatin1String("~")
             && !trimmed.startsWith(QLatin1String("~/"))) {
             emit logText(QString::fromUtf8(u8"\u8FDC\u7AEF\u8DEF\u5F84\u4E0D\u80FD\u7528 ~\u7528\u6237\u540D \u8FD9\u79CD\u5F62\u5F0F\u3002"
-                                             u8"\u8FD9\u91CC\u7684\u5F15\u53F7\u4E0D\u4F1A\u88AB\u8FDC\u7AEF\u5C55\u5F00\uFF0C"
+                                             u8"这里的用户名不会被远端展开，"
                                              u8"\u6362\u6210\u7EDD\u5BF9\u8DEF\u5F84\uFF08\u5982 /home/\u7528\u6237\u540D/\u76EE\u5F55\uFF09"
-                                             u8"\u6216\u8005\u7528 ~\u8868\u793A\u5F53\u524D\u8D26\u53F7\u7684\u5BB6\u76EE\u5F55\u3002")
+                                             u8"或者用 ~ 表示当前账号的家目录。")
                              .arg(trimmed));
             emit allFinished(false);
             return;
@@ -2161,6 +2431,18 @@ void RsyncRunner::ensureRemoteDirs()
     for (const QString &p : statArgs) {
         QString dir = p;
         dir.replace(QLatin1Char('\''), QLatin1String("'\\''"));
+        // **先把上一轮留下的标记清掉，再写自己这轮的。**
+        //
+        // 标记文件是"传前传后对暗号"用的：正常路径下核对完就删掉了。
+        // 但进程被强杀（Stop-Process / 断电 / 杀软误杀）时收尾代码根本不会跑，
+        // 接收端目录里就长期躺着 .srt-verify-<pid>-<时间戳> ——
+        // 客户在远端看到莫名文件，以为是同步过去的业务文件（台账 F-10）。
+        //
+        // 自己这轮的标记是**最后**才写的，所以"先删旧的、再写新的"不会误删自己。
+        // glob 那一段**不能加引号**（加了引号就变成去删一个名叫
+        // .srt-verify-* 的文件），只有目录名部分加引号。
+        drops << (QStringLiteral("rm -f -- '") + dir + QLatin1Char('/')
+                  + QLatin1String("'.srt-verify-*"));
         drops << (QStringLiteral("printf %s '") + m_verifyToken + QLatin1String("' > '")
                   + dir + QLatin1Char('/') + m_verifyMarker + QLatin1Char('\''));
     }
@@ -2177,6 +2459,9 @@ void RsyncRunner::ensureRemoteDirs()
     connect(m_proc, &QProcess::errorOccurred, this, &RsyncRunner::onProcError);
     connect(m_proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &RsyncRunner::onDirsFinished);
+    // 看门狗守的是"建远端目录"这一步（ssh mkdir）。
+    // 阶段标记决定超时时的文案与归因 —— 见 onWatchdogTimeout()。
+    m_watchStage = StageRemoteDirs;
     m_watchdog.start(watchdogMs());
 
     QStringList args = sshArgs(m_target, false);
@@ -2184,6 +2469,10 @@ void RsyncRunner::ensureRemoteDirs()
          << (QStringLiteral("mkdir -p -- ") + quoted.join(QLatin1Char(' '))
              + QStringLiteral("; ") + drops.join(QStringLiteral("; ")));
     m_stderrTail.clear();
+    m_failedNameHints.clear();
+    m_failedRemotePaths.clear();
+    m_quotedPathNames.clear();
+    m_stderrPending.clear();
     m_proc->start(sshBin, args);
 }
 
@@ -2195,7 +2484,24 @@ void RsyncRunner::onDirsFinished(int exitCode, QProcess::ExitStatus status)
     // 不补这一次读取，目录创建失败就只剩一句"退出码 255"没有原因。
     takeStderrTail();
 
-    if (exitCode != 0) {
+    // **看门狗杀掉的情形要单独处理。**
+    //
+    // 实测（假 rsync 夹具，看门狗 1ms）：
+    //   创建远端目录失败（退出码 62097）
+    //   【归因】未能归因：未能从原始报错里判断出具体归属。
+    //
+    // 两行都是错的：
+    //   62097 是 Windows 上 kill() 的产物，不是 ssh 自己的退出码 ——
+    //   客户拿它去查"62097 是什么意思"查不到任何东西。
+    //   而 stderr 在"卡住"这个场景下本来就是空的（进程一个字都没吐），
+    //   classifyLayer("") 落到兜底分支，于是打出"未能归因" ——
+    //   这跟上一条"看门狗超时"自相矛盾：原因明明已经说清楚了。
+    //
+    // 所以：被看门狗杀掉时，不报退出码、不做基于 stderr 的归因。
+    // 真正的原因（哪个阶段、为什么卡）已经由 onWatchdogTimeout 说过了。
+    const bool killedByWatchdog = m_watchdogAborted;
+
+    if (exitCode != 0 && !killedByWatchdog) {
         emit logText(QString::fromUtf8(u8"\u521B\u5EFA\u8FDC\u7AEF\u76EE\u5F55\u5931\u8D25\uFF08\u9000\u51FA\u7801 %1\uFF09%2")
                          .arg(exitCode)
                          .arg(m_stderrTail.trimmed().isEmpty()
@@ -2204,13 +2510,17 @@ void RsyncRunner::onDirsFinished(int exitCode, QProcess::ExitStatus status)
     }
     // mkdir -p 自己就失败（连不上 / 没权限）时，原因同样要留给弹框：
     // 这一步的失败往往才是真正的根因，rsync 后面报的是它的次生结果。
-    if (exitCode != 0 && !m_stderrTail.trimmed().isEmpty())
+    if (exitCode != 0 && !killedByWatchdog && !m_stderrTail.trimmed().isEmpty())
         m_lastFailure = m_stderrTail.trimmed();
     // 四层归因：mkdir 这一步到底是连不上、没权限还是磁盘满，说的是完全不同的
     // 三个方向，而后面 rsync 报出来的都是它的次生结果，所以必须在这里按原文判一次。
-    if (exitCode != 0)
+    if (exitCode != 0 && !killedByWatchdog)
         reportAttribution(m_stderrTail);
     m_stderrTail.clear();
+    m_failedNameHints.clear();
+    m_failedRemotePaths.clear();
+    m_quotedPathNames.clear();
+    m_stderrPending.clear();
 
     // mkdir 那步自己就失败了（连不上、没权限），标记多半也没写进去，
     // 这时再起一次 ssh 去删纯属多余——目标本来就连不上，还容易卡住收尾。
@@ -2279,6 +2589,8 @@ void RsyncRunner::verifyRemoteDir(const QString &remoteDir)
     connect(m_proc, &QProcess::readyReadStandardOutput, this, &RsyncRunner::onVerifyStdout);
     connect(m_proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &RsyncRunner::onVerifyFinished);
+    // 看门狗守的是"核对远端目录"这一步（ssh cat/rm 标记）。
+    m_watchStage = StageVerify;
     m_watchdog.start(watchdogMs());
 
     QStringList args = sshArgs(m_target, false);
@@ -2321,6 +2633,10 @@ void RsyncRunner::onVerifyFinished(int exitCode, QProcess::ExitStatus status)
     m_verifyDir.clear();
     m_inVerify = false;
     m_stderrTail.clear();
+    m_failedNameHints.clear();
+    m_failedRemotePaths.clear();
+    m_quotedPathNames.clear();
+    m_stderrPending.clear();
 
     m_proc->deleteLater();
     m_proc = nullptr;
@@ -2366,6 +2682,28 @@ void RsyncRunner::runFinishCleanup()
 
 void RsyncRunner::launchNext()
 {
+    // 看门狗超时 → 本轮收尾，**不再起下一组**。
+    //
+    // 不加这个判断时，onWatchdogTimeout() 里的 waitForFinished(1000)
+    // 会同步触发 finished() → onFinished() → launchNext()，
+    // 于是下一组被起起来、紧接着又被 closeJob() 杀掉 ——
+    // 实测后面所有组全部陪葬（10 个文件全标 failed）。
+    if (m_watchdogAborted) {
+        emit logText(QString::fromUtf8(
+            u8"\u672C\u8F6E\u56E0\u770B\u95E8\u72D7\u8D85\u65F6\u800C\u7EC8\u6B62\uff0C\u540E\u9762\u7684\u5206\u7EC4\u4E0D\u518D\u6267\u884C\u3002"));
+        // 核对阶段被看门狗杀掉时，"数据有没有问题"是**未知的**，
+        // 不是"有问题"：rsync 退出码 0 已经证明这一组传完了，
+        // 卡住的是"核对"这个手段（见 onWatchdogTimeout 里的说明）。
+        //
+        // 硬约束不变：这里仍然 emit allFinished(false) —— 后续分组没跑，
+        // 整轮绝不能报成功。
+        if (!m_abortedUnfinished)
+            m_failed = true;
+        runFinishCleanup();
+        emit allFinished(false);
+        return;
+    }
+
     if (m_cancelRequested || m_groupIndex >= m_groups.size()) {
         // 取消也算"没干完"，报 false 让界面别显示"同步完成"。
         // 具体文案由调用方看 wasCanceled() 区分。
@@ -2411,6 +2749,10 @@ void RsyncRunner::launchNext()
     // 新的一组开始：上一组没收尾的那个"在传文件名"必须清掉，
     // 否则它会被算进这一组的成果里（onProcFinished 里的结账会重复计一次）。
     m_startedName.clear();
+    // 新的一组：xfr# 从 1 重新数，名字序列与结算计数也重新开始。
+    m_groupNames.clear();
+    m_settledCount = 0;
+    m_xfrCount = 0;
     // 上一组报失败的文件不能带进这一组：同一批文件名可能跨组出现，
     // 带过来的话这一组里同名的好文件会被误标成失败。
     m_failedNames.clear();
@@ -2492,7 +2834,46 @@ void RsyncRunner::launchNext()
     // -e 的值里不能带引号：QProcess 不经过 shell，rsync 会把带引号的整串
     // 当成一个可执行文件名去 exec，直接 "No such file or directory"。
     // 程序目录已经注入到子进程 PATH，这里只写命令名，装在带空格的路径下也没问题。
+    // rsync 起 ssh 子进程时会把 DISPLAY 清掉（实测 rsync 3.2.7：父进程 DISPLAY=:0
+    // → 子 ssh 的 DISPLAY=[]；WAYLAND_DISPLAY 同样被清）。
+    //
+    // 而 OpenSSH 8.4 以下不认 SSH_ASKPASS_REQUIRE（8.4 才引入，老 ssh 直接忽略），
+    // 它的老规矩是「有图形界面才用 askpass」，判据就是 **DISPLAY 非空**。
+    // 实测（OpenSSH 8.2p1）：DISPLAY=:0 → 认证成功；没有 DISPLAY → 根本不执行
+    // SSH_ASKPASS 程序、发出空口令 → Permission denied (publickey,password,...)。
+    //
+    // 后果是产品自己前后不一致：
+    //   · 产品**自己**起的 ssh（建目录 / 对标记 / 收尾，走 applyAskpassEnv）
+    //     和「测试网络连接」（probeConnection，直连 ssh）都带着 DISPLAY → 都是绿的；
+    //   · 真正传文件的 rsync 那条 ssh 没有 DISPLAY → 必然 Permission denied。
+    // 客户看到的是「测试网络连接通过、点开始同步就登录失败」，完全无从判断错在哪。
+    //
+    // 修法：把 DISPLAY 显式写进 rsync 的 -e 命令 —— 那是产品唯一能管到
+    // 「rsync 起的那个 ssh 的环境」的地方（rsync 从父进程继承来的 DISPLAY 会被清掉，
+    // 但命令自己带上的会保留）。取值口径与 applyAskpassEnv 一致：
+    // 环境里已有的原样保留，没有就用 ":0"。
+#ifdef _WIN32
     const QString sshCmd = QStringLiteral("ssh %1").arg(sshOption(m_target));
+#else
+    QString display = QProcessEnvironment::systemEnvironment()
+                          .value(QStringLiteral("DISPLAY"));
+    // 带空格的 DISPLAY 会把 rsync 的 -e 拆成两段（rsync 按空格切 argv），
+    // 这种值直接退回 ":0"：它只是个"有没有图形界面"的开关，不是要真去连 X。
+    if (display.isEmpty() || display.contains(QLatin1Char(' ')))
+        display = QStringLiteral(":0");
+    // env 用**绝对路径**：rsync execvp 找的是子进程自己的 PATH，
+    // 而 PATH 是产品拼过的，不一定还含 /usr/bin。
+    //
+    // 找不到 env（或者它的路径带空格）时**回落到原来的裸 "ssh"**：
+    // 那是修复前的行为 —— ssh>=8.4 照常工作，ssh<8.4 回到修复前的失败。
+    // 绝不能因为这个修复让**私钥模式**（根本不碰口令）在别的机器上一起挂掉。
+    const QString envBin = QStandardPaths::findExecutable(QStringLiteral("env"));
+    const QString sshCmd =
+        (envBin.isEmpty() || envBin.contains(QLatin1Char(' ')))
+            ? QStringLiteral("ssh %1").arg(sshOption(m_target))
+            : QStringLiteral("%1 DISPLAY=%2 ssh %3")
+                  .arg(envBin, display, sshOption(m_target));
+#endif
 
     QStringList args;
     args << QStringLiteral("-a")
@@ -2503,7 +2884,7 @@ void RsyncRunner::launchNext()
          //
          // 裸 --partial 的行为是：中断时把已收到的那几 MB 直接写成目标路径下的
          // 真名文件，靠 mtime 停在 1970-01-01 提示"这是半个"。
-         // 配合默认勾上的 --ignore-existing，这个半截文件从此每次同步都被
+         // 配合勾上的「仅同步新增文件」（--ignore-existing），这个半截文件从此每次同步都被
          // "远端已存在"跳过 —— 用户看到界面报"已完成"，实际远端残缺且永不自愈。
          //
          // --partial-dir 把半截文件改放到目标目录下的旁路目录 .srt-partial/，
@@ -2567,10 +2948,15 @@ void RsyncRunner::launchNext()
     // 没有这道保护界面就会一直卡在"同步中"。
     // 预算按本组文件数放大 —— --checksum 的校验阶段同样不吐输出，
     // 但那是正常干活，见 watchdogMs() 里的实测数据。
+    m_watchStage = StageTransfer;
     m_watchdog.start(watchdogMs(m_currentGroupFiles.size(), m_currentGroupBytes));
 
     m_buffer.clear();
     m_stderrTail.clear();
+    m_failedNameHints.clear();
+    m_failedRemotePaths.clear();
+    m_quotedPathNames.clear();
+    m_stderrPending.clear();
     m_proc->start(QStringLiteral("rsync"), args);
 
     // rsync 启动实测 30~80ms，3 秒还起不来就是环境问题（缺 DLL、被杀软拦）
@@ -2615,6 +3001,7 @@ void RsyncRunner::drainBuffer()
 
 void RsyncRunner::onStdout()
 {
+    // 阶段不变（仍是传输），这里只是重新给看门狗计时。
     m_watchdog.start(watchdogMs(m_currentGroupFiles.size(), m_currentGroupBytes));
     m_buffer += QString::fromUtf8(m_proc->readAllStandardOutput());
     drainBuffer();
@@ -2659,6 +3046,17 @@ void RsyncRunner::handleLine(const QString &line)
     if (frame.valid) {
         emit byteProgress(frame.percent);
         emit byteStats(frame.bytes, frame.speedBps);
+
+        // ★ xfr#N = rsync 已经完成传输的文件数。**权威数字**。
+        // 见 noteXfrCount 的说明：失败轮也照常结算，
+        // 否则本轮最后一个**真的传完**的文件永远拿不到"完成"事件。
+        noteXfrCount(frame.xfr);
+
+        // ★ 帧尾可能粘着 %n 的文件名（实测 "(xfr#1, to-chk=4/5)b.dat"）。
+        // 不剥出来，这个名字就永远拿不到 —— 它也就永远不会被结算。
+        const QString tail = nameAfterProgressFrame(line);
+        if (!tail.isEmpty())
+            noteRsyncName(tail);
         return;
     }
 
@@ -2666,74 +3064,319 @@ void RsyncRunner::handleLine(const QString &line)
     if (trimmed.endsWith(QLatin1Char('/')))
         return;
 
-    // 名字解析：rsync 的 %n 会把「不可打印」的字节转义成 \#NNN（实测表见
-    // unescapeRsyncName），所以 stdout 上的名字是**转义过的**，
-    // 直接拿去和清单比一定对不上：中文文件名会变成 混\#344\#270\#255文.spe，
-    // 于是这个文件既不计数、也不点亮行，最后靠 leftover 兜底规则显示成「✓ 已完成」。
-    //
-    // 解析细节（候选怎么取、还原与原样谁先试）都在 resolveRsyncName 里，
-    // 那里有 --selfcheck 直接拿真机原文来判。
-    //
-    // 顺带解决"文件名首尾带空格"：rsync 的 %n 输出前后没有空白，
-    // 所以用未 trim 的原始行去匹配才对，trim 过的串永远等于不了清单里的名字。
-    const QString name = resolveRsyncName(line, m_currentGroupSet);
+    // 名字解析与记账都在 noteRsyncName 里。
+    noteRsyncName(line);
+}
+
+// 处理 rsync 报出来的一个**文件名**（%n）。
+//
+// %n 是「开始传输」时打印的（见 m_startedName 的注释），
+// 所以"下一个 %n 出现"只是**推断**上一个传完了 —— 推断在失败轮里会漏掉最后一个文件。
+// 真正的权威数字是进度帧里的 xfr#（见 noteXfrCount）。
+//
+// 这里只做两件事：把名字记进本组的名字序列（xfr# 靠序号与它配对），
+// 以及广播"开始传输"（界面把这一行点亮成「同步中」）。
+//
+// 名字解析的细节（候选怎么取、还原与原样谁先试）都在 resolveRsyncName 里，
+// 那里有 --selfcheck 直接拿真机原文来判。
+//
+// 只有"确实在这一组清单里"的行才算数。
+// 这一条取代了原来两套字符串猜测（isRsyncNoise 前缀过滤 + 进度帧正则），
+// 因为真实文件名可以长成 rsync 自己的输出：
+//   "50% xfr#1 to-chk=0.spe"  会被进度帧正则吃掉，文件传了却不计
+//   "sent 40 bytes ..."      会被前缀过滤当成噪声，文件同样漏计
+// 这两种情况下文件其实都在远端，界面只显示"已同步 1 / 2 个文件"。
+// 按清单认，猜不出来就不计——宁可少报也不能虚报成功。
+//
+// 同一行重复到达（管道缓冲重放、\r 覆写残留）时不重复计数。
+void RsyncRunner::noteRsyncName(const QString &rawLine)
+{
+    const QString name = resolveRsyncName(rawLine, m_currentGroupSet);
     if (name.isEmpty())
         return;
-
-    // 只有"确实在这一组清单里"的行才算数。
-    //
-    // 这一条取代了原来两套字符串猜测（isRsyncNoise 前缀过滤 + 进度帧正则），
-    // 因为真实文件名可以长成 rsync 自己的输出：
-    //   "50% xfr#1 to-chk=0.spe"  会被进度帧正则吃掉，文件传了却不计
-    //   "sent 40 bytes ..."      会被前缀过滤当成噪声，文件同样漏计
-    // 这两种情况下文件其实都在远端，界面只显示"已同步 1 / 2 个文件"。
-    // 按清单认，猜不出来就不计——宁可少报也不能虚报成功。
-    //
-    // 同一行重复到达（管道缓冲重放、\r 覆写残留）时不重复计数。
     if (name == m_startedName)
         return;
 
-    // **上一行报出来的那个文件，到这一刻才算真的传完。**
-    //
-    // --out-format=%n 是"开始传输"时打印的（2026-10-18 实测，见头文件
-    // m_startedName 的注释）。原来在这里直接 ++m_done + 发 fileTransferred，
-    // 等于把"开始"当成"结束"：
-    //   - 每个文件刚**开始**传就被标成「已完成」，下一行立刻点亮；
-    //   - 中途取消时那个 94.6% 的截断文件被标成「已完成」，计数显示 1/1，
-    //     接收端却只有半个文件，界面是绿的。
-    // rsync 串行传输（没有 --parallel），下一个开始 == 上一个结束。
-    if (!m_startedName.isEmpty()) {
-        ++m_done;
-        emit fileTransferred(m_startedName, m_done, m_total);
-    }
+    m_groupNames.append(name);
     m_startedName = name;
-    emit fileStarted(m_startedName);
+    emit fileStarted(name);
+
+    // 还没拿到任何 xfr#（进度帧没来）时的兜底推断：
+    // "下一个 %n 出现 == 上一个传完"。一旦见过 xfr#，一律以 xfr# 为准。
+    if (m_xfrCount == 0) {
+        while (m_settledCount + 1 < m_groupNames.size())
+            settleNameAt(m_settledCount++);
+    }
+}
+
+// 处理进度帧里的 xfr#N：N = rsync 已经完成传输的文件数。
+//
+// xfr# 是 rsync 自己报的**权威**数字，比"下一个 %n == 上一个结束"的推断准：
+//   - 推断要求"后面还有下一个 %n"，失败轮里最后一个文件永远等不到；
+//   - xfr# 在文件**传完**的那一刻就递增，与后面还有没有 %n 无关。
+//
+// xfr#N 与"本组清单里的文件"是 1:1 的（第 N 个 %n 名字对应第 N 次传输）——
+// 实测：目录也打 %n（带尾斜杠），但**不占** xfr#。
+//
+// ★ 失败轮也照常结算。原来的收尾处写着 `if (rsyncOk && ...)`，
+//   失败轮于是永远不结算最后一个 —— 而那个文件**真的传完了**
+//   （实测远端 md5 与本机一致），只是因为后面没有下一个 %n 而拿不到完成事件，
+//   收尾时被一律刷成「✕ 失败」。这是本缺陷的真正入口。
+//
+// 结算只表示"发送端把这个文件发完了"，**不等于**"接收端落地了"：
+// 接收端建不出文件时（远端目录 chmod 555 → mkstemp Permission denied），
+// 发送端照样把 xfr# 递增（实测：4 个文件全部失败，xfr# 照样走到 4）。
+// 那一刀由组尾的 reconcileGroupCount 补上（stderr 一定晚于 stdout）。
+void RsyncRunner::noteXfrCount(int xfr)
+{
+    if (xfr <= 0)
+        return;
+    if (xfr > m_xfrCount)
+        m_xfrCount = xfr;
+    while (m_settledCount < m_xfrCount && m_settledCount < m_groupNames.size())
+        settleNameAt(m_settledCount++);
+}
+
+// 结算本组第 index 个（0 基）名字：它刚刚传完。
+void RsyncRunner::settleNameAt(int index)
+{
+    if (index < 0 || index >= m_groupNames.size())
+        return;
+    ++m_done;
+    emit fileTransferred(m_groupNames.at(index), m_done, m_total);
+}
+
+// 组尾对账：把"其实失败了、却被 xfr# 结算过"的文件从**计数**里扣回来。
+//
+// 为什么必须做：xfr# 只说明**发送端**把数据发出去了。
+// 接收端建不出文件时（远端目录 chmod 555 → mkstemp Permission denied），
+// 发送端照样把 xfr# 递增到 N（实测：4 个文件全部失败，stdout 的 xfr# 照样走到 4）。
+// 而"这个文件到底成没成"的权威信息在 stderr 里，
+// **stderr 一定晚于 stdout**（实测：全部 stdout 帧先到，stderr 的报错后到），
+// 所以结算的那一刻不可能知道它失败了。
+//
+// 行状态由 fileFailedInGroup 负责降级（reportFailedNames 已经发过了），
+// 这里只把**计数分子**扣回去 —— 不扣的话计数行会说"4 / 4 个文件"，
+// 而远端一个字节都没有，那正是"界面出现假完成"。
+void RsyncRunner::reconcileGroupCount()
+{
+    int back = 0;
+    QString firstFailed;
+    for (int i = 0; i < m_settledCount && i < m_groupNames.size(); ++i) {
+        const QString n = m_groupNames.at(i);
+        if (!m_failedNames.contains(n))
+            continue;
+        ++back;
+        if (firstFailed.isEmpty())
+            firstFailed = n;
+    }
+    if (back <= 0)
+        return;
+    m_done -= back;
+    // 再发一次 fileTransferred，把计数分子改成扣完之后的值。
+    // 那一行的状态已经是「✕ 失败」，而界面"失败不会被后来的完成盖成成功"，
+    // 所以这一发只改计数，不会把那行翻回「✓ 已完成」。
+    emit fileTransferred(firstFailed, m_done, m_total);
+}
+
+void RsyncRunner::harvestStderrNames(const QString &text)
+{
+    if (text.isEmpty())
+        return;
+
+    // 一次 readAll 拿到的可能是**半行**（跨块），把上一块剩下的半行接上来，
+    // 否则"write failed on \"/x.spe\": No space left (28)"正好被切成两半，
+    // 这一行里的文件名就提不出来了。
+    QString buf = m_stderrPending + text;
+    const int nl = buf.lastIndexOf(QLatin1Char('\n'));
+    if (nl < 0) {
+        m_stderrPending = buf;
+        return;
+    }
+    const QString complete = buf.left(nl);
+    m_stderrPending = buf.mid(nl + 1);
+
+    // 两种形态各匹配一次（口径与原来两个函数里的正则完全一致）：
+    //
+    // 1) 带 errno 的那种 —— 用来把**行**标成失败。
+    //    实测（rsync 3.2.7 / 3.1.1）四种会命中的形态：
+    //      rsync: [generator] opendir "/dst/sub/f2.spe" failed: Permission denied (13)
+    //      rsync: [receiver] open "/dst/f3.spe" failed: Permission denied (13)
+    //      rsync: [receiver] write failed on "/dst/f1.spe": File too large (27)
+    //      rsync: [receiver] mkstemp "/dst/.f4.spe.eYGjDO" failed: Permission denied (13)
+    //    第四种是 mkstemp 临时名（点 + 真实文件名 + 点 + 6 位随机），
+    //    接收端磁盘满 / 配额超限 / 目录不可写三种最常见的失败全都走它，
+    //    不还原就等于不报。
+    static const QRegularExpression errRe(QStringLiteral("\"((?:[A-Za-z]:[\\\\/]|/)[^\"]+)\"[^\\\"\\n]*\\(\\d+\\)"));
+    // 2) 任何被引号包住的绝对路径 —— 用来列"未能完整传输"的清单。
+    static const QRegularExpression looseRe(QStringLiteral("\"((?:[A-Za-z]:[\\\\/]|/)[^\"]+)\""));
+    // 临时名还原：只剥「点 + 6 位字母数字」，真实文件名里的点原样保留。
+    static const QRegularExpression tempRe(
+        QStringLiteral("^\\.(.*)\\.[A-Za-z0-9]{6}$"));
+
+    // 3) **不带 errno 的失败形态**（B 层，2026-10-24 补）。
+    //
+    // 现状只认 `"路径"……(数字)` 一种形态，于是这两种最常见的报错
+    // 一个名字都提不出来：
+    //   rsync: failed to open "/remote/dir/.srt-partial/.f2.spe": No space left on device
+    //   rsync: [receiver] write failed on "/p/x.spe": No space left on device
+    // 提不出名字 = 归不了因 = 界面上把没落地的文件标成「✓ 已完成」。
+    //
+    // 放宽的边界：**同一行里必须还有失败关键词**，
+    // 否则任何提到路径的正常日志都会被当成失败。
+    // 放宽出来的候选仍然走同一套交叉核对
+    // （basename 唯一性 + 路径逐段比 + 目录名过滤），拿不准就不标。
+    static const char *kFailureKeywords[] = {
+        "failed", "error", "denied", "Permission", "cannot", "unable",
+        "No such", "not found", "refused", "broken"
+    };
+
+    // 把一条路径收进"失败名"集合：basename（临时名还原后）+ 远端完整路径。
+    auto collectFailedPath = [this](const QString &n) {
+        const int slash = lastSeparatorIndex(n);
+        if (slash < 0)
+            return;
+        QString base = n.mid(slash + 1);
+        const QRegularExpressionMatch tm = tempRe.match(base);
+        if (tm.hasMatch())
+            base = tm.captured(1);
+        if (base.isEmpty())
+            return;
+        m_failedNameHints.insert(base);
+        const QString unescaped = unescapeRsyncName(base);
+        if (!unescaped.isEmpty() && unescaped != base)
+            m_failedNameHints.insert(unescaped);
+        // **远端完整路径也要留一份。**
+        //
+        // 失败名集合里存的是 basename，而 reportFailedNames() 的规则 1/3
+        // 是按**相对路径**写的 —— basename 永远命中不了那两条。
+        // 后果：**不同目录下同名的文件**（data/a.spe 与 backup/a.spe，
+        // 需求 5 的"深度遍历"下很常见）失败时归不了因，
+        // 界面上一直显示「✓ 已完成」，而远端那个文件根本没传过去。
+        //
+        // 远端路径 = 远端根 + 本组的相对路径，
+        // 所以拿它跟本组清单逐段剥前缀、剥到第一个正好命中清单的候选，
+        // 就能把"是哪一个文件失败"精确还原出来（见 reportFailedNames）。
+        {
+            QString remotePath = n;
+            if (tm.hasMatch())
+                remotePath = n.left(slash + 1) + tm.captured(1);
+            if (!remotePath.isEmpty() && !m_failedRemotePaths.contains(remotePath))
+                m_failedRemotePaths.insert(remotePath);
+            const QString unRemote = unescapeRsyncName(remotePath);
+            if (!unRemote.isEmpty() && unRemote != remotePath
+                && !m_failedRemotePaths.contains(unRemote))
+                m_failedRemotePaths.insert(unRemote);
+        }
+    };
+
+    const QStringList lines = complete.split(QLatin1Char('\n'));
+    for (const QString &line : lines) {
+        // 这一行是不是"失败行"：只有失败行里出现的路径才进失败名集合。
+        bool lineFailed = false;
+        for (const char *kw : kFailureKeywords) {
+            if (line.contains(QLatin1String(kw), Qt::CaseInsensitive)) {
+                lineFailed = true;
+                break;
+            }
+        }
+        QRegularExpressionMatchIterator it = looseRe.globalMatch(line);
+        while (it.hasNext()) {
+            const QString n = it.next().captured(1);
+            const QString base = baseNameOf(n);
+            if (base.isEmpty())
+                continue;
+            if (!m_quotedPathNames.contains(base))
+                m_quotedPathNames.append(base);
+            // stderr 里的文件名和 %n 是**同一套转义规则**，
+            // 所以中文名在报错行里也是 混\#344\#270\#255文.spe。
+            // 两份都收：原始串覆盖"名字里本来就带字面量 \#NNN"，
+            // 还原串覆盖中文 / 含换行这类真会被转义的。
+            const QString unescaped = unescapeRsyncName(base);
+            if (!unescaped.isEmpty() && unescaped != base && !m_quotedPathNames.contains(unescaped))
+                m_quotedPathNames.append(unescaped);
+            // 失败行里的路径也要进"失败名"集合（不带 errno 的那种形态）。
+            if (lineFailed)
+                collectFailedPath(n);
+        }
+
+        QRegularExpressionMatchIterator it2 = errRe.globalMatch(line);
+        while (it2.hasNext())
+            collectFailedPath(it2.next().captured(1));
+    }
+}
+
+void RsyncRunner::flushPendingStderrNames()
+{
+    if (m_stderrPending.isEmpty())
+        return;
+    const QString last = m_stderrPending;
+    m_stderrPending.clear();
+    // 补一个换行，让它走与其它行完全相同的解析路径。
+    // 用 QLatin1Char(10) 而不是转义写法：
+    // 写成 0x0A 的十进制值不会和任何一层转义打架。
+    QString flushed = last;
+    flushed.append(QLatin1Char(10));
+    harvestStderrNames(flushed);
 }
 
 void RsyncRunner::onStderr()
 {
+    // 阶段不变（仍是传输），这里只是重新给看门狗计时。
     m_watchdog.start(watchdogMs(m_currentGroupFiles.size(), m_currentGroupBytes));
-    const QString err = QString::fromUtf8(m_proc->readAllStandardError()).trimmed();
-    if (err.isEmpty())
+    // **解析用的原文不能 .trimmed()。**
+    //
+    // trimmed() 把每一块首尾的换行都吃掉，于是上一块的最后一行
+    // 和这一块的第一行被**粘成一行**（下面 harvestStderrNames 的
+    // "接上半行"机制反而变成了"把整块整块粘起来"）。
+    // 粘行之后，失败名正则里原来是贪婪的 [^^\n]*（见 harvestStderrNames），
+    // 它从**第一个**引号路径一路吃到该行最后一个 (数字)，
+    // 把中间第二条的引号路径一起吞掉 —— 结果只认得到第一条路径，
+    // 真正失败的那个文件归不了因，界面于是把**根本没落地**的文件
+    // 标成「✓ 已完成」（谎报成功）。
+    // 实测（A1 复验线 HC2 场景）：三条独立的 stderr 报错粘成一行，
+    // 失败名集合里只剩一个目录名 "sub"。
+    const QString raw = QString::fromUtf8(m_proc->readAllStandardError());
+    if (raw.trimmed().isEmpty())
         return;
+    const QString err = raw.trimmed();     // 展示用：日志行不想要首尾空行
+
     m_stderrTail += err + QLatin1Char('\n');
     // 只留尾部：远端目录不可写时 rsync 会每个文件报一行，几千行会把内存吃光，
     // 而排查真正需要的是最后那几行（最终错误和退出码说明）。
+    //
+    // 失败名单**不再**用这个尾窗 —— 它是展示用的滚动窗口，
+    // 当失败名单的数据源会漏标（见 harvestStderrNames 的说明）。
     if (m_stderrTail.size() > 4000)
         m_stderrTail = m_stderrTail.right(4000);
+    // 解析用**原文**（保留行边界），展示用**去空行**的版本。
+    harvestStderrNames(raw);
     emit logText(QStringLiteral("[rsync] ") + err);
 }
 
 void RsyncRunner::takeStderrTail()
 {
-    if (!m_proc || m_proc->state() == QProcess::NotRunning)
+    // 原来这里还有一条 `|| m_proc->state() == QProcess::NotRunning` 的提前返回，
+    // 正好把本函数要解决的问题又挡回去了：
+    // 进程刚退出时 readyReadStandardError 不一定投递过，**最后那一截 stderr
+    // 还留在 QProcess 的缓冲里**，这时候必须把它读出来。
+    // 提前返回 = 最后一截永远读不到 = 最后一个失败文件的报错行丢失
+    //   → 它的名字进不了失败名单 → 界面上那个文件显示成「✓ 已完成」。
+    // 实测（80 个文件全部写失败）：偶发有 1 个文件显示成 ok。
+    //
+    // 进程已经退出时读 QProcess 的缓冲是安全的：readAllStandardError()
+    // 只是把管道里剩下的字节取走，不会去等一个已经结束的进程。
+    if (!m_proc)
         return;
-    const QString err = QString::fromUtf8(m_proc->readAllStandardError()).trimmed();
-    if (err.isEmpty())
+    // 同 onStderr：解析用原文，保留行边界（原因见那里）。
+    const QString raw = QString::fromUtf8(m_proc->readAllStandardError());
+    if (raw.trimmed().isEmpty())
         return;
+    const QString err = raw.trimmed();
     m_stderrTail += err + QLatin1Char('\n');
     if (m_stderrTail.size() > 4000)
         m_stderrTail = m_stderrTail.right(4000);
+    harvestStderrNames(raw);
 }
 
 void RsyncRunner::onProcError(QProcess::ProcessError err)
@@ -2749,6 +3392,10 @@ void RsyncRunner::onProcError(QProcess::ProcessError err)
                        QString::fromUtf8(kBlockedAdvice));
     m_watchdog.stop();
     m_stderrTail.clear();
+    m_failedNameHints.clear();
+    m_failedRemotePaths.clear();
+    m_quotedPathNames.clear();
+    m_stderrPending.clear();
     m_buffer.clear();
     // 核对阶段的 ssh 起不来：这一组 rsync 本身是成功的，只是兜底核对没做成。
     // 核对失败要放行，不能把一次正常的同步判成失败。
@@ -2809,7 +3456,19 @@ void RsyncRunner::onFinished(int exitCode, QProcess::ExitStatus status)
         emit logText(QString::fromUtf8(u8"\u5DF2\u53D6\u6D88\uFF0C\u672C\u6B21\u540C\u6B65\u7ED3\u675F\u3002"));
     } else if (status == QProcess::CrashExit || exitCode != 0) {
         m_failed = true;
-        emit logText(QString::fromUtf8(u8"\u672C\u7EC4\u5931\u8D25\uFF0C\u9000\u51FA\u7801 %1\uFF08\u5DF2\u7EE7\u7EED\u4E0B\u4E00\u7EC4\uFF09\u3002").arg(exitCode));
+        // **退出码被看门狗 kill 掉时是不可信的。**
+        //
+        // 实测：看门狗超时 → kill() → waitForFinished(1000) → Windows 上
+        // 报回来的 exitCode 是 62097（0xF291 一带），那是 **kill 的产物**，
+        // 不是 rsync 自己的退出码。把 62097 当成"rsync 退出码"报给客户，
+        // 客户会去查"62097 是什么意思"，查不到任何东西 ——
+        // 真正的信息（看门狗超时、哪个阶段）已经被上一条日志说清楚了。
+        //
+        // 所以这里只报退出码，**除非**它是被看门狗杀出来的。
+        if (!m_watchdogAborted)
+            emit logText(QString::fromUtf8(u8"\u672C\u7EC4\u5931\u8D25\uFF0C\u9000\u51FA\u7801 %1\uFF08\u5DF2\u7EE7\u7EED\u4E0B\u4E00\u7EC4\uFF09\u3002").arg(exitCode));
+        else
+            emit logText(QString::fromUtf8(u8"\u672C\u7EC4\u56E0\u770B\u95E8\u72D7\u8D85\u65F6\u88AB\u7EC8\u6B62\uFF08\u9000\u51FA\u7801\u4E0D\u53EF\u4FE1\uFF0C\u5DF2\u7531\u770B\u95E8\u72D7\u62A5\u544A\u771F\u56E0\uFF09\u3002"));
         if (!m_stderrTail.trimmed().isEmpty())
             emit logText(QString::fromUtf8(u8"\u8FDC\u7AEF\u62A5\u9519\uFF1A") + m_stderrTail.trimmed());
         // rsync 的报错是**英文原文**，而界面其余部分全是中文。
@@ -2834,7 +3493,10 @@ void RsyncRunner::onFinished(int exitCode, QProcess::ExitStatus status)
         // 四层归因：把上面那整段 stderr 判到「本机 / 网络 / 认证 / 接收端」之一，
         // 并给这一层该做的事。放在既有日志之后，是为了让"发生了什么 → 原文是什么
         // → 该找谁"按顺序读下来，而不是先丢一句结论让人猜。
-        reportAttribution(m_stderrTail);
+        // 看门狗杀掉的：stderr 是空的，做归因只会得到"未能归因"，
+        // 跟已经报清楚的"看门狗超时"自相矛盾。
+        if (!m_watchdogAborted)
+            reportAttribution(m_stderrTail);
         reportFailedNames();
         reportIncompleteRemoteFiles();
     } else {
@@ -2903,9 +3565,17 @@ void RsyncRunner::onFinished(int exitCode, QProcess::ExitStatus status)
     // 本组成败只看**这一组**的结果，不看整轮的汇总标志（理由见上面 groupProblem）。
     const bool groupOk = !m_cancelRequested && !groupProblem
                          && status != QProcess::CrashExit && exitCode == 0;
-    if (!groupOk && !m_stderrTail.trimmed().isEmpty())
+    // 被看门狗杀掉时 stderr 是空的（进程一个字都没吐），
+    // 空的原因不能当成失败原因记下来 —— 失败弹框会拿到一个空串，
+    // 分类函数退回兜底文案，等于白改。
+    // 真正的原因（哪个阶段卡住）由 onWatchdogTimeout 已经报过。
+    if (!groupOk && !m_watchdogAborted && !m_stderrTail.trimmed().isEmpty())
         m_lastFailure = m_stderrTail.trimmed();
     m_stderrTail.clear();
+    m_failedNameHints.clear();
+    m_failedRemotePaths.clear();
+    m_quotedPathNames.clear();
+    m_stderrPending.clear();
 
     m_watchdog.stop();
     // 同 onDirsFinished / onVerifyFinished：这里是 rsync 自己的 finished() 槽，
@@ -2917,17 +3587,28 @@ void RsyncRunner::onFinished(int exitCode, QProcess::ExitStatus status)
 
     const bool rsyncOk = groupOk;
 
-    // 整组收尾：把最后一个"报了名字但还没被下一个文件顶掉"的文件结账。
+    // 整组收尾：把"报了名字但还没被结算"的文件结账。
     //
-    // 只有 rsync 报成功时才结账 —— 它退出码为 0 就意味着清单里所有该传的
-    // 文件都传完了。失败或被取消时**不能**结账：那一个多半只传了一半
+    // 正常情况下 xfr# 已经把它们全结算了（见 noteXfrCount），
+    // 这里是"进度帧没来"时的兜底：rsync 退出码 0 就意味着清单里该传的都传完了。
+    //
+    // 失败或被取消时**不**结账：那一个多半只传了一半
     // （实测取消后接收端是 94.6% 的截断文件），让它留在 m_pendingRows 里，
     // 由界面按 wasCanceled() 标成「已跳过」，而不是谎报「已完成」。
-    if (rsyncOk && !m_startedName.isEmpty()) {
-        ++m_done;
-        emit fileTransferred(m_startedName, m_done, m_total);
+    //
+    // ★ 这里**不再**用 `rsyncOk &&` 一刀切（原来只结算"最后一个还没被顶掉的名字"）：
+    //   失败轮里最后那个**真的传完了**的文件，已经在 noteXfrCount 里
+    //   按 xfr#（权威信号）结算过了。原来的写法让它永远拿不到完成事件，
+    //   收尾时被一律刷成「✕ 失败」—— 而它远端 md5 与本机完全一致。
+    if (rsyncOk) {
+        while (m_settledCount < m_groupNames.size())
+            settleNameAt(m_settledCount++);
     }
     m_startedName.clear();
+
+    // 组尾对账：把"其实失败了"的文件从计数里扣回来（见 reconcileGroupCount）。
+    // 必须在 reportFailedNames() 之后 —— 它才是"哪个文件失败了"的权威来源。
+    reconcileGroupCount();
 
     // 只有 rsync 自己报成功时才核对目标目录：已经失败或被取消的组不用查，
     // 查了只会多出一条噪音日志。
@@ -2985,17 +3666,90 @@ void RsyncRunner::onWatchdogTimeout()
     // 实际最常见的触发条件是**本组文件太多**：--checksum 的校验阶段
     // rsync 一个字节都不吐，看门狗到点把活着的进程杀了。
     // 这里把本组文件数一并报出来，用户一眼能判断是不是撞上了这个。
-    emit logText(QString::fromUtf8(
-        u8"\u957F\u65F6\u95F4\u6CA1\u6709\u4EFB\u4F55\u8F93\u51FA\uFF0C\u5DF2\u7EC8\u6B62\u672C\u7EC4\uFF08\u672C\u7EC4 %1 \u4E2A\u6587\u4EF6\uFF09\u3002")
-
-        .arg(m_currentGroupFiles.size()));
-    m_failed = true;
+    //
+    // 但**阶段必须分开**（实测）：
+    //   看门狗同时守着三个阶段 —— 建远端目录 / 核对远端目录 / 传文件。
+    //   建目录阶段超时时本组文件数是 0，文案写死"本组 0 个文件"，
+    //   客户完全不知所云（"本组"是哪一组？0 个文件是什么意思？）。
+    //   而且三个阶段的卡法与归因完全不同：
+    //     建目录/核对 = ssh 连不上或没权限（网络/认证层）
+    //     传文件     = rsync 校验阶段不吐字（本地资源/参数层）
+    switch (m_watchStage) {
+    case StageRemoteDirs:
+        emit logText(QString::fromUtf8(
+            u8"\u521B\u5EFA\u8FDC\u7AEF\u76EE\u5F55\u65F6\u957F\u65F6\u95F4\u6CA1\u6709\u54CD\u5E94\uFF0C\u5DF2\u7EC8\u6B62\u672C\u8F6E\u3002"));
+        break;
+    case StageVerify:
+        emit logText(QString::fromUtf8(
+            u8"\u6838\u5BF9\u8FDC\u7AEF\u76EE\u5F55\u65F6\u957F\u65F6\u95F4\u6CA1\u6709\u54CD\u5E94\uFF0C\u5DF2\u7EC8\u6B62\u672C\u8F6E\u3002"));
+        break;
+    case StageTransfer:
+        emit logText(QString::fromUtf8(
+            u8"\u957F\u65F6\u95F4\u6CA1\u6709\u4EFB\u4F55\u8F93\u51FA\uFF0C\u5DF2\u7EC8\u6B62\u672C\u7EC4\uFF08\u672C\u7EC4 %1 \u4E2A\u6587\u4EF6\uFF09\u3002")
+                .arg(m_currentGroupFiles.size()));
+        break;
+    case StageNone:
+    default:
+        emit logText(QString::fromUtf8(
+            u8"\u540C\u6B65\u8FC7\u7A0B\u4E2D\u957F\u65F6\u95F4\u6CA1\u6709\u4EFB\u4F55\u8F93\u51FA\uFF0C\u5DF2\u7EC8\u6B62\u672C\u8F6E\u3002"));
+        break;
+    }
+    // **按阶段决定"这是不是数据问题"。**
+    //
+    // 原来这里是不分阶段一刀切 m_failed = true，三个阶段（建目录 / 核对 / 传输）
+    // 走同一个出口。但三者的性质完全不同：
+    //   建目录 / 传文件 = 传输没做完（数据可能没传全）→ 算失败；
+    //   核对远端目录   = **核对这个"手段"卡住了**，
+    //                    而 rsync 退出码 0 已经证明数据传完了 ——
+    //                    拿"核对没做成"当成"数据有问题"是把结论说反了。
+    //
+    // 实测（fcr-rootcause §2）：核对阶段看门狗到点时，远端 80 个真名文件齐全、
+    // 计数 80/80，界面却写「同步失败」—— 用户以为数据没传过去，
+    // 而数据其实全在。
+    //
+    // 硬约束不变：整轮仍然以 allFinished(false) 收尾（后续分组没跑，
+    // 绝不能报成功），见 launchNext() 里的中止分支。
+    if (m_watchStage == StageVerify)
+        m_abortedUnfinished = true;     // 核对没做成 ≠ 数据有问题
+    else
+        m_failed = true;
+    // **本轮到此为止，不再起下一组。**
+    //
+    // 原因：下面那句 `m_proc->waitForFinished(1000)` 会**同步触发** finished()，
+    // 于是 onFinished() → launchNext() 会把**下一组** rsync 起起来，
+    // 然后代码才回到 closeJob()，把刚起来的下一组也一起 kill 掉。
+    // 实测（2 组 + 看门狗 1ms）：10 个文件全标 failed、第 2 组根本没开始传、
+    // 日志里第 2 组也报「长时间没有任何输出，已终止本组」——
+    // 也就是**看门狗超时会让后面所有组陪葬**。
+    //
+    // 自动同步是无人值守场景，进程会反复触发看门狗，
+    // 客户看到的是"每次自动同步都全军覆没"，而日志把他引向
+    // 「本机弹窗挡住子进程」，真因（自己的收尾逻辑杀错了进程）没人看得见。
+    //
+    // 所以这里先立旗标：launchNext() 看到它就走收尾分支。
+    m_watchdogAborted = true;
     // 上面那句是既有的归因猜测，这一轮补的是"到底该去做什么"。
     // 卡住时进程一个字都没吐，没有原文可判，但排除法已经排掉了大部分可能：
     // 剩下的要么是本机弹了窗挡住子进程（客户现场的麒麟安全中心就是这一类），
     // 要么是链路半断开。这两个方向要分别去查，所以建议里把两边都点一遍。
-    reportAttribution(QString(), LayerLocal,
-                       QString::fromUtf8(kStallAdvice));
+    // **归因按阶段走。**
+    //
+    // 核对命令是在**远端**跑的（ssh user@host "读回标记并删除标记"），
+    // 而且同一条 ssh 通道刚刚成功传完整个组 —— 链路已被证明是好的。
+    // 把归因写成本机端（kLayerAdvice[0] = "请检查本机：rsync 和 ssh 客户端是否齐全…"）
+    // 会把用户引向查自己的电脑，而真因在远端。
+    //
+    // 选接收端而不是网络层：链路刚刚证明是好的，此时
+    // "ping 目标 IP / 查防火墙 / 放行端口"（kLayerAdvice[1]）是误导。
+    // 残余不确定性必须承认：链路中途断开也会表现为"ssh 无响应"，
+    // 现象上区分不了，所以文案同时点到"远端无响应"和"链路可能中断"，
+    // 不替用户断言。
+    if (m_watchStage == StageVerify)
+        reportAttribution(QString(), LayerReceiver,
+                          QString::fromUtf8(kVerifyTimeoutAdvice));
+    else
+        reportAttribution(QString(), LayerLocal,
+                          QString::fromUtf8(kStallAdvice));
     // 只等 1 秒：kill 之后进程会立刻结束，而 waitForFinished 不跑事件循环，
     // finished 信号稍后由事件循环发出，真正的收尾在 onFinished 槽里做。
     m_proc->kill();
@@ -3082,10 +3836,22 @@ void RsyncRunner::cleanupRemoteMarkers()
         return;
 
     QStringList quoted;
+    QStringList partialDirs;
     for (const Group &g : m_groups) {
         QString d = g.remoteDir.isEmpty() ? QStringLiteral(".") : g.remoteDir;
         d.replace(QLatin1Char('\''), QLatin1String("'\\''"));
         quoted << (QLatin1Char('\'') + d + QLatin1Char('/') + m_verifyMarker + QLatin1Char('\''));
+        // **顺手把空的 .srt-partial/ 目录收掉。**
+        //
+        // --partial-dir=.srt-partial 让 rsync 把半截文件放进目标目录下的
+        // .srt-partial/；传完之后那个**空目录**会一直留在客户的远端目录里，
+        // 看着像同步过去的东西（台账 F-10 同族）。
+        //
+        // 只用 rmdir（不删目录里的东西）：目录非空时 rmdir 直接失败，
+        // 于是**半截文件一定还在** —— 那是 rsync 下次续传要用的，
+        // 删了等于放弃断点续传。空的才收。
+        partialDirs << (QStringLiteral("rmdir -- '") + d + QLatin1Char('/')
+                        + QStringLiteral(".srt-partial' 2>/dev/null || true"));
     }
     if (quoted.isEmpty())
         return;
@@ -3094,7 +3860,8 @@ void RsyncRunner::cleanupRemoteMarkers()
     applyAskpassEnv(&p, m_askpassPath);
     QStringList args = sshArgs(m_target, false);
     args << (m_target.user + QLatin1Char('@') + m_target.host)
-         << (QStringLiteral("rm -f -- ") + quoted.join(QLatin1Char(' ')));
+         << (QStringLiteral("rm -f -- ") + quoted.join(QLatin1Char(' '))
+             + QLatin1String("; ") + partialDirs.join(QStringLiteral("; ")));
     p.start(sshBin, args);
     p.waitForFinished(2000);
     // 栈上的 QProcess 一析构就彻底没了：连不上的目标（端口不通、网络黑洞）
@@ -3125,7 +3892,10 @@ void RsyncRunner::cleanupRemoteMarkers()
 // 三种形态的共同点是 `on "<path>"`，一条正则全覆盖。
 void RsyncRunner::reportIncompleteRemoteFiles()
 {
-    if (m_stderrTail.trimmed().isEmpty())
+    // 数据源同样是**逐行增量解析**出来的候选集合（与尾窗解耦）。
+    // 原来这里解析 m_stderrTail（尾部 4000 字符）：报错一多，
+    // 最早那批失败文件就不在"未能完整传输"的清单里了。
+    if (m_quotedPathNames.isEmpty())
         return;
 
     // rsync 的报错形态不止一种，只匹配 `on "<path>"` 会漏掉大半：
@@ -3135,33 +3905,8 @@ void RsyncRunner::reportIncompleteRemoteFiles()
 // 前一种有 `on "`，后两种没有。所以改成抓**任何被引号包住的绝对路径**，
 // 再拿文件名去和本组清单对一遍，对得上的才报 —— 既覆盖多种报错形态，
 // 又不会把命令里的临时文件路径、远端目录这类噪音当成"未完成的数据文件"。
-static const QRegularExpression re(QStringLiteral("\"(/[^\"]+)\""));
-    QStringList names;
-    const QStringList lines = m_stderrTail.split(QLatin1Char('\n'));
-    for (const QString &line : lines) {
-        QRegularExpressionMatchIterator it = re.globalMatch(line);
-        while (it.hasNext()) {
-            const QRegularExpressionMatch m = it.next();
-            const QString n = m.captured(1);
-            const int slash = n.lastIndexOf(QLatin1Char('/'));
-            if (slash < 0)
-                continue;
-            const QString base = n.mid(slash + 1);
-            if (base.isEmpty())
-                continue;
-            if (!names.contains(base))
-                names.append(base);
-            // stderr 里的文件名和 %n 是**同一套转义规则**，
-            // 所以中文名在报错行里也是 混\#344\#270\#255文.spe。
-            // 两份都收：原始串覆盖"名字里本来就带字面量 \#NNN"，
-            // 还原串覆盖中文/含换行这类真会被转义的。
-            const QString unescaped = unescapeRsyncName(base);
-            if (!unescaped.isEmpty() && unescaped != base && !names.contains(unescaped))
-                names.append(unescaped);
-        }
-    }
-    if (names.isEmpty())
-        return;
+    // 候选名字由 harvestStderrNames() 逐行解析时攒好（含原始串与还原串两份）。
+    const QStringList names = m_quotedPathNames;
 
     // 和本组清单对一遍：报出来的必须确实是这次要传的数据文件
     QStringList mine;
@@ -3201,15 +3946,46 @@ static const QRegularExpression re(QStringLiteral("\"(/[^\"]+)\""));
 
     emit logText(QString::fromUtf8(u8"\u3010\u6CE8\u610F\u3011\u4E0B\u5217\u6587\u4EF6\u672A\u80FD\u5B8C\u6574\u4F20\u8F93\uFF1A%1")
                      .arg(mine.join(QString::fromUtf8(u8"\u3001"))));
-    emit logText(QString::fromUtf8(u8"\u672C\u6B21\u4F20\u8F93\u672A\u5B8C\u6210\u7684\u6587\u4EF6\uFF0C\u5176\u5DF2\u4F20\u8F93\u90E8\u5206\u7559\u5728\u8FDC\u7AEF\u7684 .srt-partial/ \u76EE\u5F55\u4E0B\uFF0C\u6CA1\u6709\u4EE5\u539F\u6587\u4EF6\u540D\u843D\u76D8\u3002"));
+    emit logText(QString::fromUtf8(u8"\u672C\u6B21\u4F20\u8F93\u672A\u5B8C\u6210\u7684\u6587\u4EF6\uFF0C\u5176\u5DF2\u4F20\u8F93\u7684\u90E8\u5206\uFF08\u5982\u679C\u6709\uFF09\u7559\u5728\u8FDC\u7AEF\u7684 .srt-partial/ \u76EE\u5F55\u4E0B\uFF0C\u6CA1\u6709\u4EE5\u539F\u6587\u4EF6\u540D\u843D\u76D8\u3002"));
     emit logText(QString::fromUtf8(u8"\u4E0B\u6B21\u540C\u6B65\u4F1A\u56E0\u5927\u5C0F\u4E0D\u4E00\u81F4\u81EA\u52A8\u91CD\u4F20\uFF0C"
                                  u8"\u4E0D\u9700\u8981\u624B\u52A8\u5220\u9664\u3002"));
 }
 
 void RsyncRunner::reportFailedNames()
 {
-    if (m_stderrTail.trimmed().isEmpty())
+    // 先把跨块剩下的半行冲掉：rsync 的 stderr 最后一行常常没有换行符，
+    // 不冲一下那行就永远没被解析（实测：失败名单少最后一个名字）。
+    flushPendingStderrNames();
+    // 失败名单的数据源是**逐行增量解析**出来的候选集合，不是 4000 字符尾窗。
+    //
+    // 原来这里解析 m_stderrTail（只留尾部 4000 字符）：报错的行数一多，
+    // 最早那批失败文件的名字就被切掉了，永远进不了名单 ——
+    // 而名单是唯一能把「已同步」改回「失败」的通道。
+    // 实测（80 个文件全部写失败）：远端 0 个真名文件 + 80 个 .srt-partial/，
+    // 界面前 30 个显示 ok、失败名单只有 f31–f80。
+    if (m_failedNameHints.isEmpty()) {
+        // 报错里带了路径、却一个文件名的 errno 形态都提不出来：
+        // 说明这一组里有文件失败了，但**无法确定是哪一个**。
+        // 必须说出来 —— 否则用户看到的是一屏「✓ 已完成」，以为全传成功了。
+        //
+        // 2026-10-24：门槛从"m_quotedPathNames 非空"改成"本组确实有行
+        // 被标成「✓ 已完成」"。原来只有 stderr 里**带引号路径**时才说话，
+        // 而下面这种最典型的失败连引号路径都提不出来（路径以斜杠结尾、
+        // basename 是空串）：
+        //   rsync: [Receiver] mkdir "/root/nope/" failed: Permission denied (13)
+        // 这一条里远端目录压根没建成、**一个文件都没传过去**，
+        // 而界面上却可能是一排「✓ 已完成」、日志里一个字都没有。
+        //
+        // m_settledCount > 0 = 本组确实有行已经被标成「✓ 已完成」。
+        // 一个都没有的话（xfr# 压根没涨）界面不会谎报成功，不需要这句话。
+        if (m_settledCount > 0) {
+            emit logText(QString::fromUtf8(u8"\u672C\u7EC4\u6709 %1 \u4E2A\u6587\u4EF6\u88AB\u6807\u6210\u300C\u5DF2\u5B8C\u6210\u300D\uFF0C"
+                                          u8"\u4F46 rsync \u7684\u62A5\u9519\u6CA1\u6709\u6307\u51FA\u662F\u54EA\u4E00\u4E2A\u5931\u8D25\uFF1B"
+                                          u8"\u8FD9\u4E9B\u300C\u5DF2\u5B8C\u6210\u300D\u4E0D\u80FD\u5F53\u4F5C\u6210\u529F\uFF0C"
+                                          u8"\u8BF7\u5230\u8FDC\u7AEF\u6838\u5BF9\u4E00\u4E0B\u3002").arg(m_settledCount));
+        }
         return;
+    }
 
     // 只认**确实报了 errno 的那种行**。rsync 的 stderr 里还有大量不带文件名的
     // 行（"some files/attrs were not transferred"、连接告警、ssh_config 提示），
@@ -3221,7 +3997,6 @@ void RsyncRunner::reportFailedNames()
     //   rsync: [receiver] open "/dst/f3.spe" failed: Permission denied (13)
     //   rsync: [receiver] write failed on "/dst/f1.spe": File too large (27)
     //   rsync: [receiver] mkstemp "/dst/.f4.spe.eYGjDO" failed: Permission denied (13)
-    static const QRegularExpression re(QStringLiteral("\"(/[^\"]+)\"[^\\n]*\\(\\d+\\)"));
     // 上面第四种是 **mkstemp 临时名**：接收端建不出临时文件时 rsync 报的是
     // "点 + 真实文件名 + 点 + 6 位随机"（实测 f4.spe -> .f4.spe.eYGjDO，
     // 含空格的 a b.spe -> .a b.spe.DaS0si）。
@@ -3238,48 +4013,109 @@ void RsyncRunner::reportFailedNames()
     //
     // 3 位或 5 位后缀、以及 ".hidden" 这类本来就没有随机段的，都不匹配 ——
     // 实测过，避免把正常的点开头文件误剥。
-    static const QRegularExpression tempRe(
-        QStringLiteral("^\\.(.*)\\.[A-Za-z0-9]{6}$"));
-    QSet<QString> bases;
-    const QStringList lines = m_stderrTail.split(QLatin1Char('\n'));
-    for (const QString &line : lines) {
-        QRegularExpressionMatchIterator it = re.globalMatch(line);
-        while (it.hasNext()) {
-            const QString n = it.next().captured(1);
-            const int slash = n.lastIndexOf(QLatin1Char('/'));
-            if (slash < 0)
-                continue;
-            QString base = n.mid(slash + 1);
-            // 临时名还原成真实文件名
-            const QRegularExpressionMatch tm = tempRe.match(base);
-            if (tm.hasMatch())
-                base = tm.captured(1);
-            if (base.isEmpty())
-                continue;
-            // rsync 报错行里的文件名和 %n 是**同一套转义规则**，
-            // 所以中文名在报错行里也是 混\#344\#270\#255文.spe。
-            // 两份都收进集合：原始串覆盖"名字里本来就带字面量 \#NNN"，
-            // 还原串覆盖中文/含换行这类真会被转义的。
-            //
-            // 顺序有讲究：tempRe 的 `.` 不匹配真实换行符，而转义后的串里
-            // 换行是 \#012、不是真换行，所以**先剥临时名再还原**才能对得上。
-            bases.insert(base);
-            const QString unescaped = unescapeRsyncName(base);
-            if (!unescaped.isEmpty() && unescaped != base)
-                bases.insert(unescaped);
+    // 候选集合由 harvestStderrNames() 逐行解析时攒好：
+    // 里面同时收了"原始串"和"还原串"两份（rsync 报错行里的文件名和 %n
+    // 是同一套转义规则，中文名在报错行里也是 混\#344\#270\#255文.spe）。
+    const QSet<QString> &bases = m_failedNameHints;
+
+    // **把远端路径还原成本组的相对路径。**
+    //
+    // 远端路径 = 远端根 + 相对路径（"/data/backup/a.spe" 对应 "backup/a.spe"），
+    // 所以从远端路径里**由长到短**剥掉前缀，第一个正好等于本组某个文件的
+    // 候选就是它。
+    //
+    // 由长到短很关键：远端 "/data/sub/a.spe"，而本组里同时存在
+    // "a.spe" 和 "sub/a.spe" 时，剥到 "sub/a.spe" 就该停 ——
+    // 继续剥到 "a.spe" 会把根目录那个**根本没失败**的文件也连坐成失败。
+    QSet<QString> relHits;
+    for (const QString &rp : m_failedRemotePaths) {
+        QString rest = rp;
+        while (true) {
+            const int s2 = rest.indexOf(QLatin1Char('/'));
+            if (s2 < 0)
+                break;
+            rest = rest.mid(s2 + 1);
+            if (rest.isEmpty())
+                break;
+            if (m_currentGroupSet.contains(rest)) {
+                relHits.insert(rest);
+                break;
+            }
         }
     }
-    if (bases.isEmpty())
-        return;
 
     // 和本组清单核对：报出来的必须确实是这次要传的数据文件。
-    // 同名文件可能分布在不同目录，全部标失败比漏标安全 ——
-    // 少标一个，用户看到的是「已完成」而远端是半截文件（静默消费损坏数据）；
-    // 多标一个，用户会发现重传一次就对了。
+    //
+    // **匹配必须用相对路径优先，basename 只在唯一时才算数。**
+    //
+    // 原来这里一律按 basename 匹配，于是同名文件跨目录时会**全部**被标失败。
+    // 实测（清单里有 `x.y.spe` 和 `data dir/x.y.spe`，rsync 报
+    // `write failed on "/remote/x.y.spe"`）：两个都被标成 failed，
+    // 而实际上只有根目录那个失败了 —— 子目录那个根本没传，
+    // 却因为同名被连坐。客户看到的是"两个文件都失败"，
+    // 实际只有一个有问题，重传时还会困惑"为什么它又失败"。
+    //
+    // 现在分三步：
+    //   1) 相对路径**完全相等** —— rsync 报的路径是远端路径，
+    //      它的尾部可能带着本机的相对路径。完全相等时直接命中。
+    //   2) basename 相同，且本组里**只有一个**文件用这个 basename
+    //      —— 唯一时不会有歧义，可以安全命中。
+    //   3) basename 相同但本组里有多个 —— **不标**。
+    //      宁可漏标也不能连坐：漏标的后果是"这个文件显示成已完成，
+    //      而远端是半截文件"，但那只是这一个文件；
+    //      连坐的后果是"好文件被误判失败"，用户会以为文件坏了。
+    //      两者相比，漏标更隐蔽，所以这里改成**按 stderr 里的完整路径再判一次**：
+    //      rsync 报的路径尾部若与某个相对路径的尾部完全一致（逐段比），
+    //      那个文件才是真凶。
+    //
+    // 逐段比较而不是纯字符串后缀：字符串后缀会把
+    // `a/x.y.spe` 和 `ba/x.y.spe` 混起来（后者不以 `/x.y.spe` 结尾倒没事，
+    // 但 `dir2/x.y.spe` 会被 `dir/x.y.spe` 的后缀误伤 —— 逐段比不会）。
+    QSet<QString> baseCount;
     for (const QString &f : m_currentGroupFiles) {
         const int slash = f.lastIndexOf(QLatin1Char('/'));
+        baseCount.insert(slash >= 0 ? f.mid(slash + 1) : f);
+    }
+    // 同一个 basename 在本组出现几次
+    QHash<QString, int> baseOccur;
+    for (const QString &f : m_currentGroupFiles) {
+        const int slash = f.lastIndexOf(QLatin1Char('/'));
+        ++baseOccur[slash >= 0 ? f.mid(slash + 1) : f];
+    }
+
+    for (const QString &f : m_currentGroupFiles) {
+        if (m_failedNames.contains(f))
+            continue;
+        const int slash = f.lastIndexOf(QLatin1Char('/'));
         const QString base = slash >= 0 ? f.mid(slash + 1) : f;
-        if (!bases.contains(base) || m_failedNames.contains(f))
+
+        bool hit = false;
+        if (relHits.contains(f)) {
+            // 0) 由远端完整路径精确还原出来的相对路径 —— 最可靠的一条
+            hit = true;
+        } else if (bases.contains(f)) {
+            // 1) 相对路径完全相等
+            hit = true;
+        } else if (baseOccur.value(base) == 1) {
+            // 2) basename 唯一 -> 不会有歧义
+            hit = bases.contains(base);
+        } else {
+            // 3) basename 有歧义 -> 只有当 stderr 里的路径**逐段**以本文件的
+            //    相对路径结尾时才命中。
+            for (const QString &b : bases) {
+                if (b.isEmpty())
+                    continue;
+                // b 形如 "dir/x.y.spe" 或 "x.y.spe"
+                if (b == f)
+                    { hit = true; break; }
+                // b 以 "/" + f 结尾，且 "/" 前面那部分非空
+                const QString suffix = QLatin1Char('/') + f;
+                if (b.endsWith(suffix) && b.size() > suffix.size())
+                    { hit = true; break; }
+            }
+        }
+
+        if (!hit)
             continue;
         m_failedNames.insert(f);
         emit fileFailedInGroup(f);

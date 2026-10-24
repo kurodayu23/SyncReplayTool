@@ -21,6 +21,41 @@ QString U(const char *s) { return QString::fromUtf8(s); }
 // 这里把单位**右**补空格：数字右缘对齐的同时，"B"落在"M/B"的那一格，
 // 整列的右缘和单位列都对得上。左边补无效——那会让短单位贴右缘。
 QString unit2(const char *s) { return QString::fromLatin1(s).rightJustified(2, QLatin1Char(' ')); }
+
+// 状态徽章的 tooltip：说清"这一行到底是什么意思"。
+//
+// 为什么加（2026-10-24）：徽章那一格只有状态名，
+// 完成 / 跳过 / 失败都不带原因，用户只能去日志里翻。
+// 而「远端已有」（--ignore-existing 的正常结果）尤其容易被误读成
+// "远端已经是最新的"—— 勾了「仅同步新增文件」时，
+// 远端内容与本机不同**照样**是「远端已有」、照样不会被覆盖，
+// 这件事界面上一个字都没有（台账 e2e-scale-log-ui-audit.md 的 F-05）。
+//
+// **只加 tooltip**：徽章文字、配色、85px 死锁列宽一个都不动
+// （手册 §6.3 承诺的版式；StatusPillDelegate 对超宽文案会截成省略号）。
+// 台账 next-batch-fixlist.md 的 U4 推荐的"最省事且零风险的版本"
+// 就是这一条：原因短码进 tooltip，徽章文字不变。
+QString statusToolTip(FileTableModel::FileState st)
+{
+    switch (st) {
+    case FileTableModel::StateOk:
+        return U("\u672C\u8F6E\u8FD9\u4E2A\u6587\u4EF6\u5DF2\u5904\u7406\u5B8C\uFF1A\u8981\u4E48\u6210\u529F\u4F20\u8F93\u5230\u4E86\u8FDC\u7AEF\uFF0C"
+               "\u8981\u4E48\u8FDC\u7AEF\u672C\u6765\u5C31\u662F\u6700\u65B0\u7684\u3002");
+    case FileTableModel::StateFailed:
+        return U("\u672C\u8F6E\u8FD9\u4E2A\u6587\u4EF6\u6CA1\u6709\u4F20\u8F93\u6210\u529F\uFF0C\u5931\u8D25\u539F\u56E0\u89C1\u65E5\u5FD7\u3002");
+    case FileTableModel::StateSkipped:
+        return U("\u8FDC\u7AEF\u5DF2\u5B58\u5728\u540C\u540D\u6587\u4EF6\uFF0C\u672C\u8F6E\u6CA1\u6709\u4F20\u8F93\u5B83\u3002"
+               "\u52FE\u9009\u300C\u4EC5\u540C\u6B65\u65B0\u589E\u6587\u4EF6\u300D\u65F6\u8FDC\u7AEF\u5185\u5BB9\u4E0D\u4F1A\u88AB\u8986\u76D6\uFF1B"
+               "\u5982\u679C\u8FDC\u7AEF\u5185\u5BB9\u4E0E\u672C\u673A\u4E0D\u540C\uFF0C\u4E5F\u4E0D\u4F1A\u81EA\u52A8\u66F4\u6B63\u3002");
+    case FileTableModel::StateCanceled:
+        return U("\u672C\u8F6E\u88AB\u53D6\u6D88\uFF0C\u8FD9\u4E2A\u6587\u4EF6\u6CA1\u6709\u4F20\u8F93\u3002");
+    case FileTableModel::StateSyncing:
+        return U("\u6B63\u5728\u4F20\u8F93\u8FD9\u4E2A\u6587\u4EF6\u3002");
+    case FileTableModel::StateWait:
+    default:
+        return U("\u672C\u8F6E\u8FD8\u6CA1\u6709\u5F00\u59CB\u4F20\u8F93\u8FD9\u4E2A\u6587\u4EF6\u3002");
+    }
+}
 }
 
 FileTableModel::FileTableModel(QObject *parent)
@@ -212,6 +247,10 @@ QVariant FileTableModel::data(const QModelIndex &index, int role) const
     case Qt::ToolTipRole:
         if (index.column() == ColName || index.column() == ColTool)
             return data(index, AbsolutePathRole);
+        // 状态徽章也带 tooltip：徽章本身只有状态名（85px 死锁列宽放不下原因），
+        // 原因放进悬停提示里 —— 见上面 statusToolTip() 的说明。
+        if (index.column() == ColStatus)
+            return statusToolTip(m_states.value(row));
         return QVariant();
 
     default:

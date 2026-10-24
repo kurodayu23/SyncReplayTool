@@ -5,7 +5,9 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QAtomicInt>
+#include <QByteArray>
 #include <QHash>
+#include <QMutex>
 #include <QPair>
 #include <QSet>
 #include <QVector>
@@ -16,14 +18,155 @@
 #  include <windows.h>
 #endif
 
-#ifdef Q_OS_LINUX
-#  include <QFile>
-#endif
+// QFile::Permissions 在下面判断"目录读不读得了"时要用，
+// 两个平台都要 —— 原来的 #ifdef Q_OS_LINUX 让 Windows 上编不过这一段。
+#include <QFile>
 
 namespace {
 
 // 上一次扫描是否因触顶提前停止。见 FileScanner.h 的说明。
 QAtomicInt g_truncated(0);
+
+// 上一次 scan() 跳过的符号链接个数 / 读不了的目录个数。见 FileScanner.h 的说明。
+QAtomicInt g_skippedLinks(0);
+QAtomicInt g_unreadableDirs(0);
+
+// 上一次 scan() 跳过的**链接目录**个数（junction / 符号链接目录 / 卷挂载点）。
+//
+// 为什么单独一个计数：链接出去的目录以前是**完全静默**地跳掉的 ——
+// 既不进清单，也没有任何提示。客户在数据根下放一个 junction，
+// 界面上一行提示都没有，他以为那棵目录已经同步过了，
+// 实际一个文件都没传（而且那本来就是不该传的：链接不是数据）。
+//
+// 口径上它和"跳过的链接文件"是同一类问题（链接不是数据），
+// 所以 skippedLinkCount() 把两者**加起来**一起报出去，
+// 上层那一句"有 N 个符号链接没有同步"因此一定会为 junction 点名。
+QAtomicInt g_skippedLinkDirs(0);
+
+// 扫描阶段的"跳过清单"：**所有"跳过了但没告诉用户"的情况都记在这里**。
+//
+// 为什么要有它（B 线 D-1 实测，2026-10-24）：
+//   路径总长超过平台上限（Windows MAX_PATH 260 / Linux PATH_MAX 4096）的文件，
+//   stat 会失败 → QFileInfo::isFile() 返回假 → 文件**根本没进清单**，
+//   界面显示"发现 2 个待同步文件"（实际目录里是 3 个）、远端没有它、
+//   **日志里一个字都没有**。用户完全不知道自己有个文件被悄悄吃掉了。
+//
+// 同一个病根还有另外三条（本批一并统一成一份清单）：
+//   - 链接目录（junction / 符号链接目录 / 卷挂载点）：整棵跳过
+//   - 深度触顶被跳过的那棵子树：整棵跳过
+//   - 读不了的目录：整棵跳过
+//
+// 原则只有一条：**跳过必须留痕**。清单交给上层写进日志，
+// 用户至少能知道"哪些东西没同步、为什么"。
+QMutex g_skipMutex;
+QStringList g_skipNotes;
+QAtomicInt g_skipCount(0);
+QAtomicInt g_skippedLongPaths(0);
+// 每次完整遍历 +1。上层用它判断"这条清单是不是已经播报过了"
+// （自动同步一轮一轮跑，每轮都刷一遍同样的清单会把日志刷爆）。
+QAtomicInt g_scanGeneration(0);
+
+// 清单最多留这么多条，超出的只留计数 —— 免得链接/junction 特别多的目录把日志刷爆。
+const int kMaxSkipNotes = 50;
+
+// 本平台能安全使用的路径长度上限（字符数）。
+//
+// Windows：MAX_PATH = 260（含结尾 NUL，实际可用 259）。超过之后传统 Win32 路径 API
+//   一律失败；Qt 5.9 的 QFileSystemEngine 走的也是那套 API（只有路径自带 "\\?\" 前缀
+//   时才走扩展长度那套，而后续拼路径、rsync 传文件都不支持那个形式）。
+// Linux/macOS：PATH_MAX = 4096。
+//
+// **两个平台必须分开，不能一个常量一刀切**：拿 4096 去卡 Windows 会放过真正传不了的路径，
+// 拿 260 去卡 Linux 会把一堆完全正常的深目录误杀成"跳过"。
+int pathLengthLimit()
+{
+    // 测试钩子：SRT_PATH_LIMIT 可以把上限改小。
+    //
+    // 为什么需要它：能不能处理超长路径**取决于机器**（Windows 的长路径开关、
+    // Qt 版本、文件系统），在"长路径其实能用"的机器上，超限分支根本走不到，
+    // 没法验证"跳过 + 留痕"这条路径真的有效。
+    // 生产环境不该设这个变量（设小了只会让程序多跳几个文件 —— 而跳过一定留痕）。
+    const QByteArray forced = qgetenv("SRT_PATH_LIMIT");
+    bool ok = false;
+    const int value = forced.toInt(&ok);
+    if (ok && value > 0)
+        return value;
+#if defined(_WIN32)
+    return 260;      // MAX_PATH
+#elif defined(Q_OS_UNIX)
+    return 4096;     // PATH_MAX
+#else
+    return 260;
+#endif
+}
+
+// 路径是否超过本平台上限。
+bool exceedsPathLimit(const QString &path)
+{
+    const int limit = pathLengthLimit();
+    return limit > 0 && path.length() > limit;
+}
+
+// 往"跳过清单"里加一条，并累加总数。
+void addSkipNote(const QString &note)
+{
+    g_skipCount.fetchAndAddOrdered(1);
+    QMutexLocker lock(&g_skipMutex);
+    if (g_skipNotes.size() < kMaxSkipNotes)
+        g_skipNotes.append(note);
+}
+
+// 清空跳过清单（scan() 开头调用一次）。
+void resetSkipNotes()
+{
+    g_skipCount.storeRelease(0);
+    g_skippedLongPaths.storeRelease(0);
+    QMutexLocker lock(&g_skipMutex);
+    g_skipNotes.clear();
+}
+
+// 目录能不能读。
+//
+// 直接问操作系统，不靠 Qt 的抽象：
+//
+//   Windows：CreateFileW(dir, GENERIC_READ, ..., FILE_FLAG_BACKUP_SEMANTICS)
+//            打不开 = 真的读不了。
+//            Qt 对**目录**的权限位在 Windows 上给不出来（ACL 语义和 POSIX 位
+//            也不是一回事），硬判会把客户每一个子目录都报成读不了 ——
+//            这是"误报"，代价是客户白折腾半天，必须避免。
+//            FILE_FLAG_BACKUP_SEMANTICS 是打开目录的前提，缺了它 CreateFile
+//            一定失败，所以这个标志不能省。
+//
+//   Unix：stat 的 mode 位（读位一个都没有 = 真的列不出来）。
+//            即使用 root 运行也照样能判出来 —— 这里看的是 mode 位，
+//            不是 access() 的结果。
+//
+// 拿不准的时候一律返回 true（= 别乱报）：漏判只是少报一条警告，
+// 误判却会让客户以为自己的目录坏了。
+bool hasReadPermission(const QString &path)
+{
+#if defined(_WIN32)
+    const std::wstring w = QDir::toNativeSeparators(path).toStdWString();
+    const HANDLE h = CreateFileW(w.c_str(), GENERIC_READ,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                 NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+    CloseHandle(h);
+    return true;
+#elif defined(Q_OS_UNIX)
+    const QFileInfo fi(path);
+    if (!fi.isDir())
+        return true;
+    const QFile::Permissions p = fi.permissions();
+    const QFile::Permissions anyRead = QFile::ReadOwner | QFile::ReadUser
+                                     | QFile::ReadGroup | QFile::ReadOther;
+    return (p & anyRead) != QFile::Permissions();
+#else
+    Q_UNUSED(path);
+    return true;
+#endif
+}
 
 // 判断一个子目录是不是"链接出去的目录"，是就整棵跳过。
 //
@@ -203,6 +346,12 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
 
     // 每次扫描开头清一次，标志只反映**本次**扫描有没有触顶。
     g_truncated.storeRelease(0);
+    g_skippedLinks.storeRelease(0);
+    g_skippedLinkDirs.storeRelease(0);
+    g_unreadableDirs.storeRelease(0);
+    // 跳过清单每次扫描重新算（"跳过必须留痕"，见上面的说明）。
+    resetSkipNotes();
+    g_scanGeneration.fetchAndAddOrdered(1);
 
     // 手动深度优先。栈元素 = (目录绝对路径, 相对 basePath 的深度)。
     //
@@ -230,13 +379,60 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
         const QPair<QString, int> top = stack.takeLast();
         const QString dir = top.first;
         const int depth = top.second;
-        if (depth > kMaxDepth) {
-            // 到顶了就整棵停掉，而不是继续往下走 —— 继续走就等于没设上限。
+        // 数据根本身就超长（用户把目录选在一个很深的路径下）：整棵都列不出来。
+        // 子目录的超长在下面的"条目循环"里判（那里的路径才是完整路径）。
+        if (exceedsPathLimit(dir)) {
+            // 目录路径超长 → 列目录的接口一定失败（枚举本身就有长度限制），
+            // 这一棵子树整个看不见。跳过 + 留痕，不让它变成"静默少了一棵树"。
+            g_skippedLongPaths.fetchAndAddOrdered(1);
+            addSkipNote(QString::fromUtf8(
+                u8"因路径过长跳过：%1（路径长度上限 %2 字符，该路径 %3 字符；该目录整棵列不出来）")
+                .arg(dir).arg(pathLengthLimit()).arg(dir.length()));
             setTruncated();
-            stopAll = true;
-            break;
+            continue;
+        }
+        if (depth > kMaxDepth) {
+            // 到顶了：**跳过这一棵子树**，但**继续扫别的分支**。
+            //
+            // 原来这里是 stopAll = true; break; —— 深度触顶会让**整趟扫描**
+            // 中断：根目录下其它分支、以及比这条路径浅的所有目录，
+            // 一个文件都扫不到。现象是"配好目录扫出来只有零星几个文件"，
+            // 而日志一个字都不说 —— 看起来像"今天没数据"。
+            //
+            // 现在只丢这一棵子树（它的子目录还没入栈，所以整棵都跳过），
+            // 别的分支照扫。结果仍然是"不完整"，setTruncated() 继续置位，
+            // 上层照旧提示"结果不完整" —— 提示不变，少传的范围小得多。
+            setTruncated();
+            addSkipNote(QString::fromUtf8(
+                u8"因目录层级过深跳过：%1（超过 %2 层，该目录整棵未扫描）")
+                .arg(dir).arg(kMaxDepth));
+            continue;
         }
         const QDir d(dir);
+
+        // 当前用户**读不了**的目录：整棵跳过，里面的文件不会进清单。
+        //
+        // 不报出来的话，客户看到的是「同步完成，共 N 个文件」，
+        // 实际少了一整棵目录 —— 静默丢数据。
+        //
+        // 判据要"权限位上没有读" **且** "列不出任何条目" 同时成立：
+        // 只看列不出条目 → 正常的**空目录**会被误判；
+        // 只看权限位 → Windows 上 Qt 对目录权限位不可信，会把能读的目录也误判。
+        if (!hasReadPermission(dir) && d.isEmpty(QDir::NoDotAndDotDot)) {
+            ++g_unreadableDirs;
+            if (exceedsPathLimit(dir)) {
+                // 权限位读不到**也可能**是因为路径太长（打不开这个目录）。
+                // 这时必须说"路径过长"，说"权限不够"会把人引到错的方向。
+                g_skippedLongPaths.fetchAndAddOrdered(1);
+                addSkipNote(QString::fromUtf8(
+                    u8"因路径过长跳过：%1（路径长度上限 %2 字符，该路径 %3 字符；该目录整棵列不出来）")
+                    .arg(dir).arg(pathLengthLimit()).arg(dir.length()));
+            } else {
+                addSkipNote(QString::fromUtf8(
+                    u8"因目录读不了跳过：%1（请检查访问权限）").arg(dir));
+            }
+            continue;
+        }
 
         // 一次 entryInfoList 拿全，比 QDirIterator 少很多 stat 调用；
         // QDir::Name 排序保证遍历顺序稳定（推送时逆序，弹出时就是字典序）。
@@ -247,12 +443,77 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
         subDirs.reserve(entries.size());
 
         for (const QFileInfo &fi : entries) {
+            // **路径过长先判**（B 线 D-1）。
+            //
+            // 超长路径上 stat 会失败，QFileInfo 的 isDir() / isFile() 全是假，
+            // 文件于是既不进清单、也不进任何计数，日志里一个字都没有 ——
+            // 界面显示"发现 2 个待同步文件"，目录里其实是 3 个。
+            //
+            // 所以这里**先按路径长度判一遍**：超长的直接跳过、并且留痕。
+            // 至于它到底是文件还是目录：超长路径上 stat 不到、问不出来，
+            // 只能笼统地说"若它是目录，该目录整棵未扫描"。
+            const QString entryPath = fi.absoluteFilePath();
+            if (exceedsPathLimit(entryPath)) {
+                // 超长路径：**先问操作系统它是什么**，问得到就正常处理。
+                //
+                // 为什么不能"超长就一刀切跳过"：
+                //   能不能处理长路径**取决于机器**（Windows 的长路径开关、Qt 版本），
+                //   这台机器上明明传得过去的文件，一刀切跳过就是把好数据扔了。
+                //
+                // 问不到（isDir()/isFile()/isSymLink() 全假）才是真正会**静默丢掉**
+                // 的那一种：下面的 isDir()/isFile() 同样返回假，文件不进清单、
+                // 不进任何计数、日志里一个字都没有（台账 D-1 的原始症状）。
+                // 这种必须在这里显式跳过、并且留痕。
+                if (!fi.isDir() && !fi.isFile() && !fi.isSymLink()) {
+                    g_skippedLongPaths.fetchAndAddOrdered(1);
+                    addSkipNote(QString::fromUtf8(
+                        u8"因路径过长跳过：%1（路径长度上限 %2 字符，该路径 %3 字符；操作系统也认不出它是什么）")
+                        .arg(entryPath).arg(pathLengthLimit()).arg(entryPath.length()));
+                    setTruncated();
+                    continue;
+                }
+            }
             if (fi.isDir()) {
                 // 链接出去的目录、以及越过数据根进入另一个挂载点的目录，整棵跳过。
                 // 后者在 Linux 上就是 bind mount：数据根里挂一棵外部目录进来，
                 // 外部文件会被卷进清单再由 rsync 传到远端（数据泄漏）。
-                if (!shouldSkipDir(fi.absoluteFilePath(), basePath))
-                    subDirs.append(fi.absoluteFilePath());
+                //
+                // **链接出去的目录必须计数。**
+                // 原来这里只是"跳过"，一个数都不报：界面上零提示，
+                // 客户以为那棵目录同步过了，实际一个文件都没传过去。
+                // 跳过的链接目录与跳过的链接文件是同一类问题
+                // （链接不是数据），所以并进同一个计数报给用户。
+                const QString subPath = fi.absoluteFilePath();
+                if (isLinkedDir(subPath)) {
+                    ++g_skippedLinkDirs;
+                    addSkipNote(QString::fromUtf8(
+                        u8"因是链接目录跳过：%1（链接不是数据）").arg(subPath));
+                } else if (!shouldSkipDir(subPath, basePath)) {
+                    subDirs.append(subPath);
+                } else {
+                    // 越过数据根进入另一个挂载点（Linux 的 bind mount / overlay）：
+                    // 整棵跳过，同样要留痕 —— 不然客户不知道那棵目录没同步。
+                    addSkipNote(QString::fromUtf8(
+                        u8"因越过数据根跳过：%1（挂载到数据根之外的目录，不同步）")
+                        .arg(subPath));
+                }
+                continue;
+            }
+            // 符号链接**不是数据**。
+            //
+            // QFileInfo::isFile() 会跟随符号链接，所以 link → /outside/secret.spe
+            // 会被当成普通文件收进清单；随后 rsync 用 -a（含 -l）把链接**原样重建**，
+            // 远端拿到的是一个指向别的机器上路径的链接、不是数据 ——
+            // 而界面会把它标成「已同步」，客户毫无察觉。
+            //
+            // 实测（麒麟真机 + 真 rsync 3.1.1）：远端落地的是符号链接，
+            // 把源路径移走后远端读该文件报 No such file or directory。
+            //
+            // 口径与"链接出去的目录整棵跳过"一致：链接不是数据。
+            // 指向目录的链接在上面那个分支里已经处理掉了，
+            // 这里处理的是指向文件的、以及指向不存在目标的（断链）。
+            if (fi.isSymLink()) {
+                ++g_skippedLinks;
                 continue;
             }
             if (!fi.isFile())
@@ -459,9 +720,12 @@ QVector<SuffixStat> FileScanner::detectSuffixes(const QString &root)
         const QString dir = top.first;
         const int depth = top.second;
         if (depth > kMaxDepth) {
+            // 与 scan() 完全同一口径：到顶只跳过这一棵子树，继续扫别的分支。
+            // 两边必须一致 —— 扫描出来的文件数和识别出来的后缀数对不上时，
+            // 用户看到的是"识别出 5 种后缀、按规则扫只出来 3 种"，
+            // 而界面上没有任何报错。
             setTruncated();
-            stopAll = true;
-            break;
+            continue;
         }
         const QDir d(dir);
 
@@ -472,6 +736,21 @@ QVector<SuffixStat> FileScanner::detectSuffixes(const QString &root)
         subDirs.reserve(entries.size());
 
         for (const QFileInfo &fi : entries) {
+            // 对齐 scan()：超长路径同样整条排除（D-1）。
+            // 本函数**不清空**跳过清单（清单的归属是 scan()，本函数目前没有调用方），
+            // 但同样记录一条，免得这里也变成"静默跳过"。
+            const QString entryPath = fi.absoluteFilePath();
+            if (exceedsPathLimit(entryPath)) {
+                // 对齐 scan()：问得到是什么就正常处理，问不到才显式跳过 + 留痕。
+                if (!fi.isDir() && !fi.isFile() && !fi.isSymLink()) {
+                    g_skippedLongPaths.fetchAndAddOrdered(1);
+                    addSkipNote(QString::fromUtf8(
+                        u8"因路径过长跳过：%1（路径长度上限 %2 字符，该路径 %3 字符；操作系统也认不出它是什么）")
+                        .arg(entryPath).arg(pathLengthLimit()).arg(entryPath.length()));
+                    setTruncated();
+                    continue;
+                }
+            }
             if (fi.isDir()) {
                 // 对齐 scan()：链接、以及越过挂载点的目录都整棵跳过。
                 // 两处必须同一个判断，否则表格行数和页签分组会给出两套答案。
@@ -479,6 +758,10 @@ QVector<SuffixStat> FileScanner::detectSuffixes(const QString &root)
                     subDirs.append(fi.absoluteFilePath());
                 continue;
             }
+            // 对齐 scan()：符号链接不是数据，不进后缀统计。
+            // （这里不计数 —— 计数由 scan() 独占，读它的时机在扫描收尾。）
+            if (fi.isSymLink())
+                continue;
             if (!fi.isFile())
                 continue;
 
@@ -558,4 +841,38 @@ void FileScanner::setTruncated()
 bool FileScanner::wasTruncated()
 {
     return g_truncated.loadAcquire() != 0;
+}
+
+int FileScanner::skippedLinkCount()
+{
+    // 链接文件（符号链接）与链接目录（junction / 符号链接目录 / 卷挂载点）
+    // 一起报：两者都是"链接不是数据"，都被整条跳过，
+    // 少报一个就等于又一次静默丢数据。
+    return g_skippedLinks.loadAcquire() + g_skippedLinkDirs.loadAcquire();
+}
+
+QStringList FileScanner::skippedNotes()
+{
+    QMutexLocker lock(&g_skipMutex);
+    return g_skipNotes;
+}
+
+int FileScanner::skippedCount()
+{
+    return g_skipCount.loadAcquire();
+}
+
+int FileScanner::skippedLongPathCount()
+{
+    return g_skippedLongPaths.loadAcquire();
+}
+
+int FileScanner::scanGeneration()
+{
+    return g_scanGeneration.loadAcquire();
+}
+
+int FileScanner::unreadableDirCount()
+{
+    return g_unreadableDirs.loadAcquire();
 }

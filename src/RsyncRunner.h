@@ -43,6 +43,19 @@ public:
     // 否则点"取消"会看到红色的"同步异常"弹窗。
     bool wasCanceled() const { return m_cancelRequested; }
 
+    // 本轮是不是被**看门狗中止**的（不是取消，也不是数据失败）。
+    //
+    // allFinished(false) 现在有三种原因：数据失败、用户取消、看门狗中止。
+    // 看门狗中止时后续分组根本没跑，界面文案应当是"同步未完成"，
+    // 而不是"同步失败" —— 后者会让用户以为数据没传过去
+    // （核对阶段被中止时数据其实全传完了，见 onWatchdogTimeout）。
+    // 界面层要用它区分文案；本接口 2026-10-24 就位。
+    bool wasAborted() const { return m_watchdogAborted; }
+
+    // 看门狗中止时，**数据到底有没有问题**是未知的（核对阶段中止）。
+    // true = "结果未确认"，false = "数据确实有问题"。
+    bool abortedUnfinished() const { return m_abortedUnfinished; }
+
     // 口令登录时 ssh 没有终端可输密码，必须靠 SSH_ASKPASS。
     // createAskpass 返回空串表示成功，调用方负责事后 remove() 掉两个临时文件。
     static QString createAskpass(const TargetConfig &target, QString *askpassPath, QString *passFilePath);
@@ -62,7 +75,9 @@ public:
     // classifyLayer 本身在 RsyncRunner.cpp 的匿名命名空间里，没法从外面链进来。
     // 但"归因判对没有"恰恰是最该被自动守住的东西：它一错，客户就被引导去
     // 查错的方向。所以把真机抓到的原文固化成一张表，跑 --selfcheck 逐条对。
-    // 层号与 FailLayer 枚举一致：0=本机 1=网络 2=认证 3=接收端 4=未知。
+    // 层号与 FailLayer 枚举一致：0=本机 1=网络 2=认证 3=接收端 4=未知
+    // 5=对端 SSH 服务未应答（2026-10-24 新增；新值追加在末尾，0~4 一个不动）。
+    // 6=接收端同名目录挡住普通文件（2026-10-24 新增，C 线 F-1；同样追加在末尾）。
     static int     layerOf(const QString &raw);
 
     // 看门狗预算，纯函数，可单独自检。
@@ -98,6 +113,9 @@ public:
         int     percent  = 0;
         qint64  bytes    = 0;
         double  speedBps = 0.0;      // 已换算成字节/秒
+        // 帧尾 "(xfr#N, to-chk=a/b)" 里的 N = **rsync 已完成传输的文件数**。
+        // 0 = 这一帧里没有 xfr#（不是每一帧都带这个计数）。
+        int     xfr      = 0;
     };
     static ProgressFrame parseProgressFrame(const QString &line);
 
@@ -233,6 +251,27 @@ private:
     // 进程刚退出时 readyReadStandardError 不一定已经投递过，
     // 这时 readAllStandardError() 里还留着最后一段，直接丢掉就查不到失败原因。
     void takeStderrTail();
+    // 把 stderr **逐行**解析一遍，把里面带到的文件名收进两个候选集合。
+    //
+    // 为什么必须逐行、而且与 m_stderrTail 解耦：
+    // m_stderrTail 是给"原始报错展示"用的滚动窗口（只留尾部 4000 字符），
+    // 拿它当失败名单的数据源，错的行数一多，最早那批失败文件的名字就永远
+    // 进不了名单 —— 而名单是唯一能把「已同步」改回「失败」的通道，
+    // 于是它们一直绿着。
+    // 实测（80 个文件全部写失败）：远端 0 个真名文件 + 80 个 .srt-partial/，
+    // 界面前 30 个显示 ok、失败名单只有 f31–f80。
+    //
+    // 两个集合的区别（与原来两个函数各自的正则口径一一对应）：
+    //   m_failedNameHints —— 只认"报了 errno 的那种行"，用来把**行**标成失败；
+    //   m_quotedPathNames —— 认任何被引号包住的绝对路径，用来列"未能完整传输"的清单。
+    void harvestStderrNames(const QString &text);
+    // 把跨块剩下的**半行**当成完整一行补解析。
+    //
+    // 为什么要单独冲一下：rsync 的 stderr 最后一行**常常没有换行符**。
+    // 那一行如果一直留在半行缓冲里，就永远不会被解析 ——
+    // 实测（80 个文件全部写失败）：最后一个文件 f80 的报错行没进名单，
+    // 名单少一个名字（虽然那一行本身还是会被标成失败）。
+    void flushPendingStderrNames();
     // 从 stderr 里把 rsync 明确报失败的文件挑出来，逐个发 fileFailedInGroup。
     // 只在本组 rsync 退出码非 0 时调 —— 退出码 0 时 stderr 里出现的路径是
     // 别的来源的（远端 shell 告警等），拿它当失败会把好文件标成坏的。
@@ -244,7 +283,7 @@ private:
         QStringList files;
     };
 
-    // 一次失败的归因：把 ssh / rsync 的原始报错判到四个层之一，
+    // 一次失败的归因：把 ssh / rsync 的原始报错判到层之一（层号见 layerOf 的注释），
     // 再按【归因】/【原始报错】/【下一步】三段打进同步日志。
     // 判据见 RsyncRunner.cpp 里 classifyLayer 与 kFailRules 的注释。
     // forceLayer >= 0 时跳过文本分类（预检类失败没有原文可依）；
@@ -257,6 +296,16 @@ private:
     void verifyRemoteDir(const QString &remoteDir);
     void drainBuffer();
     void handleLine(const QString &line);
+    // 从一行 stdout 里剥掉进度帧前缀，剩下的文本就是被帧粘住的 %n 文件名。
+    static QString nameAfterProgressFrame(const QString &line);
+    // 处理 rsync 报出来的一个**文件名**（%n）：记账 + 广播"开始传输"。
+    void noteRsyncName(const QString &rawLine);
+    // 处理进度帧里的 xfr#N（rsync 已完成传输的文件数）：结算对应文件。
+    void noteXfrCount(int xfr);
+    // 结算本组第 index 个（0 基）名字 —— 它刚刚传完。
+    void settleNameAt(int index);
+    // 组尾对账：把"其实失败了、却被 xfr# 结算过"的文件从计数里扣回来。
+    void reconcileGroupCount();
     QString sshOption(const TargetConfig &target) const;
     QStringList sshArgs(const TargetConfig &target, bool quotePath) const;
     QString remoteSpec(const TargetConfig &target, const QString &subDir) const;
@@ -302,6 +351,18 @@ private:
     // 也不会再被标成已完成（实测曾报 finalStateOk=1 / finalCountText="1 / 1"）。
     // 空串 = 当前没有在传的文件。
     QString        m_startedName;
+
+    // 本组里 rsync 用 %n 报出来的文件名，**按到达顺序**。
+    //
+    // xfr#N 与它是 1:1 的：第 N 个 %n 名字对应第 N 次传输。
+    // 实测（2026-10-23）：目录也打 %n（带尾斜杠），但**不占** xfr# ——
+    // 只有 sub/c.dat 一个文件的清单，%n 打出 "sub/" 与 "sub/c.dat" 两个名字，
+    // 而 xfr# 峰值是 1。所以这里只收"清单里的文件"，目录不进这个序列。
+    QStringList     m_groupNames;
+    // m_groupNames 里已经结算（发过 fileTransferred）的前多少个。
+    int            m_settledCount = 0;
+    // 本组见过的最大 xfr#（0 = 一个都没见过）。
+    int            m_xfrCount = 0;
 
     // 本组里被 rsync 明确报为失败的文件的**文件名**（不含目录）。
     //
@@ -363,11 +424,73 @@ private:
     // 子进程 stderr 的滚动保留，只留尾部若干行，
     // 用来在进程退出时补上还没投递的最后一段错误信息。
     QString        m_stderrTail;
+
+    // stderr 里**逐行**解析出来的候选文件名。
+    //
+    // 这两个集合不受 4000 字符尾窗限制 —— 尾窗只管"原始报错展示"，
+    // 失败名单必须看**全部**报错，否则错的行数一多就漏标，
+    // 漏标 = 失败的文件在界面上显示成「✓ 已完成」（P0）。
+    //
+    // 内存有界：一个集合里存的是**去重后的**文件名，个数不会超过本组文件数。
+    QSet<QString>   m_failedNameHints;
+    // 远端**完整路径**（来自 rsync 报错行里被引号包住的那一段）。
+    //
+    // 为什么单列一个集合：m_failedNameHints 存的是 basename，
+    // 而 reportFailedNames() 的规则 1/3 是按**相对路径**写的 ——
+    // basename 永远命中不了那两条，于是"不同目录下同名文件"里
+    // 真正失败的那个归不了因，界面一直显示「✓ 已完成」。
+    // 远端路径 = 远端根 + 相对路径，剥前缀能把它精确还原回来。
+    QSet<QString>   m_failedRemotePaths;
+    // 保留插入顺序（界面要按清单顺序念出来），去重靠 contains 查。
+    QStringList     m_quotedPathNames;
+    // 跨块拼接用的半行：一次 readAll 拿到的可能只是半行。
+    QString        m_stderrPending;
     // 单独留一份的失败原因，供失败弹框在所有组跑完之后还能拿到。
     // m_stderrTail 每组结束就 clear()，到弹框时是空的 —— 见 onFinished 里的说明。
     QString        m_lastFailure;
     bool           m_failed = false;
     bool           m_cancelRequested = false;
+    // 看门狗超时后置位：**本轮到此为止，不再起下一组**。
+    //
+    // 为什么必须有这个标志（实测 P0 缺陷）：
+    //   onWatchdogTimeout() 里 `m_proc->kill(); m_proc->waitForFinished(1000);`
+    //   —— waitForFinished 会**同步触发** finished() 信号，
+    //   于是 onFinished() → launchNext() 起了下一组 rsync，
+    //   然后代码才回到 closeJob()，把**刚起来的下一组**也一起杀了。
+    //   实测（假 rsync 夹具 + 看门狗 1ms + 2 组）：
+    //     runDone=0，10 个文件全标 failed，进度 0%，
+    //     日志里第 1 组和第 2 组都报「长时间没有任何输出，已终止本组」。
+    //   也就是说：**看门狗超时 = 整轮陪葬**，后面几组一个都没跑。
+    //
+    //   自动同步是无人值守场景，进程会反复触发看门狗 ——
+    //   客户看到的是"每次自动同步都全军覆没"，而日志把他引向
+    //   「本机弹窗挡住子进程」，真因（自己的收尾逻辑杀错了进程）没人看得见。
+    //
+    // 置位后 launchNext() 走收尾分支，本轮以失败告终。
+    bool           m_watchdogAborted = false;
+    // 看门狗在**核对阶段**到点：数据已由 rsync 退出码 0 证明传完，
+    // 卡住的是"核对"这个手段，所以不算"数据有问题"。
+    bool           m_abortedUnfinished = false;
+    // 上一次播报"扫描跳过清单"时的扫描代次（-1 = 还没播报过）。
+    // 用来避免自动同步一轮一轮跑时把同一份清单反复刷进日志。
+    int            m_lastSkipGeneration = -1;
+    // 看门狗当前守着的是**哪个阶段**的子进程。
+    //
+    // 为什么必须区分（实测）：
+    //   看门狗同时守着三个阶段 —— 建远端目录（ssh mkdir）、
+    //   核对远端目录（ssh stat）、真正传文件（rsync）。
+    //   三个阶段的卡法与归因完全不同，但文案写死成
+    //   「长时间没有任何输出，已终止本组（本组 N 个文件）」——
+    //   在建目录阶段超时时，本组还没开始（N=0），
+    //   客户看到的是"本组 0 个文件"，完全不知所云。
+    //
+    // 阶段取值：
+    //   StageNone       没有子进程在看门狗视野里
+    //   StageRemoteDirs 建远端目录（连不上/没权限就是死在这一步）
+    //   StageVerify     核对远端目录
+    //   StageTransfer   真正传文件
+    enum WatchStage { StageNone = 0, StageRemoteDirs, StageVerify, StageTransfer };
+    WatchStage     m_watchStage = StageNone;
 
     // 远端目标目录在 mkdir 那一刻放的标记文件，用来在传输结束后确认"还是同一个目录"。
     QString          m_verifyToken;    // 标记文件里写的随机串

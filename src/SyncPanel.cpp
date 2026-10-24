@@ -49,13 +49,18 @@ namespace {
 class ScannerWorker : public QRunnable
 {
 public:
-    ScannerWorker(const QString &root, const QStringList &suffixes, QObject *sink)
-        : m_root(root), m_suffixes(suffixes), m_sink(sink) {}
+    ScannerWorker(const QString &root, const QStringList &suffixes, QObject *sink,
+                  const std::shared_ptr<bool> &alive)
+        : m_root(root), m_suffixes(suffixes), m_sink(sink), m_alive(alive) {}
 
     void run() override
     {
         const QVector<FileItem> files = FileScanner::scan(m_root, m_suffixes);
         const bool truncated = FileScanner::wasTruncated();
+        // 这两个计数和 wasTruncated() 一样，只有 scan() 刚跑完这一刻问得到
+        // （scan() 开头会自己清零）。
+        const int skippedLinks = FileScanner::skippedLinkCount();
+        const int unreadableDirs = FileScanner::unreadableDirCount();
         // 投递之前必须确认接收者还活着。
         //
         // 原来这里无条件 invokeMethod(m_sink, ...)：目录很大时扫描要几十秒，
@@ -67,18 +72,36 @@ public:
         // 这里**不能**改成"析构里 waitForDone()" —— 那会把"关窗卡住"
         // 这个已经修过的问题带回来（FileScanner.cpp 里记着那个坑：
         // 扫描遇到目录环会一直不返回）。
+        // 面板还活着吗？
+        //
+        // 这里**不能只靠 QPointer**（下面 m_sink 的判空）：
+        // QPointer<QObject> 在 ~QObject 才清空，而 SyncPanel 的 vptr
+        // 在 ~QWidget 就已经降级成 QWidget —— 两者之间有个窗口。
+        // 后台线程在这个窗口里 invokeMethod，Qt 在 QWidget 的 metaObject
+        // 里找不到 deliverScanResult，于是打出一行警告
+        // "No such method QWidget::deliverScanResult"。
+        // 自动同步本身就会起扫描，所以"自动同步期间关窗"必中这个窗口。
+        //
+        // 令牌由析构函数显式置失效，投递前再查一次 ——
+        // 这条路径不依赖 Qt 的析构顺序，窗口彻底消失。
+        if (!m_alive || !*m_alive)
+            return;
         if (m_sink.isNull())
             return;
         QMetaObject::invokeMethod(m_sink, "deliverScanResult",
                                   Qt::QueuedConnection,
                                   Q_ARG(QVector<FileItem>, files),
-                                  Q_ARG(bool, truncated));
+                                  Q_ARG(bool, truncated),
+                                  Q_ARG(int, skippedLinks),
+                                  Q_ARG(int, unreadableDirs));
     }
 
 private:
     QString m_root;
     QStringList m_suffixes;
     QPointer<QObject> m_sink;
+    // 面板存活令牌，与 SyncPanel 共享同一个。
+    std::shared_ptr<bool> m_alive;
 };
 
 // 连接探测跑在后台线程：RsyncRunner::probeConnection 是**阻塞**的
@@ -130,7 +153,8 @@ const char *kClearLog    = "\xE6\xB8\x85\xE7\xA9\xBA";                      // �
 const char *kStatusReady = "\xE7\x8A\xB6\xE6\x80\x81\xEF\xBC\x9A\xE5\xB0\xB1\xE7\xBB\xAA";  // 状态：就绪
 const char *kStatusRun   = "\xE7\x8A\xB6\xE6\x80\x81\xEF\xBC\x9A\xE5\x90\x8C\xE6\xAD\xA5\xE4\xB8\xAD";  // 状态：同步中
 const char *kStatusDone  = "\xE7\x8A\xB6\xE6\x80\x81\xEF\xBC\x9A\xE5\xB7\xB2\xE5\xAE\x8C\xE6\x88\x90";  // 状态：已完成
-const char *kStatusStop  = "\xE7\x8A\xB6\xE6\x80\x81\xEF\xBC\x9A\xE5\xB7\xB2\xE5\x81\x9C\xE6\xAD\xA2";  // 状态：已停止
+const char *kStatusFail     = "\xE7\x8A\xB6\xE6\x80\x81\xEF\xBC\x9A\xE5\xA4\xB1\xE8\xB4\xA5";  // 状态：失败
+const char *kStatusCanceled = "\xE7\x8A\xB6\xE6\x80\x81\xEF\xBC\x9A\xE5\xB7\xB2\xE5\x8F\x96\xE6\xB6\x88";  // 状态：已取消
 const char *kNoTool      = "\xE6\x9C\xAA\xE4\xB8\xBA\xE8\xAF\xA5\xE6\x96\x87\xE4\xBB\xB6\xE9\x85\x8D\xE7\xBD\xAE\xE8\xB0\x83\xE7\x94\xA8\xE5\xB7\xA5\xE5\x85\xB7";  // 未为该文件配置调用工具
 
 class CheckHeaderView : public QHeaderView
@@ -233,12 +257,43 @@ SyncPanel::SyncPanel(QWidget *parent)
     m_elapsedTimer->setInterval(1000);
     connect(m_elapsedTimer, SIGNAL(timeout()), this, SLOT(tickElapsed()));
 
+    m_autoSyncTimer = new QTimer(this);
+    // 心跳周期由间隔决定（AutoSyncScheduler::heartbeatMsFor）。
+    // 这里先给一个占位值，loadConfig() 之后会按真实间隔重设。
+    m_autoSyncTimer->setInterval(5000);
+    // **PreciseTimer 是必须的**。默认的 CoarseTimer 允许提前最多 5% 触发：
+    // 间隔 60 秒时提前 3 秒、间隔 86400 秒时提前 **72 分钟**。
+    // 客户看到的是"我设的 1 小时，软件 12 点就动了"。
+    // 心跳只是"问一次到没到点"，真正的到点判定用绝对时间点比较
+    // （now >= nextRunAt），所以心跳早一点到也不会早触发 —— 但仍用
+    // PreciseTimer，避免心跳本身的抖动累积。
+    m_autoSyncTimer->setTimerType(Qt::PreciseTimer);
+    connect(m_autoSyncTimer, SIGNAL(timeout()), this, SLOT(onAutoSyncTick()));
+
+    // 倒计时专用的 1 秒定时器（只管让界面上的秒数走，不参与排程）。
+    m_autoSyncUiTimer = new QTimer(this);
+    m_autoSyncUiTimer->setInterval(1000);
+    m_autoSyncUiTimer->setTimerType(Qt::PreciseTimer);
+    connect(m_autoSyncUiTimer, SIGNAL(timeout()), this, SLOT(onAutoSyncUiTick()));
+
     // 防抖用单调时钟。QDateTime::currentMSecsSinceEpoch() 会因为系统时间
     // 被调（现场机器对时、NTP 跳一下）而倒退，倒退的那一次窗口会变成负数、
     // 于是接下来一直点一直被吞。
     m_toolClock.start();
 
     loadConfig();
+    m_autoSyncIntervalSec = ConfigStore::loadAutoSyncInterval();
+    // 上次开跑时刻从配置读回来 —— 这样"程序关掉再开"不会丢掉节奏。
+    m_autoSyncLastRunAt = ConfigStore::loadAutoSyncLastRunAt();
+    // 心跳周期按真实间隔重设（不是固定 1 秒）。
+    applyAutoSyncHeartbeat();
+    autoSyncScheduleNext();
+    if (m_chkAutoSync && m_chkAutoSync->isChecked()) {
+        m_autoSyncTimer->start();
+        m_autoSyncUiTimer->start();
+        updateAutoSyncStatusUi();
+    }
+
     // 原来这里是 setStatusLine(T(kStatusDone), 1) —— 程序一打开状态栏就写
     // 「状态：已完成」，而此时一次同步都没发生过。空界面配一个"已完成"，
     // 等于把"什么都没做"显示成"做完了"，用户会以为文件已经传过去过一次。
@@ -290,6 +345,11 @@ SyncPanel::SyncPanel(QWidget *parent)
 
 SyncPanel::~SyncPanel()
 {
+    // 先让后台扫描线程知道"面板没了"，再往下拆。
+    // 不这么做的话，扫描线程会在 vptr 已降级但 QPointer 还没清零的窗口里
+    // 投递结果，Qt 打 "No such method QWidget::deliverScanResult" 警告。
+    if (m_aliveToken)
+        *m_aliveToken = false;
     // QProcess 析构只警告不断进程。手动拉起的工具不显式收尾就会变成孤儿继续跑。
     const QVector<QProcess *> procs = m_toolProcs;
     for (int i = 0; i < procs.size(); ++i) {
@@ -381,8 +441,16 @@ void SyncPanel::buildUi()
     m_table->setWordWrap(false);
     m_table->setSortingEnabled(false);
     m_table->setCornerButtonEnabled(false);
-    // 手册 §2：表格区固定 235px，纵向滚动，**绝不出现横向滚动条**。
-    m_table->setFixedHeight(235);
+    // 手册 §2：表格区最小 235px、随窗口纵向拉伸，纵向滚动，**绝不出现横向滚动条**。
+    //
+    // 原来这里是 setFixedHeight(235)。卡片内三个子项（页签 32 / 分隔线 1 / 表格 235）
+    // 全是固定高度、且 cardLay 里 stretch 全为 0 —— 窗口一放大，多出来的高度就被
+    // QVBoxLayout 平分插到子项之间：页签被推下去、列头被推下去，上下留白越拉越多
+    // （实测 830×480 几乎无空白，1920×1080 变成 892px 的大空卡片）。
+    //
+    // 改成「最小高度 + stretch=1」：多余高度全部给表格，表格紧贴页签下方铺开，
+    // 大屏不再浪费；小窗口仍保底 235px，手册 §2 的数值不变。
+    m_table->setMinimumHeight(235);
     m_table->horizontalHeader()->setHighlightSections(false);
     m_table->verticalHeader()->setVisible(false);
     // 原型 td padding 6px + 按钮 23px = 行高 35px。
@@ -410,8 +478,10 @@ void SyncPanel::buildUi()
     m_table->setColumnWidth(FileTableModel::ColStatus,   85);
     // 156px 死锁：不管配几个工具，这一列都不许变宽（手册 §6.3）。
     m_table->setColumnWidth(FileTableModel::ColTool,     156);
-    cardLay->addWidget(m_table);
-    root->addWidget(card);
+    // 表格吃掉卡片内所有多余高度（配合上面的 setMinimumHeight），页签和分隔线保持固定高度贴顶。
+    cardLay->addWidget(m_table, 1);
+    // 清单卡片吃掉窗口内所有多余高度，进度区和底部操作条保持自然高度。
+    root->addWidget(card, 1);
 
     connect(m_refresh, SIGNAL(clicked()), this, SLOT(refreshScanClicked()));
     connect(m_toolDelegate, SIGNAL(toolButtonClicked(int,int)),
@@ -448,7 +518,7 @@ void SyncPanel::buildUi()
 
     // ---- 3. 底部操作条 ----
     QHBoxLayout *foot = new QHBoxLayout;
-    foot->setSpacing(14);
+    foot->setSpacing(18);
     m_onlyNew = new QCheckBox(T(kOnlyNew));
     // 这里原来是无条件 setChecked(true)：勾选框每次启动都被钉死成勾上，
     // 用户取消它同步一次（确实生效），关掉程序再打开又变回去 ——
@@ -457,20 +527,52 @@ void SyncPanel::buildUi()
     //   默认勾选改文件 -> 接收端 sha256 不变
     //   取消勾选       -> 接收端 sha256 变了
     //   再改一次、重启 -> 又不变了（因为没持久化）
-    // 老配置里没有这个键时 loadOnlyNewFiles() 返回 true，开箱行为不变。
+    // 老配置里没有这个键时 loadOnlyNewFiles() 返回 false = 默认不勾 → --checksum。
+    // 与需求 2「新增**或修改**的文件」和手册步骤 5「不勾（默认）」一致。
     m_onlyNew->setChecked(ConfigStore::loadOnlyNewFiles());
-    connect(m_onlyNew, &QCheckBox::toggled, this, [](bool on) {
+    // 勾上/取消「仅同步新增文件」时**说清楚它会做什么**。
+    //
+    // 这个勾选框的后果是"远端同名文件一律不更新" —— 客户改了本机文件、
+    // 勾着这个框同步过去，远端还是旧的，界面只显示一列「远端已有」，
+    // 不解释原因（实测 2005 行全「远端已有」、已传 0 B，零提示）。
+    // 需求 2 要的是「新增**或修改**的文件」，所以默认态必须是不勾。
+    connect(m_onlyNew, &QCheckBox::toggled, this, [this](bool on) {
         ConfigStore::saveOnlyNewFiles(on);
+        appendLogLine(QStringLiteral("INFO"),
+                      on ? QObject::tr("\xE5\xB7\xB2\xE5\x90\xAF\xE7\x94\xA8\xE3\x80\x8C\xE4\xBB\x85\xE5\x90\x8C\xE6\xAD\xA5\xE6\x96\xB0\xE5\xA2\x9E\xE6\x96\x87\xE4\xBB\xB6\xE3\x80\x8D\xEF\xBC\x9A\xE8\xBF\x9C\xE7\xAB\xAF\xE5\xB7\xB2\xE6\x9C\x89\xE7\x9A\x84\xE5\x90\x8C\xE5\x90\x8D\xE6\x96\x87\xE4\xBB\xB6\xE4\xB8\x8D\xE4\xBC\x9A\xE6\x9B\xB4\xE6\x96\xB0\xEF\xBC\x8C\xE5\x8F\xAA\xE4\xBC\xA0\xE6\x9C\xAC\xE6\x9C\xBA\xE6\x96\xB0\xE5\xA2\x9E\xE7\x9A\x84\xE6\x96\x87\xE4\xBB\xB6\xE3\x80\x82")
+                          : QObject::tr("\xE5\xB7\xB2\xE5\x8F\x96\xE6\xB6\x88\xE3\x80\x8C\xE4\xBB\x85\xE5\x90\x8C\xE6\xAD\xA5\xE6\x96\xB0\xE5\xA2\x9E\xE6\x96\x87\xE4\xBB\xB6\xE3\x80\x8D\xEF\xBC\x9A\xE8\xBF\x9C\xE7\xAB\xAF\xE5\x90\x8C\xE5\x90\x8D\xE6\x96\x87\xE4\xBB\xB6\xE4\xBC\x9A\xE6\x8C\x89\xE5\x86\x85\xE5\xAE\xB9\xE6\xAF\x94\xE5\xAF\xB9\xE5\x90\x8E\xE6\x9B\xB4\xE6\x96\xB0\xE3\x80\x82"),
+                      0);
     });
     m_onlyNew->setCursor(Qt::PointingHandCursor);
-    foot->addWidget(m_onlyNew);
+    m_onlyNew->setToolTip(QString::fromUtf8(u8"勾选：远端已有的同名文件不再覆盖，只传新文件。\n不勾（默认）：新增和修改过的文件都会同步。"));
+
+    m_chkAutoSync = new QCheckBox(QString::fromUtf8(u8"\u81EA\u52A8\u540C\u6B65"));  // 自动同步
+    m_chkAutoSync->setObjectName(QStringLiteral("chkAutoSync"));
+    m_chkAutoSync->setCursor(Qt::PointingHandCursor);
+    m_chkAutoSync->setChecked(ConfigStore::loadAutoSyncEnabled());
+    // tooltip 说清三件事：勾上就自动跑、默认多久一次、间隔去哪改。
+    // 客户点这一个框就能用，不需要自己去摸索（需求原文："不要让用户手动填 cron 配置"）。
+    m_chkAutoSync->setToolTip(QString::fromUtf8(
+        u8"勾选后按设定周期自动同步，周期在「设置」里改。"));
+    connect(m_chkAutoSync, SIGNAL(toggled(bool)), this, SLOT(onAutoSyncToggled(bool)));
+    // 勾选框文字里**不塞倒计时**。
+    // 原来写成「自动同步 (42s)」，每秒变一次：文字宽度一变，
+    // 底栏这一行的控件位置就跟着抖一下 —— 尤其"仅同步新增""同步日志"
+    // 和它并排时，肉眼能看到整排按钮在微微晃动。
+    // 倒计时放在**计数行**（进度区那一行），那里本来就是刷新的地方。
+    m_chkAutoSync->setMinimumWidth(78);
     m_toggleLog = new QPushButton(T(kLogOpen));
     m_toggleLog->setObjectName(QStringLiteral("btnToggleLog"));
     m_toggleLog->setFixedHeight(28);
     m_toggleLog->setCursor(Qt::PointingHandCursor);
     m_toggleLog->setIcon(QIcon(Theme::docIcon(12, Theme::textSub())));
     m_toggleLog->setIconSize(QSize(12, 12));
+    // 左：查看日志；中：两个同步策略开关；右：主动作。
+    // 原来日志按钮夹在两个勾选框后面，开关和按钮混排，读起来像一串同级功能。
     foot->addWidget(m_toggleLog);
+    foot->addSpacing(6);
+    foot->addWidget(m_chkAutoSync);
+    foot->addWidget(m_onlyNew);
     foot->addStretch(1);
     m_startBtn = new QPushButton(T(kStartSync));
     m_startBtn->setObjectName(QStringLiteral("btnStartSync"));
@@ -483,7 +585,7 @@ void SyncPanel::buildUi()
     connect(m_startBtn, SIGNAL(clicked()), this, SLOT(startOrCancel()));
     connect(m_toggleLog, SIGNAL(clicked()), this, SLOT(toggleLogDrawer()));
 
-    // ---- 4. 日志抽屉（默认收起，展开 175px，500 行 FIFO）----
+    // ---- 4. 日志抽屉（默认收起，展开 175px，2000 行 FIFO）----
     m_logDrawer = new QWidget;
     m_logDrawer->setObjectName(QStringLiteral("logDrawer"));
     m_logDrawer->setVisible(false);
@@ -1024,6 +1126,13 @@ void SyncPanel::copyLog()
     QApplication::clipboard()->setText(m_logView->toPlainText());
     appendLogLine(QStringLiteral("INFO"),
                   QObject::tr("\xE5\xB7\xB2\xE5\xA4\x8D\xE5\x88\xB6\xE6\x97\xA5\xE5\xBF\x97\xE5\x88\xB0\xE5\x89\xAA\xE8\xB4\xB4\xE6\x9D\xBF"), 0);
+    // 日志区上限 2000 块（document()->setMaximumBlockCount(2000)），超了从最早的开始淘汰。
+    // 实测 2000 文件规模下每轮 12 行 → 大约 166 轮（36 分钟）之后，早先的轮次就没了，
+    // 而界面上没有任何提示 → 用户回头查半小时前的日志发现没了，以为根本没记。
+    if (m_logView->document()->blockCount() >= 2000) {
+        appendLogLine(QStringLiteral("WARN"),
+                      QObject::tr("\xE7\x95\x8C\xE9\x9D\xA2\xE6\x97\xA5\xE5\xBF\x97\xE5\x8C\xBA\xE6\x9C\x80\xE5\xA4\x9A\xE4\xBF\x9D\xE7\x95\x99\xE6\x9C\x80\xE8\xBF\x91\x20\x32\x30\x30\x30\x20\xE8\xA1\x8C\xEF\xBC\x8C\xE6\x9B\xB4\xE6\x97\xA9\xE7\x9A\x84\xE8\xBD\xAE\xE6\xAC\xA1\xE5\xB7\xB2\xE7\xBB\x8F\xE4\xB8\x8D\xE5\x9C\xA8\xE7\x95\x8C\xE9\x9D\xA2\xE4\xB8\x8A\xEF\xBC\x88\xE5\xA4\x8D\xE5\x88\xB6\xE5\x87\xBA\xE6\x9D\xA5\xE7\x9A\x84\xE4\xB9\x9F\xE6\x98\xAF\xE5\x90\x8C\xE6\xA0\xB7\xE8\xBF\x99\x20\x32\x30\x30\x30\x20\xE8\xA1\x8C\xEF\xBC\x89\xE3\x80\x82"), 3);
+    }
 }
 
 void SyncPanel::clearLog()
@@ -1206,15 +1315,14 @@ void SyncPanel::onByteStats(qint64 bytes, double bytesPerSec)
     // 组一切换数字就从上一组总量掉回本组的小数 —— 实测差 8.7 万倍。
     m_lastBytes = m_groupBytesBase + bytes;
     m_lastBytesPerSec = bytesPerSec;
-    if (!m_countLabel)
-        return;
-    // 同步开始前也要有内容：这时还没有速率，显示 0.0 而不是空白，
-    // 空白会让那一栏看起来是"还没加载出来"。
-    const QString base = QObject::tr("%1 / %2 \xE4\xB8\xAA\xE6\x96\x87\xE4\xBB\xB6 \xC2\xB7 \xE5\xB7\xB2\xE4\xBC\xA0 %3 \xC2\xB7 %4 MB/s")
-                             .arg(m_runDone).arg(m_runTotal)
-                             .arg(formatBytes(m_lastBytes))
-                             .arg(bytesPerSec / (1024.0 * 1024.0), 0, 'f', 1);
-    m_countLabel->setText(base);
+    // **计数行只有一个写入点**（renderCountLabel）。
+    //
+    // 原来这里自己拼了一整行 setText（4 个字段），而 renderCountLabel() 是 6 个字段 ——
+    // 两个写入者抢同一个标签，谁后写谁赢。于是**传输过程中**：
+    //   ·「用时」被抹掉（实测 t=40.7s 的截图上只剩 4 个字段）；
+    //   ·「第 N 轮」「本轮无变更」「下次同步 N 秒后」统统被抹掉。
+    // 实测（2003 文件 / 1.37 GiB / 46 轮自动同步）就是这么抓到的。
+    renderCountLabel();
 }
 
 void SyncPanel::tickElapsed()
@@ -1242,11 +1350,50 @@ void SyncPanel::renderCountLabel()
     const QString elapsed = h > 0
         ? QObject::tr("%1:%2:%3").arg(h).arg(mnt, 2, 10, QLatin1Char('0')).arg(s, 2, 10, QLatin1Char('0'))
         : QObject::tr("%1:%2").arg(mnt).arg(s, 2, 10, QLatin1Char('0'));
-    m_countLabel->setText(QObject::tr("%1 / %2 \xE4\xB8\xAA\xE6\x96\x87\xE4\xBB\xB6 \xC2\xB7 \xE5\xB7\xB2\xE4\xBC\xA0 %3 \xC2\xB7 %4 MB/s \xC2\xB7 %5")
-                          .arg(m_runDone).arg(m_runTotal)
-                          .arg(formatBytes(m_lastBytes))
-                          .arg(m_lastBytesPerSec / (1024.0 * 1024.0), 0, 'f', 1)
-                          .arg(elapsed));
+    // 尾巴「· 下次同步 Ns 后」由 updateAutoSyncStatusUi() 维护（m_autoSyncSuffix），
+    // 在这里统一拼上。
+    //
+    // 为什么不在 updateAutoSyncStatusUi() 里直接 setText 整行：
+    // 本函数**整体覆盖** m_countLabel 的文本，而且它每秒被 tickElapsed() 调一次。
+    // 谁后写谁赢 —— 两边各自 setText 的话，"下次同步"就会一秒出现一秒消失。
+    // 单一写入点（这里）+ 单独存的尾巴，是唯一不闪的做法。
+    // 「已传」这一格有四种口径，必须分开写，不能一律写字节：
+    //   · rsync 报了字节 → 显示字节 + 速度（连续、平滑）；
+    //   · rsync 一个字节都没报、但确实有文件传完 → 显示「已传 N 个文件」
+    //     （实测 W1-01：一次很快的小改动，rsync 的进度帧一帧都没来，
+    //       界面写「已传 0 B」，而同一屏的日志写「1 个文件已传输」）；
+    //   · 这一轮成功但什么都没传 → 显示「本轮无变更」
+    //     （否则界面写「2003 / 2003 个文件 · 已传 0 B」，
+    //       而日志写「本次没有需要传输的文件」，两个口径打架）；
+    //   · 失败轮且确实一字节都没发 → 显示「已传 0 B」。
+    //
+    // 分段用「·」，下一轮倒计时用「|」—— 原来倒计时和本轮结果挤在同一行里，
+    // 读起来像一句自相矛盾的话（"已完成 2003 个文件 … 下次同步 1 秒后"）。
+    QStringList parts;
+    // 轮次只写在日志里：计数行只留「文件数 · 已传 · 用时」，开自动同步后不至于挤成一长串。
+    parts << QObject::tr("%1 / %2 \xE4\xB8\xAA\xE6\x96\x87\xE4\xBB\xB6").arg(m_runDone).arg(m_runTotal);
+    if (m_lastBytes > 0) {
+        // 速度用**本轮平均速度**（已传字节 ÷ 本轮用时），不用 rsync 报的瞬时值。
+        // 同一个标签里写「已传 1.4 GB · 8.9 MB/s · 0:47」，用户自己一除是 30 MB/s，
+        // 跟界面上的数对不上（实测差 3.4 倍），会以为软件限速或者链路有问题。
+        const double mbps = (m_elapsedSecs > 0)
+            ? (double(m_lastBytes) / (1024.0 * 1024.0) / double(m_elapsedSecs))
+            : (m_lastBytesPerSec / (1024.0 * 1024.0));
+        parts << QObject::tr("\xE5\xB7\xB2\xE4\xBC\xA0 %1 \xC2\xB7 %2 MB/s")
+                     .arg(formatBytes(m_lastBytes))
+                     .arg(mbps, 0, 'f', 1);
+    } else if (m_transferredThisRound > 0) {
+        parts << QObject::tr("\xE5\xB7\xB2\xE4\xBC\xA0 %1 \xE4\xB8\xAA\xE6\x96\x87\xE4\xBB\xB6").arg(m_transferredThisRound);
+    } else if (m_lastRoundNoChange) {
+        parts << QObject::tr("\xE6\x9C\xAC\xE8\xBD\xAE\xE6\x97\xA0\xE5\x8F\x98\xE6\x9B\xB4");
+    } else {
+        parts << QObject::tr("\xE5\xB7\xB2\xE4\xBC\xA0 0 B");
+    }
+    parts << elapsed;
+    QString text = parts.join(QObject::tr(" \xC2\xB7 "));
+    if (!m_autoSyncSuffix.isEmpty())
+        text += QObject::tr(" | ") + m_autoSyncSuffix;
+    m_countLabel->setText(text);
 }
 
 // ---------------------------------------------------------------- 扫描
@@ -1349,7 +1496,7 @@ void SyncPanel::startScanAsync()
     for (int i = 0; i < m_syncRules.size(); ++i)
         sufs.append(m_syncRules.at(i).suffix);
 
-    ScannerWorker *w = new ScannerWorker(m_localRoot, sufs, this);
+    ScannerWorker *w = new ScannerWorker(m_localRoot, sufs, this, m_aliveToken);
     QThreadPool::globalInstance()->start(w);
 }
 
@@ -1366,7 +1513,14 @@ void SyncPanel::startScanAsync()
 // 写入和消费之间不存在别的线程 —— 消费发生在同一个 UI 线程的下一行。
 bool g_scanTruncated = false;
 
-void SyncPanel::deliverScanResult(const QVector<FileItem> &files, bool truncated)
+// 扫描时跳过的东西：符号链接、读不了的目录。
+// 跳过 = 这些数据**不会**被同步。静默跳过 = 静默丢数据，
+// 所以必须让用户看见数字。用文件级静态递过去，理由同 g_scanTruncated。
+int g_scanSkippedLinks = 0;
+int g_scanUnreadableDirs = 0;
+
+void SyncPanel::deliverScanResult(const QVector<FileItem> &files, bool truncated,
+                                  int skippedLinks, int unreadableDirs)
 {
     // FileScanner::wasTruncated() 只有在这一刻问才有意义：
     // FileScanner::scan() 开头会自己把标志清零（FileScanner.cpp: g_truncated.storeRelease(0)），
@@ -1374,6 +1528,8 @@ void SyncPanel::deliverScanResult(const QVector<FileItem> &files, bool truncated
     // 原来这里 Q_UNUSED(truncated) 直接把它扔了 ——
     // 上层采集了、这里收到了、又原样丢掉，界面上一次提示都没有。
     g_scanTruncated = truncated;
+    g_scanSkippedLinks = skippedLinks;
+    g_scanUnreadableDirs = unreadableDirs;
     onScanFinished(files);
 }
 
@@ -1460,6 +1616,25 @@ void SyncPanel::onScanFinished(const QVector<FileItem> &files)
                           .arg(missingExe), 3);
     }
 
+    // 扫描时跳过的条目必须报出来。
+    //
+    // 跳过 = 这些数据**不会**被同步。客户看到「同步完成，共 N 个文件」
+    // 就以为全传了，实际有一批链接 / 一整棵目录根本没进清单。
+    if (g_scanSkippedLinks > 0) {
+        appendLogLine(QStringLiteral("WARN"),
+                      QObject::tr(u8"\u6709 %1 \u4E2A\u7B26\u53F7\u94FE\u63A5\u6CA1\u6709\u540C\u6B65"
+                                    u8"\uFF08\u94FE\u63A5\u4E0D\u662F\u6587\u4EF6\u6570\u636E\uFF0C"
+                                    u8"\u8FDC\u7AEF\u62FF\u5230\u7684\u662F\u94FE\u63A5\u672C\u8EAB\uFF09\u3002")
+                          .arg(g_scanSkippedLinks), 3);
+    }
+    if (g_scanUnreadableDirs > 0) {
+        appendLogLine(QStringLiteral("WARN"),
+                      QObject::tr(u8"\u6709 %1 \u4E2A\u76EE\u5F55\u8BFB\u4E0D\u4E86\uFF0C"
+                                    u8"\u91CC\u9762\u7684\u6587\u4EF6\u6CA1\u6709\u540C\u6B65\u3002"
+                                    u8"\u8BF7\u68C0\u67E5\u8FD9\u4E9B\u76EE\u5F55\u7684\u8BBF\u95EE\u6743\u9650\u3002")
+                          .arg(g_scanUnreadableDirs), 3);
+    }
+
     // 大小写只差的重名文件：必须报出来。
     //
     // 发送端在 Windows 上时，A.spe 和 a.spe 在磁盘上本来就是同一个文件 ——
@@ -1530,6 +1705,7 @@ void SyncPanel::onScanFinished(const QVector<FileItem> &files)
                               .arg(files.size())
                               .arg(totalMb, 0, 'f', 1));
     }
+    updateAutoSyncStatusUi();
 
     if (g_scanTruncated) {
         // 触顶时不能停在上面那行写的「已完成」上：目录只扫了一部分，
@@ -1557,7 +1733,35 @@ void SyncPanel::onScanFinished(const QVector<FileItem> &files)
             // 用户会翻遍一张空表去找复选框，永远找不到。
             appendLogLine(QStringLiteral("WARN"),
                           QObject::tr("\xE6\x9C\xAC\xE6\x9C\xBA\xE7\x9B\xAE\xE5\xBD\x95\xE4\xB8\x8B\xE6\xB2\xA1\xE6\x9C\x89\xE5\x8C\xB9\xE9\x85\x8D\xE5\xBE\x85\xE5\x90\x8C\xE6\xAD\xA5\xE7\x9A\x84\xE6\x96\x87\xE4\xBB\xB6\xEF\xBC\x8C\xE6\x9C\xAC\xE6\xAC\xA1\xE5\x90\x8C\xE6\xAD\xA5\xE5\xB7\xB2\xE5\x8F\x96\xE6\xB6\x88\xE3\x80\x82"), 3);
+            if (m_autoSyncInFlight) {
+                m_autoSyncInFlight = false;
+                appendLogLine(QStringLiteral("WARN"),
+                              QObject::tr("\xE8\x87\xAA\xE5\x8A\xA8\xE5\x90\x8C\xE6\xAD\xA5\xE6\x9C\xAC\xE6\xAC\xA1\xE6\x97\xA0\xE6\x96\x87\xE4\xBB\xB6\xE5\x8F\xAF\xE5\x90\x8C\xE6\xAD\xA5\xEF\xBC\x8C\xE5\xB7\xB2\xE7\xBB\x88\xE6\xAD\xA2\xE3\x80\x82"), 3);
+            }
         } else {
+            // **自动触发时显式全选**。
+            //
+            // startSyncInternal() 取的是 m_model->checkedRows()（用户勾选的行）。
+            // 自动同步的语义是"把该传的都传了"，而用户上次手动取消勾选
+            // 只是那一次的临时决定 —— 沿用它会让自动同步静默只传一部分，
+            // 而日志里看不出任何异常。
+            //
+            // 为什么不能靠 setFiles() 的"默认全勾"副作用：
+            //   FileTableModel::setFiles() 现在确实默认全勾，但那是**副作用**
+            //   不是契约。哪天模型改成"记住用户上次的勾选状态"，
+            //   自动同步就会静默变成"只传上次勾的那部分"。
+            //   显式写出来才是不依赖巧合的做法。
+            //
+            // 只在自动触发这一条路径上全选：
+            // 手动点「开始同步」必须沿用用户的勾选，否则用户精心取消勾选
+            // 的文件会被强行传走 —— 那是越权。
+            if (m_autoSyncInFlight) {
+                m_model->setAllChecked(true);
+                m_autoSyncInFlight = false;
+                appendLogLine(QStringLiteral("AUTO"),
+                              QObject::tr("\xE8\x87\xAA\xE5\x8A\xA8\xE5\x90\x8C\xE6\xAD\xA5\xE5\xB7\xB2\xE9\x87\x8D\xE6\x96\xB0\xE6\x89\xAB\xE6\x8F\x8F\xE5\xAE\x8C\xE6\x88\x90\xEF\xBC\x8C\xE5\xB7\xB2\xE5\x85\xA8\xE9\x80\x89\xE5\xB9\xB6\xE5\x90\x8C\xE6\xAD\xA5 %1 \xE4\xB8\xAA\xE6\x96\x87\xE4\xBB\xB6\xE3\x80\x82")
+                                .arg(files.size()), 1);
+            }
             startSyncInternal();
         }
     }
@@ -1595,6 +1799,14 @@ void SyncPanel::startSyncInternal()
         picked.append(all.at(rows.at(i)));
     m_runTotal = picked.size();
     m_runDone = 0;
+    // 本轮的三个计数从零开始：
+    //   m_transferredThisRound —— 本轮**真的传输完成**的文件数（区分于
+    //     「已处理完」，后者会把判定无需传输的文件也算进去）；
+    //   m_lastRoundNoChange —— 上一轮是不是「成功但什么都没传」；
+    //   m_currentRoundNo —— 本轮是第几轮（界面计数行前缀 + 日志分隔行）。
+    m_transferredThisRound = 0;
+    m_lastRoundNoChange = false;
+    m_currentRoundNo = m_syncFinishedCount + 1;
     // 分组必须在开跑前算好：全局进度要拿每组的文件数当权重。
     rebuildGroupSizes(picked);
     m_progressTrace.clear();
@@ -1609,6 +1821,10 @@ void SyncPanel::startSyncInternal()
     m_elapsedTimer->start();
 
     // 排队：所有选中行记录在队列中，真实开始传输某个文件时由 onFileStarted 精确点亮
+    // 本轮**真的传了**几个、**判定无需传输**的有几个，必须分开记。
+    // m_runDone 在下面会被改成"已处理完"的分子（传过去的 + 判定无需传输的），
+    // 到那时就分不出来了。
+    m_failedPaths.clear();
     m_pendingRows.clear();
     for (int i = 0; i < picked.size(); ++i) {
         const int row = m_model->rowForRelativePath(picked.at(i).relativePath);
@@ -1616,9 +1832,12 @@ void SyncPanel::startSyncInternal()
             m_pendingRows.append(row);
     }
 
-    appendLogLine(QStringLiteral("INFO"),
-                  QObject::tr("\xE7\xB3\xBB\xE7\xBB\x9F\xE5\x88\x9D\xE5\x8C\x96\xE5\xAE\x8C\xE6\x88\x90\xEF\xBC\x8C\xE7\x9B\xAE\xE6\xA0\x87\xEF\xBC\x9A%1:%2")
-                      .arg(m_target.host).arg(m_target.port), 0);
+    // 每轮一条分隔行：2000 文件规模下日志有几千行，没有分隔的话
+    // 用户根本分不清哪几行属于哪一轮（自动同步尤其明显）。
+    appendLogLine(QStringLiteral("SYNC"),
+                  QObject::tr(u8"开始第 %1 轮同步，共 %2 个文件 → %3:%4")
+                      .arg(m_currentRoundNo).arg(picked.size())
+                      .arg(m_target.host).arg(m_target.port), 1);
 
     // 勾选项第一次真正被读：这个值决定 rsync 走 --ignore-existing
     // 还是 --checksum。以前它只被创建、没人读，是纯摆设。
@@ -1650,7 +1869,7 @@ void SyncPanel::startOrCancel()
     if (m_busy) {
         if (m_runner->isRunning())
             m_runner->cancel();
-        setStatusLine(T(kStatusStop), 2);
+        setStatusLine(T(kStatusCanceled), 2);
         m_startBtn->setText(T(kCancelSync));
         appendLogLine(QStringLiteral("WARN"),
                       QObject::tr("\xE7\x94\xA8\xE6\x88\xB7\xE5\x8F\x96\xE6\xB6\x88\xEF\xBC\x8C\xE5\xB7\xB2\xE4\xBC\xA0\xE8\xBF\x87\xE7\x9A\x84\xE4\xB8\x8D\xE4\xBC\x9A\xE9\x87\x8D\xE4\xBC\xA0"), 3);
@@ -1690,11 +1909,24 @@ void SyncPanel::onFileTransferred(const QString &relativePath, int done, int tot
     Q_UNUSED(total);
     const int row = m_model->rowForRelativePath(relativePath);
     if (row >= 0) {
-        m_model->setFileState(row, FileTableModel::StateOk);
+        // **失败不能被后来的"传输完成"盖成成功。**
+        //
+        // stdout 与 stderr 是两条管道、两个读线程：报错的行（stderr）
+        // 可能先到、"下一个文件开始"的行（stdout）后到。
+        // 失败名单已经把这个文件标成「✕ 失败」之后，迟到的 stdout 行
+        // 会把它又改回「✓ 已完成」—— 而它远端确实一个字节都没有。
+        // 实测（80 个文件全部写失败）：偶发 1~2 个文件显示成 ok。
+        //
+        // 原来这里是**无条件** setFileState(StateOk)，所以这个洞一直在。
+        if (m_model->fileState(row) != FileTableModel::StateFailed)
+            m_model->setFileState(row, FileTableModel::StateOk);
         m_pendingRows.removeAll(row);
     }
     // 分子是「已处理完」而不是「已传输」，全跳过那一轮在 onAllFinished 里补齐。
     m_runDone = done;
+    // 本轮**真的传输完成**的文件数：计数行在 rsync 没报出任何字节时
+    // 要靠它说人话（见 renderCountLabel）。
+    ++m_transferredThisRound;
     // 这里原来还有一段"文件数换算成百分比、只涨不跌"的保底，现在删掉了。
     //
     // 它当时是给组内百分比兜底的，可那个组内百分比本身就是错的全局值（缺陷 2）；
@@ -1717,6 +1949,9 @@ void SyncPanel::onFileTransferred(const QString &relativePath, int done, int tot
 // 一个处理过（哪怕失败）的文件确实已经处理完了，计数没错。
 void SyncPanel::onFileFailedInGroup(const QString &relativePath)
 {
+    // 先记下来，不管这一行当前是什么状态。
+    // 收尾时会按这份名单统一钉成「失败」（见 onAllFinished 里的说明）。
+    m_failedPaths.insert(relativePath);
     const int row = m_model->rowForRelativePath(relativePath);
     if (row < 0)
         return;
@@ -1735,6 +1970,24 @@ void SyncPanel::onAllFinished(bool ok)
 {
     ++m_syncFinishedCount;
     m_syncLastOk = ok;
+    // 「本轮无变更」= 这一轮成功了，但一个文件都没真传、一个字节都没报。
+    // 有了它，计数行就能写「本轮无变更」，而不是「2003 / 2003 个文件 · 已传 0 B」，
+    // 后者会和同一屏日志里的「本次没有需要传输的文件」打架。
+    m_lastRoundNoChange = ok && m_runTotal > 0 && m_transferredThisRound == 0 && m_lastBytes == 0;
+    // 原来这里有一句 `m_autoSyncCountdown = m_autoSyncIntervalSec;`。
+    //
+    // 它把自动同步的倒计时在**每次同步结束**时重置，包括**用户手动点的那一次**。
+    // 后果：用户手动点一次开始同步，自动同步的节奏就被悄悄往后挪了一段
+    // （从"上次开跑"改成"上次结束"），而且挪多少取决于手动那次跑了多久 ——
+    // 客户完全无法预期"我手动传一次，自动那个还准不准"。
+    //
+    // 现在调度用绝对时间点（next = lastRunAt + interval），
+    // 手动同步不写 lastRunAt，所以这里什么都不用做。
+    //
+    // 唯一要处理的是：自动触发那一轮结束时，如果下一轮的时间点还没到，
+    // 那是正常的（间隔比这一轮跑的时间长）；如果已经过去了，
+    // 下一次心跳会发现"已到点"并立刻补跑 —— 也不需要在这里干预。
+    //
     // **停表之前先补最后一次刷新。**
     //
     // tickElapsed() 是 1Hz 的，而"最后一个文件传完"到 allFinished 之间
@@ -1769,12 +2022,38 @@ void SyncPanel::onAllFinished(bool ok)
     // 的文件（回包可能因为进程提前退出而丢，但远端文件是真的在的），
     // 按已完成收掉才对 —— 见上面那段注释。
     const bool onlyNew = m_onlyNew && m_onlyNew->isChecked();
+    // 收尾横幅要用到的两个数，必须在下面把 m_runDone 补成 m_runTotal **之前**取。
+    // m_runDone 在这一刻 = 本轮**真的传过去**的文件数（见 RsyncRunner 的 fileTransferred）。
+    // m_pendingRows 在这一刻 = 既没传过去、也没被判失败 = 判定为无需传输的文件数。
+    const int transferredCount = m_runDone;
+    const int leftoverCount = m_pendingRows.size();
     const bool leftoverUntransferred = ok && !canceled && onlyNew && !m_pendingRows.isEmpty();
     const FileTableModel::FileState rest =
         FileTableModel::resolveRestState(canceled, leftoverUntransferred, ok);
     for (int i = 0; i < m_pendingRows.size(); ++i)
         m_model->setFileState(m_pendingRows.at(i), rest);
     m_pendingRows.clear();
+
+    // 收尾把"报过失败"的文件统一钉成「失败」。
+    //
+    // 为什么还要再钉一次：stdout 与 stderr 是两条管道、两个读线程，
+    // 报错的行（stderr）可能先到、"下一个文件开始"的行（stdout）后到。
+    // 迟到的 stdout 行会把刚判失败的行又改回「✓ 已完成」——
+    // 而它远端确实一个字节都没有。实测（80 个文件全部写失败）：
+    // 偶发 1 个文件显示成 ok。
+    //
+    // 这一步放在上面那圈之外：失败要**赢过**"已处理完"的批量赋值。
+    //
+    // 代价（写在这里是为了不让下一个人以为是 bug）：
+    // 同一个文件出现在两组里、且后一组确实传成功时，它会停在「失败」。
+    // 那需要两条后缀规则互相包含（规则 "spe" 与 "a.spe"），极少出现；
+    // 后果是这一轮多报一个失败、下一轮重传一次，**不会丢数据**。
+    // 反过来（失败被盖成成功）才是丢数据。
+    for (const QString &p : m_failedPaths) {
+        const int row = m_model->rowForRelativePath(p);
+        if (row >= 0)
+            m_model->setFileState(row, FileTableModel::StateFailed);
+    }
 
     // 全部组都结束 = 本轮每个文件都"处理完"了：传过去的算完成，
     // 判定无需传输的也算完成。这一刻把分子从「已传输」改成「已处理完」。
@@ -1793,7 +2072,7 @@ void SyncPanel::onAllFinished(bool ok)
     renderCountLabel();
 
     if (canceled) {
-        setStatusLine(T(kStatusStop), 2);
+        setStatusLine(T(kStatusCanceled), 2);
         setStartButtonIdle();
         // 半途取消：进度条停在 99 或更低，绝不打满 ——
         // 那一轮搬不完，打成 100 等于替用户宣布"全传完了"。
@@ -1808,15 +2087,28 @@ void SyncPanel::onAllFinished(bool ok)
         if (m_runTotal > 0)
             setProgressValue(100, "finished");
         setStartButtonIdle();
-        if (leftoverUntransferred)
-            // 单独一句把"完成但没传"说清楚。RsyncRunner 那条"勾了仅同步新增"
-            // 的日志讲的是覆盖语义、方向不同；这里讲的是这一轮的实际结果。
+        // 收尾横幅要说真话：**真传过去几个**、**判定无需传输的有几个**。
+        //
+        // 这两个数必须在上面把 m_runDone 补成 m_runTotal **之前**取 ——
+        // 取晚了就永远等于"全部处理完"，横幅就成了"这一轮处理了 N 个文件"，
+        // 客户完全看不出到底传没传。
+        //
+        // leftover 的含义随模式变，不能笼统说：
+        //   不勾「仅同步新增文件」（--checksum）→ 远端内容与本机一致，没传是因为**不需要**；
+        //   勾上（--ignore-existing）→ 远端有同名文件，没传是因为**按设置不碰**。
+        const QString leftoverDesc = onlyNew
+            ? QObject::tr("\xE8\xBF\x9C\xE7\xAB\xAF\xE5\xB7\xB2\xE6\x9C\x89\xE5\x90\x8C\xE5\x90\x8D\xE6\x96\x87\xE4\xBB\xB6\xEF\xBC\x88\xE6\x8C\x89\xE8\xAE\xBE\xE7\xBD\xAE\xE4\xB8\x8D\xE8\xA6\x86\xE7\x9B\x96\xEF\xBC\x89")
+            : QObject::tr("\xE8\xBF\x9C\xE7\xAB\xAF\xE5\xB7\xB2\xE6\x98\xAF\xE6\x9C\x80\xE6\x96\xB0");
+        if (transferredCount > 0 && leftoverCount > 0)
             appendLogLine(QStringLiteral("DONE"),
-                          QObject::tr("\xE5\x90\x8C\xE6\xAD\xA5\xE5\xAE\x8C\xE6\x88\x90\xEF\xBC\x8C"
-                                      "\xE8\xBF\x9C\xE7\xAB\xAF\xE6\x96\x87\xE4\xBB\xB6\xE5\xB7\xB2\xE6\x98\xAF"
-                                      "\xE6\x9C\x80\xE6\x96\xB0\xEF\xBC\x8C\xE6\x9C\xAC\xE6\xAC\xA1\xE6\xB2\xA1"
-                                      "\xE6\x9C\x89\xE9\x9C\x80\xE8\xA6\x81\xE4\xBC\xA0\xE8\xBE\x93"
-                                      "\xE7\x9A\x84\xE6\x96\x87\xE4\xBB\xB6"), 2);
+                          QObject::tr("\xE5\x90\x8C\xE6\xAD\xA5\xE5\xAE\x8C\xE6\x88\x90\xEF\xBC\x8C%1 \xE4\xB8\xAA\xE6\x96\x87\xE4\xBB\xB6\xE5\xB7\xB2\xE4\xBC\xA0\xE8\xBE\x93\xEF\xBC\x8C\xE5\x85\xB6\xE4\xB8\xAD %2 \xE4\xB8\xAA\xE6\x96\x87\xE4\xBB\xB6%3\xE3\x80\x81\xE6\x9C\xAC\xE6\xAC\xA1\xE6\x9C\xAA\xE4\xBC\xA0\xE8\xBE\x93")
+                          .arg(transferredCount).arg(leftoverCount).arg(leftoverDesc), 2);
+        else if (transferredCount > 0)
+            appendLogLine(QStringLiteral("DONE"),
+                          QObject::tr("\xE5\x90\x8C\xE6\xAD\xA5\xE5\xAE\x8C\xE6\x88\x90\xEF\xBC\x8C%1 \xE4\xB8\xAA\xE6\x96\x87\xE4\xBB\xB6\xE5\xB7\xB2\xE4\xBC\xA0\xE8\xBE\x93").arg(transferredCount), 2);
+        else if (leftoverCount > 0)
+            appendLogLine(QStringLiteral("DONE"),
+                          QObject::tr("\xE5\x90\x8C\xE6\xAD\xA5\xE5\xAE\x8C\xE6\x88\x90\xEF\xBC\x8C%1 \xE4\xB8\xAA\xE6\x96\x87\xE4\xBB\xB6%2\xEF\xBC\x8C\xE6\x9C\xAC\xE6\xAC\xA1\xE6\xB2\xA1\xE6\x9C\x89\xE9\x9C\x80\xE8\xA6\x81\xE4\xBC\xA0\xE8\xBE\x93\xE7\x9A\x84\xE6\x96\x87\xE4\xBB\xB6").arg(leftoverCount).arg(leftoverDesc), 2);
         else
             appendLogLine(QStringLiteral("DONE"),
                           QObject::tr("\xE5\x90\x8C\xE6\xAD\xA5\xE5\xAE\x8C\xE6\x88\x90\xEF\xBC\x8C\xE5\x85\xB1 %1 \xE4\xB8\xAA\xE6\x96\x87\xE4\xBB\xB6").arg(m_runDone), 2);
@@ -1824,13 +2116,14 @@ void SyncPanel::onAllFinished(bool ok)
     }
     else {
         // 失败不能只改颜色不说原因：用户必须能在日志里看到真实报错。
-        setStatusLine(T(kStatusStop), 2);
+        setStatusLine(T(kStatusFail), 2);
         setStartButtonIdle();
         appendLogLine(QStringLiteral("ERR"),
                       QObject::tr("\xE5\x90\x8C\xE6\xAD\xA5\xE5\xA4\xB1\xE8\xB4\xA5\xEF\xBC\x8C\xE8\xAF\xA6\xE8\xA7\x81\xE4\xB8\x8A\xE6\x96\xB9\xE6\x97\xA5\xE5\xBF\x97\xE6\x9D\xA1"), 4);
         // 失败同样不打满 100：进度条停在走到的地方，如实反映这轮没搬完。
         writeProgressProbeReport();
     }
+    updateAutoSyncStatusUi();
 }
 
 void SyncPanel::onRunLog(const QString &text)
@@ -1906,7 +2199,23 @@ void SyncPanel::saveConfig()
     //
     // 用户要保存这些规则，只有一条路：自己在设置里点保存。程序识别出来的
     // 东西替他保存，等于替他做了"以后只传这些后缀"的决定。
-    ConfigStore::saveSyncRules(m_rulesAutoGenerated ? QVector<SyncRule>() : m_syncRules);
+    // 只落盘**客户自己配过**的规则。
+    //
+    // 原来这里是 `m_rulesAutoGenerated ? 空 : m_syncRules`：
+    // 标记一旦被清掉（见 applyFromSettings），自动识别出来的那批就跟着落盘了，
+    // 等于替客户做了「以后只传这些后缀」的决定 ——
+    // 目录里以后新增的文件类型会被静默丢掉，界面还报「同步完成」。
+    //
+    // 现在的口径：**自动识别出来、且没有人工配过落地子目录**的规则不落盘
+    //（remoteSubDir 非空 = 有人工配置的痕迹，那条要留着，丢了远端目录结构就变了）。
+    QVector<SyncRule> toSave;
+    for (int i = 0; i < m_syncRules.size(); ++i) {
+        const SyncRule &r = m_syncRules.at(i);
+        if (m_rulesAutoGenerated && r.remoteSubDir.trimmed().isEmpty())
+            continue;
+        toSave.append(r);
+    }
+    ConfigStore::saveSyncRules(toSave);
     ConfigStore::saveToolRules(m_toolRules);
 }
 
@@ -1985,16 +2294,70 @@ void SyncPanel::applyFromSettings(const TargetConfig &t, const QString &localRoo
         nr.append(r);
     }
     m_syncRules = nr;
-    // 设置里的「保存设置」是**用户明确的动作**：从这一刻起这批规则是用户选的，
-    // 该落盘。必须清掉自动识别标记，否则用户亲手点保存仍然存不进去
-    // （那会变成"保存按钮失灵"，比原来的缺陷更难解释）。
-    m_rulesAutoGenerated = false;
+    // 「保存设置」**不能**无条件清掉自动识别标记。
+    //
+    // 原来这里是无条件 `m_rulesAutoGenerated = false;`，理由是
+    // 「设置里的保存是用户明确的动作，这一批规则该落盘」。
+    // 但定稿 UI 里**没有同步规则的编辑入口**，用户在设置里能配的只有工具规则，
+    // 所以 applyFromSettings 合并进来的这批后缀，绝大多数是**程序自己扫描识别**出来的。
+    // 标记一被清掉，saveConfig() 就把它们当成"客户亲手选的"落盘 ——
+    // 而落盘意味着「以后只传这些后缀」这个决定被替客户做了。
+    //
+    // 实测（做过阳性对照）：
+    //   全新 ini → 保存设置（此时规则是空的）→ 扫描自动识别出 spe、dat
+    //   → 再点一次「保存设置」（客户改个端口也会点这一步）→ ini 里写死只有这两个
+    //   → 之后目录里新增 newfile.iq，扫描阶段就被过滤掉，远端永远收不到，
+    //      界面却照样报「DONE 同步完成，共 6 个文件」—— 数据静默丢，客户毫无察觉。
+    //   阳性对照：同一份程序只把 ini 换回"规则为空"那份 → newfile.iq 正常被扫描并传输。
+    //
+    // 现在只有一种情况算"客户真的加了规则"：**工具规则里出现了原来没有的后缀**。
+    // 这时才清标记、这才落盘。
+    // 客户只是配了目标机、点了一次保存 → 这批后缀仍然只是"这次识别到的"，
+    // 不固化；下次启动重新识别，目录里新增的文件类型照样能同步。
+    bool userAddedSuffix = false;
+    for (int i = 0; i < tools.size(); ++i) {
+        const QString key = ToolRunner::normSuffix(tools.at(i).suffix);
+        if (key.isEmpty())
+            continue;
+        // oldRules 是合并前的老规则。工具规则里的后缀不在里面 = 客户新加的。
+        if (!oldRules.contains(key)) {
+            userAddedSuffix = true;
+            break;
+        }
+    }
+    if (userAddedSuffix)
+        m_rulesAutoGenerated = false;
 
     // 配置变了，手上的清单就作废：下一次同步前必须重扫，
     // 否则会拿旧目录的清单去传新配置。
     m_scanKey.clear();
     m_model->setFiles(QVector<FileItem>(), QHash<QString, ToolRule>(), m_localRoot);
     rebuildTabs();
+    m_autoSyncIntervalSec = ConfigStore::loadAutoSyncInterval();
+    // **心跳周期必须跟着新间隔走。**
+    //
+    // 原来这里只更新了 m_autoSyncIntervalSec，没更新 m_autoSyncTimer，
+    // 于是心跳还是旧周期：客户把间隔从 60 秒改成 10 秒，
+    // 心跳仍然是 30 秒一次 —— 看起来"下次同步 10s 后"在倒计时，
+    // 但真正触发要等到下一次心跳。实测（探针）：设 10 秒，
+    // 自动同步 59 秒后才第一次跑。
+    //
+    // 反方向同样坏：原来 10 秒（心跳 5 秒）改成 86400 后心跳仍是 5 秒，
+    // 程序一天空醒 17280 次。
+    applyAutoSyncHeartbeat();
+    // 用户刚改完配置 —— 之前"没配好"导致的失败提示要去重标记，
+    // 这样如果还是失败，会**重新提示**一次（而不是静默，客户以为改好了）。
+    m_autoSyncLastFailReason.clear();
+    // 重新排程：从这一刻起算下一个周期。
+    // 不立刻跑一次 —— 用户点保存不等于"立刻传一遍"，
+    // 而且他可能还在改别的设置，立刻跑会打断他。
+    //
+    // fromNow = true 是必须的：原来这里算的是 lastRunAt + interval，
+    // 上次开跑是一小时前、间隔 60 秒 → next 落在一小时前 →
+    // 心跳一醒来就判定"已到点"，用户刚点完保存程序自己开始全量同步。
+    // 注释写的是"不立刻跑一次"，实现是"立刻跑一次" —— 正好相反。
+    autoSyncScheduleNext(true);
+    updateAutoSyncStatusUi();
 
     // 这里**故意不调 scanFiles()**。
     //
@@ -2126,6 +2489,280 @@ void SyncPanel::setOnlyNewForTest(bool v)
 bool SyncPanel::onlyNewForTest() const
 {
     return m_onlyNew && m_onlyNew->isChecked();
+}
+
+void SyncPanel::setAutoSyncForTest(bool v)
+{
+    if (m_chkAutoSync)
+        m_chkAutoSync->setChecked(v);
+}
+
+bool SyncPanel::autoSyncForTest() const
+{
+    return m_chkAutoSync && m_chkAutoSync->isChecked();
+}
+
+bool SyncPanel::triggerAutoSyncTickForTest()
+{
+    // 走产品自己的 onAutoSyncTick 路径，只是不等事件循环。
+    onAutoSyncTick();
+    return m_autoSyncInFlight;
+}
+
+bool SyncPanel::forceAutoSyncFireForTest()
+{
+    // 直接调触发函数，绕过"到点判定"和"忙时跳过"两个守卫。
+    // 用于单独验证"触发之后到底做了什么"。
+    return autoSyncFire();
+}
+
+void SyncPanel::onAutoSyncToggled(bool on)
+{
+    ConfigStore::saveAutoSyncEnabled(on);
+    if (on) {
+        m_autoSyncIntervalSec = ConfigStore::loadAutoSyncInterval();
+        // 心跳周期跟着间隔走（AutoSyncScheduler::heartbeatMsFor）。
+        m_autoSyncTimer->setInterval(AutoSyncScheduler::heartbeatMsFor(m_autoSyncIntervalSec));
+        // 刚勾上时**不立刻跑一次**，从勾上的这一刻起算第一个周期。
+        // 立刻跑一次会让用户以为"勾上就传"，而他多半还没配好目标。
+        //
+        // fromNow = true：原来这里算 lastRunAt + interval，
+        // 距上次跑已经超过间隔时，勾上的第一个心跳就直接开跑
+        // （实测探针：lastRunAt 是 3 天前 → 勾上后立刻触发）。
+        autoSyncScheduleNext(true);
+        if (m_autoSyncTimer && !m_autoSyncTimer->isActive())
+            m_autoSyncTimer->start();
+        if (m_autoSyncUiTimer && !m_autoSyncUiTimer->isActive())
+            m_autoSyncUiTimer->start();
+    } else {
+        if (m_autoSyncTimer && m_autoSyncTimer->isActive())
+            m_autoSyncTimer->stop();
+        if (m_autoSyncUiTimer && m_autoSyncUiTimer->isActive())
+            m_autoSyncUiTimer->stop();
+        m_autoSyncNextAt = QDateTime();
+        m_autoSyncInFlight = false;
+    }
+    updateAutoSyncStatusUi();
+}
+
+void SyncPanel::onAutoSyncUiTick()
+{
+    // 只在自动同步开着时刷。
+    //
+    // 关着的时候也刷的话，updateAutoSyncStatusUi() 末尾会顺手
+    // renderCountLabel()，把扫描后那行「0 / N 个文件 · 0.0 MB」
+    // 换成同步口径的「已传 x · MB/s · 用时」——
+    // 那是界面形态的变化，不该由一个后台定时器顺手带来。
+    if (!m_chkAutoSync || !m_chkAutoSync->isChecked())
+        return;
+    updateAutoSyncStatusUi();
+}
+
+void SyncPanel::onAutoSyncTick()
+{
+    updateAutoSyncStatusUi();
+
+    if (!m_chkAutoSync || !m_chkAutoSync->isChecked())
+        return;
+
+    if (m_busy || m_scanning || m_autoSyncInFlight)
+        return;
+
+    if (!AutoSyncScheduler::isDue(QDateTime::currentDateTime(), m_autoSyncNextAt))
+        return;
+
+    if (!autoSyncFire()) {
+        return;
+    }
+}
+
+namespace {
+
+// 倒计时的说法要"人能一眼看懂"。
+//
+// 原来直接拼秒数：间隔填 86400（每天一次）时，界面上显示的是
+// 「下次同步 86400s 后」—— 客户根本读不出来。这里按量级说人话：秒 / 分 / 小时 / 天。
+//
+// 注意：这里只改说法，不改位置、不加控件。
+QString formatAutoSyncRemain(int sec)
+{
+    if (sec < 0)
+        sec = 0;
+    if (sec < 60)
+        return QString::fromUtf8(u8"%1 秒").arg(sec);
+    if (sec < 3600)
+        return QString::fromUtf8(u8"%1 分 %2 秒").arg(sec / 60).arg(sec % 60);
+    if (sec < 86400)
+        return QString::fromUtf8(u8"%1 小时 %2 分").arg(sec / 3600).arg((sec % 3600) / 60);
+    return QString::fromUtf8(u8"%1 天 %2 小时").arg(sec / 86400).arg((sec % 86400) / 3600);
+}
+
+} // namespace
+
+void SyncPanel::updateAutoSyncStatusUi()
+{
+    const bool autoOn = (m_chkAutoSync && m_chkAutoSync->isChecked());
+    int remainSec = 0;
+    if (autoOn && m_autoSyncNextAt.isValid()) {
+        remainSec = static_cast<int>(QDateTime::currentDateTime().secsTo(m_autoSyncNextAt));
+        if (remainSec < 0) remainSec = 0;
+    }
+
+    // 「下次同步」挂在**计数行**后面（进度区那一行）。
+    //
+    // 这里有个必须避开的坑：m_countLabel 的正文是 renderCountLabel() 写的，
+    // 它每秒调一次（tickElapsed）以及每次收尾都调，而且**整体覆盖**文本。
+    // 如果本函数直接拼字符串 setText，renderCountLabel() 随后会
+    // 把尾巴**整个抹掉** —— 于是「下次同步」会一秒出现一秒消失。
+    //
+    // 办法：尾巴单独存（m_autoSyncSuffix），由 renderCountLabel() 统一拼。
+    // 本函数只更新尾巴，不直接碰 m_countLabel。
+    if (autoOn) {
+        // 倒计时归零之后还有一小段"等到心跳才真的开跑"的空窗
+        // （心跳周期 = 间隔/2，默认间隔 30 秒 → 最多 15 秒）。
+        // 原来这里一律显示「下次同步 0 秒后」，于是用户看着倒计时归零却没动静，
+        // 不知道是该等还是该点别的。
+        // 这里按真实情况分开说：
+        //   · 当前正忙（手动同步/扫描/上一轮自动同步还没完）→ 结束后会补跑
+        //   · 不忙                        → 已经到点，下一次心跳就开跑
+        const bool busyNow = (m_busy || m_scanning || m_autoSyncInFlight);
+        if (remainSec <= 0 && busyNow) {
+            m_autoSyncSuffix = QString::fromUtf8(
+                "\xE5\x90\x8C\xE6\xAD\xA5\xE8\xBF\x9B\xE8\xA1\x8C\xE4\xB8\xAD"
+                "\xEF\xBC\x8C\xE7\xBB\x93\xE6\x9D\x9F\xE5\x90\x8E\xE8\xA1\xA5\xE8\xB7\x91");
+            // 同步进行中，结束后补跑
+        } else if (remainSec <= 0) {
+            m_autoSyncSuffix = QString::fromUtf8(
+                "\xE5\xB7\xB2\xE5\x88\xB0\xE7\x82\xB9\xEF\xBC\x8C\xE5\x8D\xB3\xE5\xB0\x86"
+                "\xE5\xBC\x80\xE5\xA7\x8B");
+            // 已到点，即将开始
+        } else {
+            m_autoSyncSuffix = QString::fromUtf8("\xE4\xB8\x8B\xE6\xAC\xA1\xE5\x90\x8C\xE6\xAD\xA5 %1\xE5\x90\x8E")
+                    .arg(formatAutoSyncRemain(remainSec));
+        }
+    } else {
+        m_autoSyncSuffix.clear();
+    }
+
+    // 不忙的时候刷新一次计数行（尾巴变了）。
+    // 忙的时候 renderCountLabel() 会被 tickElapsed 带着重画，
+    // 那里也会带上尾巴，所以这里跳过也不会丢。
+    if (!m_busy && !m_scanning && m_countLabel)
+        renderCountLabel();
+}
+
+void SyncPanel::autoSyncScheduleNext(bool fromNow)
+{
+    const QDateTime now = QDateTime::currentDateTime();
+    // 每天定点模式：与间隔模式**同构**（同一个 lastRunAt 落盘键、
+    // 同一套"关机期间错过 → 开机补跑"语义），只是把
+    // "lastRunAt + interval"换成"lastRunAt 之后的第一个 HH:mm"。
+    //
+    // 间隔模式那一行**一个字都没改** —— 它的 fromNow / 时钟回拨 /
+    // lastRunAt+interval 三条口径保持原样（V11 的前提）。
+    if (ConfigStore::loadAutoSyncMode() == AutoSyncScheduler::ModeDaily) {
+        m_autoSyncNextAt = AutoSyncScheduler::nextDailyRunAt(
+            ConfigStore::loadAutoSyncDailyTime(), now, m_autoSyncLastRunAt, fromNow);
+        return;
+    }
+    m_autoSyncNextAt = AutoSyncScheduler::nextRunAt(m_autoSyncIntervalSec, now,
+                                                    m_autoSyncLastRunAt, fromNow);
+}
+
+void SyncPanel::applyAutoSyncHeartbeat()
+{
+    if (!m_autoSyncTimer)
+        return;
+    m_autoSyncTimer->setInterval(AutoSyncScheduler::heartbeatMsFor(m_autoSyncIntervalSec));
+}
+
+void SyncPanel::autoSyncMarkRunStarted()
+{
+    // 排程基准**截到整秒**。
+    //
+    // 为什么：下一次到点时刻 = 本基准 + 间隔，而心跳定时器的格子是锚在
+    // **定时器启动时刻**上的（QTimer setInterval，不对齐绝对时刻）。
+    // 基准带零点几毫秒时，「名义到点时刻」可能落在某一拍**之后**几毫秒 ——
+    // 那一拍醒来时 now < next ⇒ 判「未到点」跳过 ⇒ 要再等一个心跳才真跑，
+    // 周期从 N 秒变成 N + N/2（实测间隔 30 秒跑成 45 秒，麒麟真机与容器都复现）。
+    //
+    // 截到整秒后，「名义到点时刻」必然 ≤ 那一拍的实际唤醒时刻 ⇒ 永远判得到点。
+    //
+    // 落盘精度不变（ini 本来就写 UTC ISO8601 秒级），也不会让间隔变短：
+    // 最多提前不到 1 秒触发，间隔误差在 1 秒以内。
+    const QDateTime now = QDateTime::currentDateTime();
+    m_autoSyncLastRunAt = now.addMSecs(-now.time().msec());
+    ConfigStore::saveAutoSyncLastRunAt(m_autoSyncLastRunAt);
+    autoSyncScheduleNext();
+}
+
+bool SyncPanel::autoSyncFire()
+{
+    // 失败原因**去重**：同一个原因只提示一次。
+    //
+    // 为什么必须去重（实测截图）：自动同步开着但目标没配时，
+    // 心跳每 30 秒问一次"到点了吗"，每次都打一条 WARN ——
+    // 日志被"自动同步未跑起来"刷爆，真正的错误（网络问题、磁盘满）
+    // 会被埋掉几百行之后，客户根本看不见。
+    //
+    // 为什么不是"完全不打"：客户配好目标之后如果还是失败，
+    // 必须**重新提示**。所以记录"上一次失败的原因"，
+    // 原因变了才再打一条；原因没变就静默。
+    //
+    // 界面上的"下次同步 Ns 后"仍在正常倒计时，
+    // 所以客户能看到自动同步是**活着**的、只是没配好。
+
+    QString reason;
+    QString detail;
+    if (!m_target.isValid()) {
+        reason = QStringLiteral("no-target");
+        detail = QObject::tr(u8"自动同步未跑起来：目标电脑或登录账号未配置，请到「设置」里填写。");
+    } else if (m_localRoot.isEmpty()) {
+        reason = QStringLiteral("no-localroot");
+        detail = QObject::tr(u8"自动同步未跑起来：本机文件目录未配置，请到「设置」里选择。");
+    }
+
+    if (!reason.isEmpty()) {
+        if (reason != m_autoSyncLastFailReason) {
+            m_autoSyncLastFailReason = reason;
+            appendLogLine(QStringLiteral("WARN"), detail, 3);
+        }
+        // **排程要推进**，不能留在过去。
+        //
+        // 原来失败时不推进，下一次心跳又"到点"了，于是变成
+        // 「下一次同步 0s 后」永远 0s + 每 30 秒重试一次。
+        // 推进到下一个完整周期：配置没配好不是每秒都要重试的事。
+        // 用户改完配置时（applyFromSettings）会清掉去重标记并重新排程。
+        m_autoSyncNextAt = QDateTime::currentDateTime().addSecs(m_autoSyncIntervalSec);
+        updateAutoSyncStatusUi();
+        return false;
+    }
+
+    // 这次是真跑了 —— 去重标记清掉。
+    // （下一次失败时如果还是同一个原因，也要**重新提示**，
+    //   因为中间用户可能已经改过配置、以为修好了。）
+    m_autoSyncLastFailReason.clear();
+
+    m_autoSyncInFlight = true;
+    autoSyncMarkRunStarted();
+
+    appendLogLine(QStringLiteral("AUTO"),
+                  QObject::tr(u8"自动同步已到点：重新扫描目录并同步全部文件（会重新全选）。"), 1);
+
+    // **强制重扫**。不能沿用上一次扫描的清单：
+    //   1) currentScanKey() 只含 root + 后缀，**不含文件列表**，
+    //      所以当天新增的文件在旧清单里压根不存在；
+    //   2) 不重扫就没有"全选"的对象 —— 全选是对**新扫出来的清单**做的。
+    //
+    // m_syncRequested = true 让扫描完成后自动接着同步
+    // （见 onScanFinished 里那一段）。
+    // 全选这件事对客户是**看得见的副作用**：他手动取消勾选的文件，
+    // 自动跑一轮之后会被重新勾上，下一次他手点「开始同步」就会连它们一起传。
+    // 原来没有任何提示，客户只会觉得"软件自己乱选"。
+    // 「会重新全选」已并进上面那条 AUTO 日志，不再单独打一行。
+    m_syncRequested = true;
+    scanFiles();
+    return true;
 }
 
 void SyncPanel::setRulesForTest(const QStringList &suffixes)

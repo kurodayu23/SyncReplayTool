@@ -3,12 +3,16 @@
 #include <QDialog>
 #include <QHash>
 #include <QVector>
+#include <QTime>
 #include "Model.h"
+#include "AutoSyncScheduler.h"
 
 class QLineEdit;
 class QLabel;
 class QPushButton;
 class QCheckBox;
+class QRadioButton;
+class QTimeEdit;
 class QTableWidget;
 class QFrame;
 
@@ -39,6 +43,16 @@ public:
     // 测试连接的结果由外部算好后塞进来显示
     void showTestResult(const QString &text, bool ok, bool testing);
 
+    int autoSyncInterval() const;
+
+    // 自动同步的两种模式（按间隔重复 / 每天定点）。互斥，界面二选一。
+    AutoSyncScheduler::Mode autoSyncMode() const;
+    // 每天定点的时刻（界面上的时间选择器）。
+    QTime autoSyncDailyTime() const;
+    // 「开机自动启动」当前勾选状态（= 用户意图；系统里实际有没有落地
+    // 由 ConfigStore::isAutoStartActive() 单独回答）。
+    bool autoStartEnabled() const;
+
 signals:
     // 点了「测试网络连接」
     void settingsTestConnectionRequested();
@@ -52,6 +66,12 @@ public slots:
     void removeRuleRow(int row);
     void onRuleCellChanged(int row, int col);
     void onSaveClicked();
+    // 两种自动同步模式之间切换：把不生效的那套控件**藏起来并禁用**，
+    // 别让用户同时看到两个可填的框（填了不生效 = 客户以为软件坏了）。
+    void onAutoSyncModeChanged();
+    // 「开机自动启动」勾选框。**立即生效**（写系统），不等「保存设置」——
+    // 写注册表 / 写 .desktop 是一个动作，用户勾了就是勾了。
+    void onAutoStartToggled(bool on);
 
 protected:
     void mousePressEvent(QMouseEvent *event) override;
@@ -84,6 +104,24 @@ private:
     QLineEdit *m_password = nullptr;
     QLineEdit *m_keyPath = nullptr;
     QLineEdit *m_remoteRoot = nullptr;
+    QLineEdit *m_autoSyncInterval = nullptr;
+
+    // 自动同步模式二选一：按间隔重复 / 每天定时。
+    QRadioButton *m_modeInterval = nullptr;
+    QRadioButton *m_modeDaily = nullptr;
+    // 每天定点的时刻选择器（只有「每天定时」模式下可用）。
+    QTimeEdit *m_autoSyncDailyTime = nullptr;
+
+    // 「开机自动启动」勾选框。
+    //
+    // 语义（2026-10-23 定稿）：
+    //   · 只负责**启动程序**，不擅自开启自动同步；
+    //     程序起来后沿用用户上次勾选的「自动同步」状态。
+    //   · 默认关闭；老配置里没有 app/autoStartEnabled 一律当 false。
+    //   · 勾上 → 写系统（Windows 注册表 Run 键 / Linux ~/.config/autostart）；
+    //     取消 → 删掉，不留垃圾。
+    //   · 写/删失败必须给用户看得见的提示（部署人员要能据此排查）。
+    QCheckBox   *m_autoStartBox = nullptr;
 
     // 保持后端兼容的数据
     int     m_internalPort = 22;

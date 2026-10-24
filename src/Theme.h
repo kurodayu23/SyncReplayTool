@@ -500,7 +500,7 @@ QLabel#settingHint  { font-size: 11px; color: #64748b; }
 QLineEdit#settingInput,
 QLineEdit#settingSourceDir, QLineEdit#settingHost, QLineEdit#settingUser,
 QLineEdit#settingPassword, QLineEdit#settingKeyPath, QLineEdit#settingRemoteRoot,
-QLineEdit#settingPort, QComboBox#settingAuthMode {
+QLineEdit#settingPort, QLineEdit#settingAutoSyncInterval, QTimeEdit#settingAutoSyncDailyTime, QComboBox#settingAuthMode {
     background: #252a34; border: 1px solid #374151; border-radius: 5px;
     padding: 0 8px; min-height: 28px; max-height: 28px;
     font-size: 12px; color: #ffffff;
@@ -510,6 +510,7 @@ QLineEdit#settingInput:focus, QLineEdit#settingSourceDir:focus,
 QLineEdit#settingHost:focus, QLineEdit#settingUser:focus,
 QLineEdit#settingPassword:focus, QLineEdit#settingKeyPath:focus,
 QLineEdit#settingRemoteRoot:focus, QLineEdit#settingPort:focus,
+QLineEdit#settingAutoSyncInterval:focus, QTimeEdit#settingAutoSyncDailyTime:focus,
 QLineEdit:focus, QComboBox#settingAuthMode:focus {
     border: 1px solid #3b82f6; background: #1a1f2c;
 }
@@ -517,6 +518,7 @@ QLineEdit#settingInput:disabled, QLineEdit#settingSourceDir:disabled,
 QLineEdit#settingHost:disabled, QLineEdit#settingUser:disabled,
 QLineEdit#settingPassword:disabled, QLineEdit#settingKeyPath:disabled,
 QLineEdit#settingRemoteRoot:disabled, QLineEdit#settingPort:disabled,
+QLineEdit#settingAutoSyncInterval:disabled, QTimeEdit#settingAutoSyncDailyTime:disabled,
 QComboBox#settingAuthMode:disabled { background: #1e222b; color: #64748b; border-color: #2d3748; }
 
 QPushButton#btnBrowse, QPushButton#btnBrowseKey {
@@ -565,6 +567,69 @@ QPushButton#ruleRemove {
     border-radius: 3px; color: #ef4444; font-size: 13px;
 }
 QPushButton#ruleRemove:hover { background: #7f1d1d; color: #fecaca; }
+
+/* ---- 系统弹窗与原生对话框 ----
+   坑（2026-10-24 用户截图）：全局 `QWidget { color: #f1f5f9 }` 会把
+   QMessageBox 里的文字也刷成近白，而 QMessageBox 自己没有被样式表接管，
+   底色走的是系统默认浅色 —— 结果「白底白字」，提示内容完全看不见，
+   按钮上的字同样看不见。浅色模式没这个问题（全局字色是深色 #1e293b），
+   只有深色模式中招，所以这里必须显式把弹窗接管过来。
+
+   同一个坑也影响 QFileDialog（设置里的「浏览…」）、QInputDialog：
+   白底列表框配全局浅色字同样读不了，下面一并接管。 */
+QMessageBox {
+    background-color: #1e222b;
+    color: #f1f5f9;
+}
+QMessageBox QLabel {
+    background: transparent;
+    color: #f1f5f9;
+}
+QMessageBox QPushButton {
+    background: #252a34; color: #f1f5f9;
+    border: 1px solid #374151; border-radius: 5px;
+    padding: 5px 18px; min-width: 76px; min-height: 26px;
+    font-size: 12px;
+}
+QMessageBox QPushButton:hover   { background: #1e3a8a; border-color: #3b82f6; color: #ffffff; }
+QMessageBox QPushButton:pressed { background: #1d4ed8; color: #ffffff; }
+QMessageBox QPushButton:default { border-color: #3b82f6; color: #ffffff; }
+
+QDialog {
+    background-color: #1e222b;
+    color: #f1f5f9;
+}
+QDialog QLabel { color: #f1f5f9; }
+QDialog QTreeView, QDialog QListView, QDialog QTableView {
+    background-color: #252a34; color: #f1f5f9;
+    border: 1px solid #374151;
+    selection-background-color: #1e3a8a; selection-color: #ffffff;
+}
+QDialog QHeaderView::section {
+    background-color: #1f242d; color: #94a3b8;
+    border: none; border-bottom: 1px solid #374151;
+}
+QDialog QPushButton {
+    background: #252a34; color: #f1f5f9;
+    border: 1px solid #374151; border-radius: 5px;
+    padding: 5px 14px;
+}
+QDialog QPushButton:hover { background: #1e3a8a; border-color: #3b82f6; color: #ffffff; }
+
+QLineEdit {
+    background: #252a34; color: #f1f5f9;
+    border: 1px solid #374151; border-radius: 4px;
+    padding: 3px 7px;
+}
+QComboBox {
+    background: #252a34; color: #f1f5f9;
+    border: 1px solid #374151; border-radius: 4px;
+    padding: 3px 7px;
+}
+QComboBox QAbstractItemView {
+    background-color: #252a34; color: #f1f5f9;
+    selection-background-color: #1e3a8a; selection-color: #ffffff;
+}
 
 /* ---- 通用 ---- */
 QScrollArea { border: none; background: transparent; }
@@ -813,7 +878,7 @@ QLabel#settingHint  { font-size: 11px; color: #94a3b8; }
 QLineEdit#settingInput,
 QLineEdit#settingSourceDir, QLineEdit#settingHost, QLineEdit#settingUser,
 QLineEdit#settingPassword, QLineEdit#settingKeyPath, QLineEdit#settingRemoteRoot,
-QLineEdit#settingPort {
+QLineEdit#settingPort, QLineEdit#settingAutoSyncInterval, QTimeEdit#settingAutoSyncDailyTime {
     background: #ffffff; border: 1px solid #cbd5e1; border-radius: 5px;
     padding: 0 8px; min-height: 28px; max-height: 28px;
     font-size: 12px; color: #0f172a;
@@ -822,6 +887,7 @@ QLineEdit#settingPort {
 QLineEdit#settingInput:focus, QLineEdit#settingSourceDir:focus,
 QLineEdit#settingHost:focus, QLineEdit#settingUser:focus,
 QLineEdit#settingPassword:focus, QLineEdit#settingRemoteRoot:focus,
+QLineEdit#settingAutoSyncInterval:focus, QTimeEdit#settingAutoSyncDailyTime:focus,
 QLineEdit:focus {
     border: 1px solid #2563eb; background: #fafafa;
 }
@@ -859,6 +925,29 @@ QHeaderView#ruleHeader::section {
     font-weight: 600; font-size: 11px; padding: 6px 10px;
     border: none; border-bottom: 1px solid #e2e8f0;
 }
+
+/* ---- 系统弹窗 ----
+   浅色模式下全局字色本来就是深色，弹窗文字看得见；
+   这里仍然显式接管一遍，是为了让弹窗底色和按钮跟应用风格一致，
+   并且保证「深浅两套主题下弹窗都可读」这条不再靠运气。
+   深色版同名块在文件前面，那边是修「白底白字」的实测 bug。 */
+QMessageBox {
+    background-color: #ffffff;
+    color: #1e293b;
+}
+QMessageBox QLabel {
+    background: transparent;
+    color: #1e293b;
+}
+QMessageBox QPushButton {
+    background: #f8fafc; color: #1e293b;
+    border: 1px solid #cbd5e1; border-radius: 5px;
+    padding: 5px 18px; min-width: 76px; min-height: 26px;
+    font-size: 12px;
+}
+QMessageBox QPushButton:hover   { background: #eff6ff; border-color: #2563eb; color: #1d4ed8; }
+QMessageBox QPushButton:pressed { background: #dbeafe; color: #1d4ed8; }
+QMessageBox QPushButton:default { border-color: #2563eb; color: #1d4ed8; }
 
 QScrollArea { border: none; background: transparent; }
 QScrollBar:vertical { background: transparent; width: 8px; margin: 2px; }

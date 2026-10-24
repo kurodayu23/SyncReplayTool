@@ -1,5 +1,7 @@
 ﻿#pragma once
 
+#include <memory>
+
 #include <QWidget>
 #include <QHash>
 #include <QPointer>
@@ -10,6 +12,7 @@
 #include <QVector>
 #include <QList>
 #include "Model.h"
+#include "AutoSyncScheduler.h"
 
 class QPushButton;
 class QLabel;
@@ -68,8 +71,9 @@ public:
     SyncPanel *panelForTest() { return this; }
     void setRemoteRootForTest(const QString &v);
     void setPortForTest(int v) { m_target.port = v; }
-    // 「仅同步新增文件」勾选框。默认是**勾上**的（见构造里的 setChecked(true)），
-    // 对应 rsync 的 --ignore-existing：远端已有的路径一律不碰。
+    // 「仅同步新增文件」勾选框。默认是**不勾**的（见构造里读配置那一行），
+    // 对应 rsync 的 --checksum：按内容逐个比对，只有新增或改过的文件才传。
+    // 勾上则改成 --ignore-existing：远端已有的路径一律不碰。
     //
     // 为什么必须能切换：这两种模式对"同名文件内容变了"的结论完全相反 ——
     // 勾上时不会重传（按设计），取消勾选时走 --checksum 会重传。
@@ -78,6 +82,46 @@ public:
     // 内联实现要解引用它，会在所有包含者身上报"使用了未定义类型 QCheckBox"。
     void setOnlyNewForTest(bool v);
     bool onlyNewForTest() const;
+    void setAutoSyncForTest(bool v);
+    bool autoSyncForTest() const;
+    // 自动同步的调度状态（只读）。给自动化探针用：
+    // 定时器类行为没法在 --selfcheck 里验（不跑事件循环），
+    // 但"什么时候该跑""失败了排程推没推进"这些是纯状态，
+    // 必须能被外部读到，否则自动同步只能靠人肉盯界面。
+    QDateTime autoSyncNextAtForTest() const { return m_autoSyncNextAt; }
+
+    // 面板存活令牌。**必须由析构函数显式置失效**，
+    // 不能靠 QPointer 自己清零。
+    //
+    // 为什么（实测会稳定复现的 Qt 警告）：
+    //   QPointer<QObject> 在 ~QObject 才清空，而 SyncPanel 的 vptr
+    //   在 ~QWidget 就已经降级成 QWidget —— 两者之间有一个窗口。
+    //   后台扫描线程在这个窗口里 invokeMethod 投递结果，
+    //   Qt 在 QWidget 的 metaObject 里找不到 deliverScanResult，
+    //   就打 "No such method QWidget::deliverScanResult" 的警告。
+    //   自动同步本身就会起扫描，所以"自动同步期间关窗"必中这个窗口。
+    //
+    // 令牌由 shared_ptr 共享给后台线程：析构时先把它置失效，
+    // 投递前再查一次 —— 这条路径**不依赖 Qt 的析构顺序**，
+    // 窗口彻底消失。
+    std::shared_ptr<bool> aliveToken() const { return m_aliveToken; }
+    // 自动同步心跳定时器的当前周期（毫秒）。
+    //
+    // 给自动化判据用：心跳必须跟着间隔走，否则
+    // "界面填 10 秒、实际 60 秒才跑"这件事没人能发现
+    //（界面照样显示"下次同步 10s 后"，倒计时在走，就是不触发）。
+    int autoSyncHeartbeatMsForTest() const
+    { return m_autoSyncTimer ? m_autoSyncTimer->interval() : -1; }
+    QDateTime autoSyncLastRunAtForTest() const { return m_autoSyncLastRunAt; }
+    int         autoSyncIntervalSecForTest() const { return m_autoSyncIntervalSec; }
+    bool        autoSyncInFlightForTest() const { return m_autoSyncInFlight; }
+    // 手动触发一次心跳（走的是产品自己的 onAutoSyncTick 路径）。
+    // 返回 true = 这次真的发起了自动同步。
+    bool triggerAutoSyncTickForTest();
+    // 直接跑一次"到点判定 + 触发"，不做时间等待。
+    bool forceAutoSyncFireForTest();
+    // 把下一次触发时间往前挪（模拟"时间到了"），用于测试等待场景。
+    void setAutoSyncNextAtForTest(const QDateTime &dt) { m_autoSyncNextAt = dt; }
     void setRulesForTest(const QStringList &suffixes);
     // 灌工具规则。定稿 UI 的工具调用在**表格「工具调用」列**上（delegate 现画按钮），
     // 那条才是用户真实路径；旧的 ToolPanel 已不显示，只测它等于测一条没人走的路。
@@ -99,7 +143,7 @@ public:
     // 直接把一份文件清单灌进模型，跳过后台扫描。
     // 截图/断言探针要用它构造"表格里真的有行"的状态：走真实扫描会起后台线程，
     // 探针退出时卡在析构上（实测挂过一次），而比对只需要那个显示状态。
-    void injectFiles(const QVector<FileItem> &files) { deliverScanResult(files, false); }
+    void injectFiles(const QVector<FileItem> &files) { deliverScanResult(files, false, 0, 0); }
 
     // 设置弹窗由主窗口持有，这里只提供数据。
     TargetConfig targetConfig() const { return m_target; }
@@ -133,6 +177,12 @@ public:
 
     int              m_syncFinishedCount = 0;
     bool             m_syncLastOk = false;
+    // 本轮真的传输完成的文件数（区分于「已处理完」）。
+    int              m_transferredThisRound = 0;
+    // 上一轮是不是「成功但什么都没传」。
+    bool             m_lastRoundNoChange = false;
+    // 本轮是第几轮（0 = 还没开始过）。
+    int              m_currentRoundNo = 0;
     // 「传输进程还在不在」。定稿 UI 把开始/取消合并成同一个按钮之后，
     // 按钮**不再承载**完成态（完成态在状态标签和进度条上），于是自动化
     // 再也没法靠按钮文案判断"跑完了没有"。这里给一个真相来源，
@@ -265,11 +315,41 @@ private slots:
     // ScannerWorker 在后台线程跑完，用排队连接把结果送回界面线程。
     // 必须注册 FileItem 元类型，否则 Qt 会把这个调用**直接丢掉** ——
     // 现象是点了刷新扫描永远没反应。
-    Q_INVOKABLE void deliverScanResult(const QVector<FileItem> &files, bool truncated);
+    Q_INVOKABLE void deliverScanResult(const QVector<FileItem> &files, bool truncated,
+                                      int skippedLinks, int unreadableDirs);
     // ConnTestWorker 的回程。testing=false 表示这一条是最终结果。
     Q_INVOKABLE void deliverConnResult(const QString &detail, bool ok);
 
     void tickElapsed();
+    void onAutoSyncToggled(bool on);
+    void onAutoSyncTick();
+    // 倒计时专用的 1 秒心跳（自动同步开着的时候才跑）。
+    void onAutoSyncUiTick();
+
+    // ---- 自动同步（需求 10）后台 ----
+    //
+    // 调度语义：每 intervalSec 秒跑一次，**从上一次真正开跑的时刻起算**。
+    // 用绝对时间点（m_autoSyncNextAt）而不是倒计时计数器，原因：
+    //   倒计时会在手动同步完成时被重置（onAllFinished 里），
+    //   于是用户点一次开始同步就悄悄挪动了自动节奏，节奏变得不可预期。
+    //   绝对时间点不会：手动同步不碰 m_autoSyncLastRunAt。
+    //
+    // 触发时**强制重扫 + 全选**，与手动共用 startSyncInternal 同一发起链路。
+    // 不能沿用用户勾选：自动同步的语义是"把该传的都传了"，
+    // 而用户上次手动取消勾选只是那一次的临时决定。
+    void autoSyncScheduleNext(bool fromNow = false);
+    // 把心跳周期对齐到当前间隔。
+    //
+    // 三处调用点（构造 / 勾选 / 保存设置）必须共用这一个，
+    // 少一处就会出现"界面填 10 秒、实际 60 秒才跑"——
+    // 界面照样显示"下次同步 10s 后"，倒计时在走，就是不触发，
+    // 客户完全看不出哪里不对（实测探针：设 10 秒，59 秒后才跑）。
+    void applyAutoSyncHeartbeat();
+    // 到点真正开跑。返回 false 表示这次没跑成（配置不全/正在忙），下次心跳再试。
+    bool autoSyncFire();
+    // 让下一次触发落在 intervalSec 之后。**只在自动路径上调用**，
+    // 手动同步不碰它（手动不该挪动自动节奏）。
+    void autoSyncMarkRunStarted();
 
     // 进度序列探针的起跑回调。**必须是 slot**：startProgressProbe() 里用
     // 老式 SIGNAL/SLOT 排队调用它，写成普通成员函数 moc 不会把它登记进
@@ -292,6 +372,7 @@ private:
     // 这个声明原来漏了：.cpp 里定义并调用了，头里没有声明，
     // 于是整个工程根本编不过（error C2039: 不是 SyncPanel 的成员）。
     void renderCountLabel();
+    void updateAutoSyncStatusUi();
 
     // ---- 进度口径。口径只在这一处定义，别的函数都调它 ----
     void rebuildGroupSizes(const QVector<FileItem> &picked);
@@ -320,6 +401,35 @@ private:
     QLabel           *m_countLabel = nullptr;
     QProgressBar     *m_progress = nullptr;
     QCheckBox        *m_onlyNew = nullptr;
+    QCheckBox        *m_chkAutoSync = nullptr;
+    QTimer           *m_autoSyncTimer = nullptr;
+    // 「下次同步 N 秒」倒计时专用的 1 秒定时器。
+    //
+    // 为什么不能跟着心跳走：心跳周期 = clamp(间隔/2, 5, 60) 秒，
+    // 间隔 15 秒时心跳 7 秒 —— 界面上的倒计时会连续 7 秒一动不动，
+    // 然后突然跳一格，用户看着像卡住。
+    QTimer           *m_autoSyncUiTimer = nullptr;
+    int               m_autoSyncIntervalSec = AutoSyncScheduler::DefaultIntervalSec;
+    // 下一次自动触发的**绝对**时刻。无效 = 当前没有排程。
+    QDateTime         m_autoSyncNextAt;
+    // 面板存活令牌。public 的 aliveToken() 把同一个 shared_ptr 交给后台线程，
+    // 析构时显式置失效（不依赖 QPointer 的清零时机）。
+    std::shared_ptr<bool>  m_aliveToken = std::shared_ptr<bool>(new bool(true));
+    // 上一次**真正开跑**的时刻。用来算下一次（next = last + interval）。
+    // 手动同步不写它，所以手动操作不会挪动自动节奏。
+    QDateTime         m_autoSyncLastRunAt;
+    // 自动触发这一轮已经发起（正在等扫描完成）。防止心跳在扫描期间
+    // 重复发起 —— 一次自动同步只该跑一轮。
+    bool              m_autoSyncInFlight = false;
+    // 计数行尾巴「· 下次同步 Ns 后」。由 updateAutoSyncStatusUi() 写，
+    // 由 renderCountLabel() 拼到行尾 —— 单一写入点，避免两处 setText
+    // 互相覆盖导致这一行一秒出现一秒消失。
+    QString           m_autoSyncSuffix;
+    // 上一次自动同步**没能跑起来**的原因。用于日志去重：
+    // 同一个原因只提示一次，不然后台日志会被同一条 WARN 刷爆
+    // （实测：每秒一条，真正有用的报错被埋掉）。
+    // 用户改完配置后要清掉它，这样下次失败会重新提示。
+    QString           m_autoSyncLastFailReason;
     QPushButton      *m_startBtn = nullptr;
     QPushButton      *m_toggleLog = nullptr;
     QWidget          *m_logDrawer = nullptr;
@@ -384,6 +494,17 @@ private:
     // 「同步中」药丸和那个脉冲点从来没在真实运行里出现过，失败的文件更是
     // 永远显示「待传输」，用户根本分不出哪个文件没传成功。
     QVector<int>      m_pendingRows;
+
+    // 本轮里 rsync 明确报失败的文件（相对路径）。
+    //
+    // 为什么单独记一份：stdout 与 stderr 是两条管道、两个读线程，
+    // 报错的行（stderr）可能先到、"下一个文件开始"的行（stdout）后到。
+    // 迟到的 stdout 行会把刚判失败的行又改回「✓ 已完成」——
+    // 而它远端确实一个字节都没有。实测（80 个文件全部写失败）：
+    // 偶发 1 个文件显示成 ok。
+    //
+    // 所以失败要**在收尾时再钉一次**（见 onAllFinished）。
+    QSet<QString>    m_failedPaths;
 
     QTimer           *m_elapsedTimer = nullptr;
     qint64            m_runStartMs = 0;
