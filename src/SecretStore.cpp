@@ -372,11 +372,25 @@ QByteArray privateKeyMaterial()
     if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         return cached;                 // 建不了就当没有这一层保护
     }
+    // 权限**先收紧，再写内容**。
+    //
+    // 原来顺序反了：先 write 再 setPermissions ⇒ 这 32 字节密钥材料
+    // 在 umask 权限（常见 022 ⇒ 0644，全机可读）下有一个窗口，
+    // 同机别的用户趁窗口把密钥文件拷走 ⇒ 拿到 ini 的人就能离线复算出口令
+    // —— 那正是本文件存在的意义要防的事。
+    // 现在先收紧到 0600（此时文件还是空的，窗口里没有密钥材料），再写。
+    //
+    // 收紧失败时（某些网络盘/FAT 挂载不支持 chmod）仍然要写：
+    // **不能**因为收紧失败就不写这个文件 —— 不写等于上一层保护整层失效，
+    // 密钥版本会变，客户已有的密文解不开。那比"权限没收紧"严重得多。
+    // 这里刻意不改变失败时的行为，只把**窗口里没有密钥材料**这件事做到。
+    //
+    // Windows 上 setPermissions 只映射到只读属性、改不了 ACL
+    // （那边靠 DPAPI，不靠这个文件），Linux 上是真的生效。
+    const bool tightened = out.setPermissions(QFile::ReadOwner | QFile::WriteOwner);
+    Q_UNUSED(tightened);
     out.write(key);
     out.close();
-    // 权限收紧到只有本人可读写。Windows 上 setPermissions 只映射到只读属性、
-    // 改不了 ACL（那边靠 DPAPI，不靠这个文件），Linux 上是真的生效。
-    out.setPermissions(QFile::ReadOwner | QFile::WriteOwner);
     cached = key;
     return cached;
 }

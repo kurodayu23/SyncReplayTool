@@ -1116,6 +1116,19 @@ QVector<SyncRule> ConfigStore::loadSyncRules()
 {
     auto s = openSettings();
     QVector<SyncRule> rules;
+    // 基准必须在 beginReadArray 之前问：进了数组上下文，
+    // value()/contains() 都会被拼上当前下标前缀，问出来的是另一个键。
+    //
+    // 为什么这一侧也要问基准（与 loadToolRules 同一个理由）：
+    // 手写 0 起始的 [syncRules]（"0\suffix=..."）是**合法配置**，
+    // 而 setArrayIndex(0) 只认 "1\suffix" ⇒ 整段被读成空规则表。
+    // 后果比"读不到"本身更糟，三条都实测过：
+    //   1. 规则表为空 ⇒ 扫描**不过滤**（FileScanner 只在 wanted 非空时才过滤）
+    //      ⇒ 数据目录下的 .txt/.exe/.dll 全部进清单并推到接收端（**过度同步方向**）；
+    //   2. 紧接着任何一次保存（关窗/析构都会调）→ saveSyncRules 先 remove 整段
+    //      再按表写回 ⇒ 用户手写的那条规则**从磁盘上永久消失**；
+    //   3. 日志还打「已按实际的 N 条读取」而实际读进来 0 条。
+    const int base = arrayIndexBase(s.get(), QStringLiteral("syncRules"));
     int declaredSync = 0;
     int realSync = 0;
     const int count = readArrayCount(s.get(), QStringLiteral("syncRules"), &declaredSync, &realSync);
@@ -1125,25 +1138,29 @@ QVector<SyncRule> ConfigStore::loadSyncRules()
                                  u8"\u5DF2\u6309\u5B9E\u9645\u7684 %2 \u6761\u8BFB\u53D6\u3002")
                   .arg(declaredSync).arg(realSync));
     }
+    // 逐行按**绝对键名**读，不再用 setArrayIndex()：
+    // 只有绝对键名能同时吃下 0 起始（手写）和 1 起始（Qt 自己写的）两种格式，
+    // setArrayIndex(0) 只认 1\key。退出数组上下文之后，
+    // 两种基准就变成同一段代码，不需要分支。
+    s->endArray();
     for (int i = 0; i < count; ++i) {
-        s->setArrayIndex(i);
+        const QString row = QStringLiteral("syncRules/%1/").arg(i + base);
         SyncRule r;
         // trim 必须和 SyncPanel::collectRules() 做的一模一样。
         // 两处逻辑只要有一处不一致，就会出现"界面上写着一条规则、
         // 扫描时却按另一套取值走"的情况：配置文件里存的是 "  spe  "，
         // collectRules() 会归一成 spe 去扫，而这里原样返回给界面显示，
         // 用户看到一条空白规则、界面又报"未匹配到文件"。
-        r.suffix       = s->value(QStringLiteral("suffix")).toString().trimmed().toLower();
+        r.suffix       = s->value(row + QStringLiteral("suffix")).toString().trimmed().toLower();
         // 配置里可能存着带前导点的 ".spe"（用户手改 ini，或旧版本没归一化）。
         // QFileInfo::suffix() 是不带点的，全等比较匹配不上 → 一个文件都不传还显示成功。
         while (r.suffix.startsWith(QLatin1Char('.')))
             r.suffix.remove(0, 1);
-        r.remoteSubDir = repairMojibake(s->value(QStringLiteral("remoteSubDir"))
+        r.remoteSubDir = repairMojibake(s->value(row + QStringLiteral("remoteSubDir"))
                                             .toString().trimmed());
         if (!r.suffix.isEmpty())
             rules.append(r);
     }
-    s->endArray();
     return rules;
 }
 

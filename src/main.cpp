@@ -867,6 +867,139 @@ int runSelfCheck()
                 << "\n";
         }
 
+        // ---- 判据 4b：失败后的重排程口径（整秒 + 定点模式走定点时刻）----
+        {
+            // 间隔模式：失败后 next = 整秒的「现在 + 一个完整周期」。
+            //
+            // 「整秒」这条不是凑数：心跳的格子锚在定时器启动时刻上，
+            // 基准带毫秒时某一拍可能落在名义到点时刻之前几毫秒 ⇒ 那一拍整拍跳过
+            // ⇒ 重试间隔从 N 秒变成 N+心跳（实测间隔 30 秒跑成 45 秒）。
+            ConfigStore::saveAutoSyncEnabled(false);
+            ConfigStore::saveAutoSyncMode(AutoSyncScheduler::ModeInterval);
+            ConfigStore::saveAutoSyncInterval(30);
+            SyncPanel qi;
+            qi.setLocalRootForTest(QDir::tempPath());
+            qi.setAutoSyncForTest(true);
+            qi.forceAutoSyncFireForTest();       // 故意不配目标 -> 走失败分支
+            const QDateTime nxtInterval = qi.autoSyncNextAtForTest();
+            const bool okInterval = nxtInterval.isValid()
+                && nxtInterval.time().msec() == 0
+                && nxtInterval > QDateTime::currentDateTime().addSecs(10);
+
+            // 每天定点模式：失败后 next 必须落在**定点时刻**上。
+            //
+            // 修之前这里是「现在 + 间隔」，而定点模式下的「间隔」在设置界面里
+            // 是隐藏的、值常年是上次留下的默认值 ⇒ 「每天一次」被改成
+            // 「每 30 秒重试一次」，一整天都在重试；
+            // 而日志因为失败去重只打一条，客户完全看不出来。
+            ConfigStore::saveAutoSyncMode(AutoSyncScheduler::ModeDaily);
+            ConfigStore::saveAutoSyncDailyTime(QTime(3, 0));
+            SyncPanel qd;
+            qd.setLocalRootForTest(QDir::tempPath());
+            qd.setAutoSyncForTest(true);
+            qd.forceAutoSyncFireForTest();
+            const QDateTime nxtDaily = qd.autoSyncNextAtForTest();
+            const bool okDaily = nxtDaily.isValid()
+                && nxtDaily.time().msec() == 0
+                && nxtDaily.time() == QTime(3, 0)
+                && nxtDaily > QDateTime::currentDateTime();
+
+            // 把模式还原：后面的判据还要用间隔模式。
+            ConfigStore::saveAutoSyncMode(AutoSyncScheduler::ModeInterval);
+            ConfigStore::saveAutoSyncDailyTime(AutoSyncScheduler::defaultDailyTime());
+
+            const bool ok4b = okInterval && okDaily;
+            if (!ok4b) ++bad;
+            out << (ok4b ? "PASS\t" : "FAIL\t") << "auto-sync-fail-reschedule"
+                << "\tintervalWholeSec=" << (okInterval ? 1 : 0)
+                << "\tdailyOnSlot=" << (okDaily ? 1 : 0)
+                << "\tdailyNext=" << nxtDaily.toString(QString::fromUtf8("yyyy-MM-dd HH:mm:ss"))
+                << "\n";
+        }
+
+        // ---- 判据 4c：0 起始的 [syncRules] 必须读得回来 ----
+        {
+            // 夹具**手写 ini**：要的就是"按第 0 条的直觉手写"那种形状。
+            // QSettings 自己的数组是 1 起始（beginWriteArray + setArrayIndex(0)
+            // 写出来就是 "1\suffix"），所以这份夹具只能手写。
+            //
+            // 为什么这条判据必须存在：0 起始的写法被读成**空规则表**时，
+            // 后果比"读不到"本身更糟 ——
+            //   · 规则表为空 ⇒ 扫描不过滤 ⇒ 数据目录里的 .txt/.exe/.dll
+            //     全部进清单并推到接收端（**过度同步方向**）；
+            //   · 任何一次保存 ⇒ saveSyncRules 先 remove 整段再按表写回
+            //     ⇒ 用户手写的那条规则**从磁盘上永久消失**；
+            //   · 日志还打「已按实际的 N 条读取」而实际读进来 0 条。
+            //
+            // 两种基准都要验：修 0 起始的同时不能把 1 起始（Qt 自己写的）弄坏。
+            const QString iniFile = ConfigStore::iniPath();
+            QByteArray backup;
+            {
+                QFile bak(iniFile);
+                if (bak.open(QIODevice::ReadOnly))
+                    backup = bak.readAll();
+            }
+            // 两份夹具长度不同：QSettings 靠"文件大小变了"来判定磁盘上的文件
+            // 被外部改过，长度相同会让第二次读拿到缓存里的旧内容。
+            const char *zeroBased =
+                "[syncRules]\n"
+                "0\\suffix=spe\n"
+                "0\\remoteSubDir=ziyuan\n"
+                "size=1\n";
+            const char *oneBased =
+                "[syncRules]\n"
+                "1\\suffix=spe\n"
+                "1\\remoteSubDir=ziyuan\n"
+                "size=1\n"
+                "; 由 Qt 自己写出来的形状（1 起始）\n";
+
+            bool okZero = false;
+            bool okOne  = false;
+            bool wrote = false;
+            {
+                QFile f(iniFile);
+                if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                    f.write(zeroBased);
+                    f.close();
+                    wrote = true;
+                }
+            }
+            if (wrote) {
+                const QVector<SyncRule> z = ConfigStore::loadSyncRules();
+                okZero = (z.size() == 1)
+                      && (z.first().suffix == QStringLiteral("spe"))
+                      && (z.first().remoteSubDir == QStringLiteral("ziyuan"));
+            }
+            {
+                QFile f(iniFile);
+                if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                    f.write(oneBased);
+                    f.close();
+                }
+            }
+            {
+                const QVector<SyncRule> o = ConfigStore::loadSyncRules();
+                okOne = (o.size() == 1)
+                     && (o.first().suffix == QStringLiteral("spe"))
+                     && (o.first().remoteSubDir == QStringLiteral("ziyuan"));
+            }
+            // 还原配置：后面的判据还要用这份 ini。
+            if (!backup.isEmpty()) {
+                QFile f(iniFile);
+                if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                    f.write(backup);
+                    f.close();
+                }
+            }
+
+            const bool ok4c = okZero && okOne;
+            if (!ok4c) ++bad;
+            out << (ok4c ? "PASS\t" : "FAIL\t") << "sync-rules-zero-based"
+                << "\tzeroBasedRead=" << (okZero ? 1 : 0)
+                << "\toneBasedRead=" << (okOne ? 1 : 0)
+                << "\n";
+        }
+
         // ---- 判据 5：间隔输入框边界 + lastRunAt 落盘往返 + 保存后不立刻跑 ----
         {
             SettingsDialog dlg;

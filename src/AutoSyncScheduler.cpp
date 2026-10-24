@@ -158,6 +158,39 @@ QDateTime AutoSyncScheduler::nextDailyRunAt(const QTime &dailyTime,
     return candidate;
 }
 
+// 自动同步失败之后的下一次重试时刻。
+//
+// 契约见 AutoSyncScheduler.h 里 nextAfterFailure() 的注释，这里只讲实现要点。
+QDateTime AutoSyncScheduler::nextAfterFailure(int intervalSec,
+                                              const QDateTime &now,
+                                              Mode mode,
+                                              const QTime &dailyTime)
+{
+    if (!now.isValid())
+        return QDateTime();
+
+    // 排程基准**截到整秒**。
+    //
+    // 与 autoSyncScheduleNext / autoSyncMarkRunStarted 同一口径：
+    // 心跳定时器的格子锚在**定时器启动时刻**上，基准带零点几毫秒时，
+    // 「名义到点时刻」可能落在某一拍之后几毫秒 ⇒ 那一拍醒来判「未到点」跳过
+    // ⇒ 实际间隔从 N 秒变成 N+心跳（实测间隔 30 秒跑成 45 秒）。
+    const QDateTime base = now.addMSecs(-now.time().msec());
+
+    if (mode == ModeDaily) {
+        // 每天定点：重试到**下一个定点时刻**。
+        //
+        // fromNow = true ⇒ 以 base 为基准往后找第一个 HH:mm，
+        // 今天的定点还没到就是今天，已过就是明天 —— 不会回头补跑，
+        // 也就不会因为"上次的定点早已过去"而每次心跳都立刻到点、失败、再排同一个
+        // 过去时刻（那会变成死循环）。
+        return nextDailyRunAt(dailyTime, base, base, true);
+    }
+
+    // 间隔模式：重试一个完整周期。
+    return base.addSecs(clampIntervalSec(intervalSec));
+}
+
 bool AutoSyncScheduler::isDue(const QDateTime &now, const QDateTime &next)
 {
     if (!next.isValid() || !now.isValid())

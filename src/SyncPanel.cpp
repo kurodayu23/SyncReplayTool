@@ -2668,12 +2668,26 @@ void SyncPanel::autoSyncScheduleNext(bool fromNow)
     // `lastRunAt > now` 的比较结果不因截断而改变。
     const QDateTime nowRaw = QDateTime::currentDateTime();
     const QDateTime now = nowRaw.addMSecs(-nowRaw.time().msec());
+    // fromNow = true 的三个调用点（用户刚改完设置、刚勾上自动同步、
+    // **失败后的重试**）语义完全一样：「从这一刻起算下一个周期」
+    // ⇒ 统一走 nextAfterFailure()，口径不会分叉。
+    //
+    // 为什么不再各算各的：失败后的重试原来写的是「now + 间隔」，
+    // 既没截整秒、也没按每天定点模式分流 —— 与本函数刚修好的口径正好相反
+    // （定点模式下那等于把「每天一次」变成「每 30 秒重试一次」，一整天都在重试）。
+    // 三处共用一个实现，判据也只需要盖住这一个函数。
+    if (fromNow) {
+        m_autoSyncNextAt = AutoSyncScheduler::nextAfterFailure(
+            m_autoSyncIntervalSec, now,
+            ConfigStore::loadAutoSyncMode(), ConfigStore::loadAutoSyncDailyTime());
+        return;
+    }
     // 每天定点模式：与间隔模式**同构**（同一个 lastRunAt 落盘键、
     // 同一套"关机期间错过 → 开机补跑"语义），只是把
     // "lastRunAt + interval"换成"lastRunAt 之后的第一个 HH:mm"。
     //
-    // 间隔模式那一行**一个字都没改** —— 它的 fromNow / 时钟回拨 /
-    // lastRunAt+interval 三条口径保持原样（V11 的前提）。
+    // 间隔模式那一行**一个字都没改** —— 它的时钟回拨 /
+    // lastRunAt+interval 两条口径保持原样（V11 的前提）。
     if (ConfigStore::loadAutoSyncMode() == AutoSyncScheduler::ModeDaily) {
         m_autoSyncNextAt = AutoSyncScheduler::nextDailyRunAt(
             ConfigStore::loadAutoSyncDailyTime(), now, m_autoSyncLastRunAt, fromNow);
@@ -2747,7 +2761,16 @@ bool SyncPanel::autoSyncFire()
         // 「下一次同步 0s 后」永远 0s + 每 30 秒重试一次。
         // 推进到下一个完整周期：配置没配好不是每秒都要重试的事。
         // 用户改完配置时（applyFromSettings）会清掉去重标记并重新排程。
-        m_autoSyncNextAt = QDateTime::currentDateTime().addSecs(m_autoSyncIntervalSec);
+        //
+        // 口径与「用户刚改完设置后的重排程」完全一致（同一个 autoSyncScheduleNext(true)）：
+        //   · 排程基准截到整秒 —— 否则某一拍落在名义到点时刻之前几毫秒就整拍跳过，
+        //     重试间隔从 N 秒变成 N+心跳（与 52f800a 修掉的机制同一个）。
+        //   · 每天定点模式重试到**下一个定点时刻**，不是「现在 + 间隔」——
+        //     定点模式下的「间隔」在设置界面里是隐藏的（SettingsDialog），
+        //     值常年是上次留下的默认值 ⇒ 按间隔重试等于把「每天一次」
+        //     变成「每 30 秒重试一次」，一整天都在重试，
+        //     而日志因为失败去重只打一条，客户完全看不出来。
+        autoSyncScheduleNext(true);
         updateAutoSyncStatusUi();
         return false;
     }
