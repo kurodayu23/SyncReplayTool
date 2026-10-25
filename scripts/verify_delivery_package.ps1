@@ -100,8 +100,11 @@ $IntentionallyModified = @{
 }
 
 # 关键文件清单
+# ⚠ 2026-10-25（客户要求「包里不要文档」）：手册 `使用步骤与注意事项.md`
+#   已从「必须存在」改成「**不得出现在包里**」（见 $WinForbiddenFiles / $TarForbiddenFiles）——
+#   排除比必须更严：手册哪天被人手工塞回包里，门禁会当场报 FAIL。
 $WinMustHave = @(
-    'SyncReplayTool.exe', 'Run.cmd', 'qt.conf', '使用步骤与注意事项.md',
+    'SyncReplayTool.exe', 'Run.cmd', 'qt.conf',
     'Qt5Core.dll', 'Qt5Gui.dll', 'Qt5Widgets.dll', 'Qt5Svg.dll',
     'platforms/qwindows.dll', 'imageformats/qjpeg.dll', 'iconengines/qsvgicon.dll',
     'rsync.exe', 'ssh.exe', 'scp.exe', 'ssh-keygen.exe', 'ssh-keyscan.exe',
@@ -109,9 +112,16 @@ $WinMustHave = @(
 )
 $TarMustHave = @(
     'SyncReplayTool', 'run.sh', '自检.sh', '安装.sh', '安装自启.sh',
-    '数据同步工具.desktop', 'qt.conf', '使用步骤与注意事项.md',
+    '数据同步工具.desktop', 'qt.conf',
     'bin/rsync', 'bin/ssh', 'bin/scp', 'bin/ssh-keygen', 'bin/ssh-keyscan'
 )
+
+# ---- 禁止出现在包里的文件（客户只收「能直接用」的工具，文档一律不留）----
+$ForbiddenFileNames = @(
+    '使用步骤与注意事项.md'
+)
+$WinForbiddenFiles = @('使用步骤与注意事项.md')
+$TarForbiddenFiles = @('使用步骤与注意事项.md')
 
 # ZIP 的 DOS 时间戳只有 2 秒精度（且向下取整），裸比 mtime 必然差 1~2 秒。
 # 这是格式精度，不是"包比源旧" —— 所以给 2 秒容差，并用 sha256 补强。
@@ -204,12 +214,8 @@ Say '--- 闸门一：时间戳（Windows zip，逐个文件比） ---'
 function Resolve-WinSource {
     param([string]$Entry)
     if ($Entry -eq 'SyncReplayTool.exe') { return (Join-Path $BuildRoot 'release\SyncReplayTool.exe') }
-    if ($Entry -eq '使用步骤与注意事项.md') {
-        $doc = Get-ChildItem -LiteralPath $SrcRoot -File -Filter '*.md' |
-               Where-Object { $_.Name -like '*步骤*' -or $_.Name -like '*注意事项*' } | Select-Object -First 1
-        if ($doc) { return $doc.FullName }
-        return $null
-    }
+    # ⚠ 手册已不在包里（2026-10-25 客户要求「包里不要文档」）⇒ 这里不再需要它的源对照。
+    if ($Entry -eq '使用步骤与注意事项.md') { return $null }
     if ($Entry -eq 'qt.conf') { return (Join-Path $PayloadDir 'qt.conf') }
     $p = Join-Path $RuntimeDir ($Entry -replace '/', '\')
     if (Test-Path -LiteralPath $p) { return $p }
@@ -389,7 +395,7 @@ Say ''
 Say '--- 闸门三：结构与排除（Windows zip） ---'
 
 $zip3 = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
-$gate3Win = [ordered]@{ missing = @(); probe_hits = @(); must_have = @() }
+$gate3Win = [ordered]@{ missing = @(); probe_hits = @(); must_have = @(); forbidden_hits = @() }
 try {
     $names = @($zip3.Entries | ForEach-Object { $_.FullName })
     foreach ($m in $WinMustHave) {
@@ -401,6 +407,14 @@ try {
     $gate3Win.probe_hits = @($names | Where-Object {
         $leaf = ($_ -split '/')[-1]
         $leaf -in $ExcludedExeNames
+    })
+    # 文档排除门禁：手册等文档**一律不许在包里**（2026-10-25 客户要求）
+    #   判据 A：清单里的手册名（精确匹配）
+    #   判据 B：**任何**文档扩展名 —— 防止手册换个名字（例如 README.md）塞回包里
+    $docExt = @('.md', '.txt', '.pdf', '.doc', '.docx', '.rtf', '.odt', '.htm', '.html')
+    $gate3Win.forbidden_hits = @($names | Where-Object {
+        $leaf = ($_ -split '/')[-1]
+        ($leaf -in $WinForbiddenFiles) -or ($docExt -contains [System.IO.Path]::GetExtension($leaf).ToLowerInvariant())
     })
 } finally { $zip3.Dispose() }
 
@@ -414,6 +428,11 @@ if ($gate3Win.probe_hits.Count -gt 0) {
 } else {
     Say ("   PASS：{0} 个探针/旧版 exe 全部不在包里" -f $ExcludedExeNames.Count) -ForegroundColor Green
 }
+if ($gate3Win.forbidden_hits.Count -gt 0) {
+    Say ("   FAIL：包里出现了不该有的文档 -> {0}" -f ($gate3Win.forbidden_hits -join ', ')) -ForegroundColor Red
+} else {
+    Say ("   PASS：{0} 类文档全部不在包里（客户只要能直接用的工具）" -f $WinForbiddenFiles.Count) -ForegroundColor Green
+}
 
 # =============================================================================
 # 麒麟侧：容器内检查（路径是中文，宿主侧解析不可靠 -> 全部在容器里做）
@@ -421,7 +440,7 @@ if ($gate3Win.probe_hits.Count -gt 0) {
 
 $gate1Tar = [ordered]@{ status = 'SKIP'; passed = 0; failed = 0; checks = @() }
 $gate2Tar = [ordered]@{ status = 'SKIP'; rc = 0; output = ''; manifest = $null }
-$gate3Tar = [ordered]@{ status = 'SKIP'; missing = @(); entries = 0; symlinks = 0; dangling = 0; selfcheck_mode = ''; selfcheck_executable = $false }
+$gate3Tar = [ordered]@{ status = 'SKIP'; missing = @(); entries = 0; symlinks = 0; dangling = 0; selfcheck_mode = ''; selfcheck_executable = $false; forbidden_hits = @() }
 
 if ($hasTar) {
     Say ''
@@ -462,12 +481,15 @@ find . -type f -print | LC_ALL=C sort | while IFS= read -r f; do
   fi
 done
 cp -f "$ROOT/SyncReplayTool" "$OUTDIR/SyncReplayTool" 2>/dev/null || true
-# 包内手册的 sha256（容器里解包后算，宿主 tar.exe 处理不了这个包的中文路径与符号链接）
-M=$(find "$ROOT" -maxdepth 1 -type f -name '*.md' | head -1)
-if [ -n "$M" ]; then
-  echo "MANUAL|$(b64 "$(sha256sum "$M" | cut -d' ' -f1)")|$(b64 "$(basename "$M")")"
+# 包内文档文件清单（客户要求：交付包里不得有任何文档）——必须为空
+# 宿主 tar.exe 处理不了这个包的中文路径与符号链接，所以在容器里查。
+DOCS=$(find "$ROOT" -type f \( -iname '*.md' -o -iname '*.txt' -o -iname '*.pdf' \
+        -o -iname '*.doc' -o -iname '*.docx' -o -iname '*.rtf' -o -iname '*.odt' \
+        -o -iname '*.htm' -o -iname '*.html' \) | sed "s|^$ROOT/||" | LC_ALL=C sort)
+if [ -n "$DOCS" ]; then
+  echo "DOCS|$(b64 "$DOCS")"
 else
-  echo "MANUAL||"
+  echo "DOCS|"
 fi
 echo "DONE"
 '@
@@ -515,9 +537,8 @@ echo "DONE"
         $tarEntries = @()
         $payloadChecks = @()
         $rootName = ''
-        # 必须**先**初始化：下面解析容器回传的 MANUAL| 行时会写这两个变量
-        $manualTarSha = ''
-        $manualTarName = ''
+        # 必须**先**初始化：下面解析容器回传的 DOCS| 行时会写这个变量
+        $tarDocFiles = ''
         foreach ($line in $inspectLog) {
             $s = [string]$line
             if ($s -like 'ENTRY|*') {
@@ -544,10 +565,8 @@ echo "DONE"
                 }
             } elseif ($s -like 'ROOT|*') {
                 $rootName = From-B64 ($s -split '\|')[1]
-            } elseif ($s -like 'MANUAL|*') {
-                $pm = $s -split '\|'
-                $manualTarSha = (From-B64 $pm[1])
-                $manualTarName = (From-B64 $pm[2])
+            } elseif ($s -like 'DOCS|*') {
+                $tarDocFiles = From-B64 (($s -split '\|', 2)[1])
             }
         }
         $report.tar.entries = $gate3Tar.entries
@@ -598,6 +617,12 @@ echo "DONE"
         }
         if (-not $gate3Tar.selfcheck_executable) { $gate3Tar.status = 'FAIL' }
         if ($gate3Tar.dangling -gt 0) { $gate3Tar.status = 'FAIL' }
+        # 文档排除门禁：手册等文档**一律不许在包里**（2026-10-25 客户要求）
+        $gate3Tar.forbidden_hits = @($tarPaths | Where-Object {
+            $leaf = ($_ -split '/')[-1]
+            $leaf -in $TarForbiddenFiles
+        })
+        if ($gate3Tar.forbidden_hits.Count -gt 0) { $gate3Tar.status = 'FAIL' }
         Say ("   闸门三(麒麟)：条目 {0}，符号链接 {1}，悬空链接 {2}，自检.sh 权限位 {3}（可执行 {4}）" -f `
             $gate3Tar.entries, $gate3Tar.symlinks, $gate3Tar.dangling, $gate3Tar.selfcheck_mode, $gate3Tar.selfcheck_executable)
         if ($gate3Tar.missing.Count -gt 0) {
@@ -605,6 +630,18 @@ echo "DONE"
         }
         if ($gate3Tar.dangling -gt 0) {
             Say ("     FAIL：包内有 {0} 个悬空符号链接" -f $gate3Tar.dangling) -ForegroundColor Red
+        }
+        if ($gate3Tar.forbidden_hits.Count -gt 0) {
+            Say ("     FAIL：麒麟包里出现了不该有的文档 -> {0}" -f ($gate3Tar.forbidden_hits -join ', ')) -ForegroundColor Red
+        } else {
+            Say ("     PASS：{0} 类文档全部不在麒麟包里（客户只要能直接用的工具）" -f $TarForbiddenFiles.Count) -ForegroundColor Green
+        }
+        # 判据 B：容器在包内查到的**任何**文档文件（不限于手册名，防止改名塞回）
+        if ($tarDocFiles) {
+            $docList = @($tarDocFiles -split "`n" | Where-Object { $_ })
+            $gate3Tar.forbidden_hits += $docList
+            $gate3Tar.status = 'FAIL'
+            Say ("     FAIL：麒麟包里出现了文档文件 -> {0}" -f ($docList -join ', ')) -ForegroundColor Red
         }
 
         # ---- 麒麟主程序的**字节对账**（原来只有 mtime 与中文字符串两条判据）----
@@ -633,25 +670,12 @@ echo "DONE"
             Say '   FAIL：容器没有抽出包内 SyncReplayTool' -ForegroundColor Red
         }
 
-        # ---- 包内手册 vs 源码树手册：逐字节 ----
-        # 麒麟包里的手册是打包时用 awk 重写出来的（路径替换），
-        # 两边的内容必须仍然是**同一份**，否则客户拿到的说明书会与源码树脱节。
-        # （sha256 由容器算好回传：宿主 tar.exe 处理不了这个包的中文路径与符号链接。）
-        $repoManual = Get-ChildItem -LiteralPath $SrcRoot -File -Filter '*.md' |
-                      Where-Object { $_.Name -like '*步骤*' -or $_.Name -like '*注意事项*' } | Select-Object -First 1
-        if ($repoManual -and $manualTarSha) {
-            $b = (Get-FileHash -LiteralPath $repoManual.FullName -Algorithm SHA256).Hash
-            $gate3Tar.manual_sha256 = $manualTarSha
-            $gate3Tar.manual_source_sha256 = $b
-            if ($manualTarSha -eq $b) {
-                Say '   包内手册与源码树手册逐字节一致'
-            } else {
-                $gate3Tar.status = 'FAIL'
-                Say '   FAIL：包内手册与源码树手册不是同一份' -ForegroundColor Red
-                Say ("        包内 {0}" -f $manualTarSha) -ForegroundColor Red
-                Say ("        源码 {0}" -f $b) -ForegroundColor Red
-            }
-        }
+        # ---- 手册相关：已不适用 ----
+        # 2026-10-25（客户要求「包里不要文档」）��手册 `使用步骤与注意事项.md`
+        # 已从两个包里移除 ⇒ 原来的「包内手册 vs 源码树手册」逐字节对账**不再有对象**。
+        # 手册原件仍留在源码树（$SrcRoot\使用步骤与注意事项.md），内部需要时可取用。
+        # 替代判据：**包内不得出现手册**（见上面的 $WinForbiddenFiles / $TarForbiddenFiles，
+        # 以及本段的 forbidden_hits 判定）—— 排除比必须更严。
     }
 }
 
@@ -670,7 +694,10 @@ if (-not $hasTar) {
 
 $gate1Status = if (($gate1Win.failed + $gate1Win.no_source + $gate1Tar.failed) -gt 0) { 'FAIL' } else { 'PASS' }
 $gate2Status = if (($gate2Win.rc -ne 0) -or ($gate2Tar.status -eq 'FAIL')) { 'FAIL' } else { 'PASS' }
-$gate3Status = if (($gate3Win.missing.Count -gt 0) -or ($gate3Win.probe_hits.Count -gt 0) -or ($gate3Tar.status -eq 'FAIL')) { 'FAIL' } else { 'PASS' }
+# ⚠ Windows 侧的 forbidden_hits（包内出现手册等文档）**必须计入总判定**：
+#   只打印一行 FAIL 而 overall 仍是 PASS，等于"门禁自己拆台"——
+#   客户要的就是"包里没有文档"，这条判据不过就该整体 FAIL。
+$gate3Status = if (($gate3Win.missing.Count -gt 0) -or ($gate3Win.probe_hits.Count -gt 0) -or ($gate3Win.forbidden_hits.Count -gt 0) -or ($gate3Tar.status -eq 'FAIL')) { 'FAIL' } else { 'PASS' }
 
 $report.gates = [ordered]@{
     gate1_timestamp = [ordered]@{

@@ -15,7 +15,6 @@
 #   bash /pkg.sh --binary /build/SyncReplayTool \
 #                --base-tar /stage/base.tar.gz \
 #                --payload /payload \
-#                --docs "/payload/使用步骤与注意事项.md" \
 #                --out "/out/数据同步工具-麒麟.tar.gz" \
 #                --root-name "数据同步工具-麒麟"
 #
@@ -24,10 +23,14 @@
 #   --base-tar  <file>  基础包：自带 Qt 运行时与插件的交付包
 #   --payload   <dir>   运行时脚本目录（run.sh / 自检.sh / 安装.sh / 安装自启.sh /
 #                       数据同步工具.desktop / qt.conf / bin/*）
-#   --docs      <file>  运维文档 使用步骤与注意事项.md
 #   --out       <file>  输出的 .tar.gz（必需）
 #   --root-name <name>  包内根目录名（默认 数据同步工具-麒麟）
 #   --work      <dir>   临时工作目录（默认 /work/pkg）
+#
+# ⚠ 2026-10-25（客户要求「包里不要文档」）：**交付包内不再带任何文档**。
+#   原先这里会把《使用步骤与注意事项.md》装进包，现已整体移除；
+#   手册原件只留在源码树内部留用，不进包、也不进 base tar。
+#   下面的「文档闸门」在**装配阶段**直接拦住任何 .md/.txt/.pdf/.doc* 混进包里。
 #
 # 机器可读标记（宿主侧脚本靠它取数，不要改格式）：
 #   SRT_BIN_SHA256=<64 hex>   包内二进制 sha256
@@ -57,7 +60,7 @@ while [ $# -gt 0 ]; do
         --binary)    BINARY=$2;  shift 2 ;;
         --base-tar)  BASE_TAR=$2; shift 2 ;;
         --payload)   PAYLOAD=$2;  shift 2 ;;
-        --docs)      DOCS=$2;     shift 2 ;;
+        --docs)      DOCS="$2"; shift 2 ;;  # 已废弃：交付包不再带文档（2026-10-25）
         --out)       OUT=$2;      shift 2 ;;
         --root-name) ROOT_NAME=$2; shift 2 ;;
         --root-name-b64) ROOT_NAME_B64=$2; shift 2 ;;
@@ -82,17 +85,18 @@ fail() { echo "!!! $*" >&2; exit 1; }
 [ -f "$BASE_TAR" ] || fail "找不到基础包：$BASE_TAR"
 [ -n "$PAYLOAD" ] && [ -d "$PAYLOAD" ] || fail "找不到运行时脚本目录：$PAYLOAD"
 
-# 运维文档：没显式给就在 payload 里找（避免中文文件名进 docker 命令行）
-if [ -z "$DOCS" ]; then
-    DOCS=$(find "$PAYLOAD" -maxdepth 1 -type f -name '*.md' | LC_ALL=C sort | head -1)
-    [ -n "$DOCS" ] && echo "  运维文档自动识别: $DOCS"
+# 运维文档：**已整体移除**（2026-10-25 客户要求「包里不要文档」）。
+#   --docs 参数只为兼容旧调用方保留：传了就打一行提示然后忽略，
+#   绝不能再把 .md 写进包里。
+if [ -n "$DOCS" ]; then
+    echo "  [注意] --docs 已废弃：交付包不再包含文档，该参数已忽略"
 fi
 
 echo "##### 0. 参数"
 echo "  binary    : $BINARY"
 echo "  base tar  : $BASE_TAR"
 echo "  payload   : $PAYLOAD"
-echo "  docs      : ${DOCS:-（无）}"
+echo "  docs      : 不再随包交付（2026-10-25 起）"
 echo "  out       : $OUT"
 echo "  root name : $ROOT_NAME"
 
@@ -221,29 +225,21 @@ chmod 755 "$PKG/SyncReplayTool"
 file "$PKG/SyncReplayTool" 2>/dev/null || true
 echo "  sha256: $(sha256sum "$PKG/SyncReplayTool" | cut -d' ' -f1)"
 
-# ---------------------------------------------------------------- 5. 运维文档
-if [ -n "$DOCS" ] && [ -f "$DOCS" ]; then
-    echo "##### 5. 装入运维文档"
-    awk -v root="$ROOT_NAME" '
-    BEGIN { inblk = 0 }
-    {
-        if (inblk == 1) {
-            if ($0 ~ /^  /) next
-            inblk = 0
-        }
-        if ($0 ~ /^\* \*\*自带组件\*\*/) {
-            print "* **自带组件**：本包**不附带** ssh / rsync（随包的那份要求 glibc 2.38，麒麟 V10 是 2.23，跑不起来，已经删掉），"
-            print "  程序直接使用**系统自带**的 ssh / rsync（麒麟 V10 自带 rsync 3.1.1、OpenSSH 7.2p2，开箱可用）。"
-            print "  这一份只管**你这台发送端**；接收端那台仍需自己开 sshd 并装有 rsync。想知道当前用的是哪一个、版本是多少，执行一次 `sh 自检.sh` 就能看到。"
-            inblk = 1
-            next
-        }
-        gsub(/srt-client/, root)
-        print
-    }' "$DOCS" > "$PKG/使用步骤与注意事项.md"
-    chmod 644 "$PKG/使用步骤与注意事项.md"
-    echo "  文档条目数：$(wc -l < "$PKG/使用步骤与注意事项.md")"
+# ---------------------------------------------------------------- 5. 文档闸门
+echo "##### 5. 文档闸门（包内不得有任何文档）"
+# 2026-10-25 客户要求：交付包里只留"打开就能用的工具"，
+# 任何 .md/.txt 之类的说明文档都不许出现（手册原件只留在源码树内部留用）。
+# 这里在**装配阶段**就拦住 —— 等到客户机器上才发现，等于没拦。
+_doc_all=$(find "$PKG" -type f \
+    \( -iname '*.md' -o -iname '*.txt' -o -iname '*.pdf' -o -iname '*.doc' \
+       -o -iname '*.docx' -o -iname '*.rtf' -o -iname '*.odt' \
+       -o -iname '*.htm' -o -iname '*.html' \) 2>/dev/null)
+if [ -n "$_doc_all" ]; then
+    echo "  [闸门] 包内出现文档文件："
+    printf '%s\n' "$_doc_all" | sed -n '1,20p' | sed "s|^$PKG/|        |"
+    fail "交付包内不得包含文档（客户要求）"
 fi
+echo "  文档闸门       : 通过（0 个文档文件）"
 
 # ---------------------------------------------------------------- 6. 换行/权限
 echo "##### 6. 统一换行符与权限位"
@@ -287,7 +283,7 @@ echo "SRT_BIN_SHA256=$(sha256sum "$V/SyncReplayTool" | cut -d' ' -f1)"
 echo "SRT_ENTRIES=$(tar -tzf "$OUT" | wc -l)"
 echo "SRT_SYMLINKS=$_SYM"
 echo "SRT_SELFCHK_MODE=$(stat -c '%a' "$V/自检.sh" 2>/dev/null || echo unknown)"
-for f in run.sh 自检.sh 安装.sh 安装自启.sh 数据同步工具.desktop qt.conf 使用步骤与注意事项.md; do
+for f in run.sh 自检.sh 安装.sh 安装自启.sh 数据同步工具.desktop qt.conf; do
     [ -e "$V/$f" ] && echo "  [有] $f" || echo "  [缺] $f"
 done
 for f in rsync ssh scp ssh-keygen ssh-keyscan; do
@@ -295,6 +291,5 @@ for f in rsync ssh scp ssh-keygen ssh-keyscan; do
 done
 echo "  libexec/ 残留: $([ -e "$V/libexec" ] && echo 有 || echo 无)"
 echo "  lib/sshv2/ 残留: $([ -e "$V/lib/sshv2" ] && echo 有 || echo 无)"
-echo "  文档条数      : $(wc -l < "$V/使用步骤与注意事项.md" 2>/dev/null || echo 0)"
-echo "  文档里残留 srt-client : $(grep -c 'srt-client' "$V/使用步骤与注意事项.md" 2>/dev/null || echo 0)"
+echo "  包内文档文件数: $(find "$V" -type f \( -iname '*.md' -o -iname '*.txt' -o -iname '*.pdf' \) 2>/dev/null | wc -l)（必须为 0）"
 echo "##### 打包完成: $OUT"

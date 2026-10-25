@@ -126,7 +126,11 @@ $WinExactFiles = @(
     'SyncReplayTool.exe'   # 由本次编译产出，从 $BuildRoot\release 取，绝不从 deploy 取
     'Run.cmd'
     'qt.conf'
-    '使用步骤与注意事项.md'
+    # ⚠ **手册（`使用步骤与注意事项.md`）刻意不进包**（2026-10-25 客户要求）：
+    #   客户只要「双击/一条命令就能用」的工具本体，文档一律不进交付包。
+    #   手册原件仍留在源码树（$ProjectRoot\使用步骤与注意事项.md），供内部与后续需要时取用。
+    #   ⇒ 闸门脚本 verify_delivery_package.ps1 里它已从「必须存在的文件」
+    #     改成「**不得出现在包里**」的排除项（更严，见 $WinForbiddenFiles / $TarForbiddenFiles）。
     # Qt 运行时
     'Qt5Core.dll', 'Qt5Gui.dll', 'Qt5Widgets.dll', 'Qt5Svg.dll'
     # Qt 平台/图像/图标插件依赖
@@ -414,16 +418,10 @@ if (-not $SkipWinZip) {
             $missing = @($missing | Where-Object { $_ -ne 'qt.conf' })
         }
     }
-    if (-not (Test-Path -LiteralPath (Join-Path $WinStage '使用步骤与注意事项.md'))) {
-        $doc = Get-ChildItem -LiteralPath $ProjectRoot -File -Filter '*.md' |
-               Where-Object { $_.Name -like '*步骤*' -or $_.Name -like '*注意事项*' } | Select-Object -First 1
-        if (-not $doc) { $missing += '使用步骤与注意事项.md (源码树里也没有)' }
-        else {
-            Copy-PreserveTime -Source $doc.FullName -Destination (Join-Path $WinStage '使用步骤与注意事项.md')
-            $copied++
-            $missing = @($missing | Where-Object { $_ -ne '使用步骤与注意事项.md' })
-        }
-    }
+    # ⚠ 手册（`使用步骤与注意事项.md`）**刻意不拷进包**（2026-10-25 客户要求）：
+    #   客户只要「双击 / 一条命令就能用」的工具本体，文档一律不进交付包。
+    #   手册原件留在源码树 $ProjectRoot\使用步骤与注意事项.md，内部仍可取用。
+    #   麒麟包那边同理：手册已从共享 payload 目录移除（tar 由 payload 整体组装）。
     if ($missing.Count -gt 0) {
         Write-Warning ("运行时有 {0} 个文件不在源目录里（已跳过）：{1}" -f $missing.Count, ($missing -join ', '))
     }
