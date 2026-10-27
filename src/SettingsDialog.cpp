@@ -50,7 +50,9 @@ const char *kTxtColPath    = "\xE5\x85\xB3\x8C\xE8\x81\x94\xE7\xA8\x8B\xE5\xBA\x
 // 带上范围：客户看得出可以填多少。
 // 原来这里只有"自动同步间隔"，而输入框挂了 QIntValidator(10, 86400)
 // —— 客户想填 5 秒会被**静默拒绝**（输入框不反应），以为软件坏了。
-const char *kTxtAutoInterval = "自动同步间隔（10 ~ 86400 秒）";  // 自动同步间隔（10~86400 秒）
+const char *kTxtAutoInterval = "自动同步间隔";  // 自动同步间隔
+// 取值范围（10 ~ 86400 秒）写在**输入框 tooltip** 里，不写在标签上：
+// 定稿图的标签只有「自动同步间隔」六个字，范围后缀是程序自己加的。
 const char *kTxtSec          = "\xE7\xA7\x92";  // 秒
 // 每天定点的时刻标签。
 const char *kTxtDailyTime    = "每天定时时刻";  // 每天定时时刻
@@ -150,7 +152,8 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     // 顶部栏只有标题和叉。齿轮反而和主窗口那颗撞车，容易被当成两套设置入口。
     m_header = new QFrame;
     m_header->setObjectName(QStringLiteral("dialogHeader"));
-    m_header->setFixedHeight(44);
+    // 定稿图实测标题栏高 38px（原来 44）。
+    m_header->setFixedHeight(38);
 
     QHBoxLayout *hl = new QHBoxLayout(m_header);
     hl->setContentsMargins(18, 0, 12, 0);
@@ -178,14 +181,17 @@ SettingsDialog::SettingsDialog(QWidget *parent)
 
     // ---- 中间滚动区（图四表单内容）----
     QScrollArea *scroll = new QScrollArea;
+    m_scrollArea = scroll;
     scroll->setWidgetResizable(true);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setFrameShape(QFrame::NoFrame);
 
     QWidget *body = new QWidget;
     QVBoxLayout *bl = new QVBoxLayout(body);
-    bl->setContentsMargins(18, 14, 18, 14);
-    bl->setSpacing(11);
+    // 定稿图实测：三组卡片几乎贴住标题栏和底栏（上下各约 4px），
+    // 组间距约 8px。原来上下各留 14、组间距 11，面板比定稿图高出 30 多 px。
+    bl->setContentsMargins(18, 4, 18, 4);
+    bl->setSpacing(8);
     scroll->setWidget(body);
     cardLayout->addWidget(scroll, 1);
 
@@ -269,10 +275,10 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     g4->addWidget(mkLabel(kTxtPassword, "settingLabel"), 0, 0);
     g4->addWidget(mkLabel(kTxtKeyFile, "settingLabel"), 0, 1);
     m_password = mkInput("settingPassword", QString(),
-                         QString::fromUtf8("\xE8\xBE\x93\xE5\x85\xA5\xE8\xBF\x9C\xE7\xA8\x8B\xE7\x99\xBB\xE5\xBD\x95\xE5\xAF\x86\xE7\xA0\x81"));  // 输入远程登录密码
+                         QString::fromUtf8("\xE7\x99\xBB\xE5\xBD\x95\xE5\xAF\x86\xE7\xA0\x81"));  // 登录密码
     m_password->setEchoMode(QLineEdit::Password);
     m_keyPath = mkInput("settingKeyPath", QString(),
-                        QString::fromUtf8("\xE7\x95\x99\xE7\xA9\xBA\xE5\x88\x99\xE7\x94\xA8\xE5\xAF\x86\xE7\xA0\x81\xE7\x99\xBB\xE5\xBD\x95"));  // 留空则用密码登录
+                        QString::fromUtf8("\xE9\x80\x89\xE6\x8B\xA9\xE7\xA7\x81\xE9\x92\xA5\xE6\x96\x87\xE4\xBB\xB6"));  // 选择私钥文件
     QPushButton *keyBrowse = new QPushButton(QString::fromUtf8(kTxtBrowseFile));
     keyBrowse->setObjectName(QStringLiteral("btnBrowseKey"));
     keyBrowse->setFixedHeight(28);
@@ -353,7 +359,8 @@ SettingsDialog::SettingsDialog(QWidget *parent)
         u8"不勾：只在手动点「开始同步」时同步。"));
     topRow->addWidget(m_autoSyncBox);
     topRow->addStretch(1);
-    topRow->addWidget(mkLabelQ(QString::fromUtf8(u8"同步方式"), "settingHint"));
+    // 定稿图里两个分段按钮左边**没有任何文字标签**。原来这里挂了一个
+    // 「同步方式」的小灰字 —— 程序有、图上没有，删掉；说明移到按钮 tooltip。
 
     // 模式二选一。定稿图上是**分段按钮**（选中的蓝底白字），不是单选圆点 ——
     // 两颗单选圆点挂在设置窗口里太像表单控件，和整套 AP500BJ 的直角按钮语言不一致。
@@ -367,14 +374,21 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     m_modeDaily->setCheckable(true);
     m_modeDaily->setAutoExclusive(true);
     m_modeDaily->setCursor(Qt::PointingHandCursor);
+    m_modeInterval->setToolTip(QString::fromUtf8(
+        u8"同步方式：按间隔重复。\n每隔下面设置的秒数自动同步一次。"));
+    m_modeDaily->setToolTip(QString::fromUtf8(
+        u8"同步方式：每天定时。\n每天在下面设置的时刻自动同步一次。"));
     topRow->addWidget(m_modeInterval);
     topRow->addWidget(m_modeDaily);
     boardLay->addLayout(topRow);
 
     // 2.2 间隔输入（只有「按间隔重复」时可见可用）
-    QWidget *intervalBox = new QWidget;
+    // 定稿图里「自动同步间隔 [30] 秒」这一行**独占一个描边小框**，
+    // 和上面「自动同步」那一行分开。原来是直接贴在 board 里，两个控件糊在一起。
+    QFrame *intervalBox = new QFrame;
+    intervalBox->setObjectName(QStringLiteral("intervalBox"));
     QHBoxLayout *intervalRow = new QHBoxLayout(intervalBox);
-    intervalRow->setContentsMargins(0, 0, 0, 0);
+    intervalRow->setContentsMargins(10, 6, 10, 6);
     intervalRow->setSpacing(8);
     QLabel *intervalLabel = mkLabel(kTxtAutoInterval, "settingLabel");
     m_autoSyncInterval = mkInput("settingAutoSyncInterval",
@@ -383,7 +397,8 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     m_autoSyncInterval->setValidator(new QIntValidator(AutoSyncScheduler::MinIntervalSec,
                                                        AutoSyncScheduler::MaxIntervalSec,
                                                        m_autoSyncInterval));
-    m_autoSyncInterval->setMaximumWidth(96);
+    // 定稿图实测：间隔输入框 ≈60 逻辑 px（原来 96，把「秒」字推得太远）。
+    m_autoSyncInterval->setFixedWidth(60);
     // tooltip 必须和**实测行为**一致，不能给客户一个做不到的承诺。
     //
     // 实测（Qt 5.9.6 的 QIntValidator(10, 86400)）：
@@ -478,7 +493,10 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     m_ruleTable->horizontalHeader()->setHighlightSections(false);
     m_ruleTable->verticalHeader()->setVisible(false);
     m_ruleTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_ruleTable->setShowGrid(false);
+    // 定稿图实测：规则表**有横竖分隔线**（#1c2740），原来整个关掉了。
+    m_ruleTable->setShowGrid(true);
+    // 行高照定稿图实测值（表头 + 2 行 = 85px）。
+    m_ruleTable->verticalHeader()->setDefaultSectionSize(28);
     // 定稿图「文件打开工具」这一组实测高 171px：组标题 + 规则表（表头 + 2 行）
     // + 「+ 添加规则」按钮。规则表原来死锁 160px（能塞 4 行），整组被撑到 244px，
     // 面板因此比定稿图高出 70 多 px、第三组差点被挤出屏幕。
@@ -504,7 +522,8 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     // ---- 底栏（图四风格：左侧[测试网络连接]，右侧[保存设置]）----
     QFrame *footer = new QFrame;
     footer->setObjectName(QStringLiteral("dialogFooter"));
-    footer->setFixedHeight(52);
+    // 定稿图实测底栏高 43px（原来 52）。
+    footer->setFixedHeight(44);
     QHBoxLayout *fl = new QHBoxLayout(footer);
     fl->setContentsMargins(18, 0, 18, 0);
 
@@ -532,10 +551,12 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     // 「记住设置」四个字，客户看不懂它管什么，评审时明确要求去掉。
     //
     // 底下的闸门还在（ConfigStore::saveTarget / loadTarget 会看这个键），
-    // 而界面上已经没有任何地方能改它了 —— 这个键必须被定死成「保存」：
-    // 否则老配置里存着 false 的人，升级后连接信息会突然不写盘，
-    // 而且界面上再也找不回来把它改回 true。
-    ConfigStore::saveRememberSettings(true);
+    // 而界面上已经没有任何地方能改它了 —— 这个键必须被定死成「保存」。
+    //
+    // ★ 钉死的位置在 **main() 的启动段**（早于任何 target 配置被读或被写），
+    // 不是这里。原来写在这个构造函数里，于是老配置里存着 false 的用户：
+    // 启动时 loadTarget() 读不到自己的连接信息，saveTarget() 还会把 ini 里的
+    // target/* 删掉 —— 界面又没地方能改回来，连接信息就这么没了。
     fl->addSpacing(10);
 
     m_btnSave = new QPushButton(QString::fromUtf8(kTxtSave));
@@ -885,6 +906,28 @@ void SettingsDialog::loadConfig(const TargetConfig &target,
             m_ruleTable->setItem(r, 0, a);
             m_ruleTable->setItem(r, 1, b);
             m_ruleTable->setItem(r, 2, c);
+        }
+    }
+
+    // 规则表高度随规则数走。
+    //
+    // 原来死锁 96px（表头 + 2 行）：配到第 3 条规则时第 3 行被裁掉，
+    // 右边还冒出一条滚动条 —— 用户以为规则没保存上。
+    // 定稿图是 2 条规则（表头 + 2 行 = 96px），所以 2 条时高度一个像素都不动。
+    {
+        const int rows = m_ruleTable->rowCount();
+        // 表头 29 + 每行 28（定稿图实测：表头 + 2 行 = 85px）。
+        const int hdrH = 29;
+        const int rowH = 28;
+        int want = hdrH + rows * rowH + 1;
+        if (want > 260)
+            want = 260;
+        const int delta = want - m_ruleTable->height();
+        if (delta != 0) {
+            m_ruleTable->setFixedHeight(want);
+            if (m_scrollArea)
+                m_scrollArea->setMinimumHeight(m_scrollArea->minimumHeight() + delta);
+            setFixedHeight(height() + delta);
         }
     }
 }

@@ -28,6 +28,8 @@
 #include <QSet>
 #include <QTime>
 #include <QScrollBar>
+#include <QPainter>
+#include <QPaintEvent>
 #include <QStyle>
 #include <QRunnable>
 #include <QThreadPool>
@@ -152,11 +154,13 @@ const char *kLogClose    = "\xE5\x90\x8C\xE6\xAD\xA5\xE6\x97\xA5\xE5\xBF\x97 \xE
 const char *kLogTitle    = "\xE5\xAE\x9E\xE6\x97\xB6\xE4\xBC\xA0\xE8\xBE\x93\xE6\xB5\x81\xE6\xB0\xB4\xE6\x97\xA5\xE5\xBF\x97";  // 实时传输流水日志
 const char *kCopyLog     = "\xE5\xA4\x8D\xE5\x88\xB6\xE6\x97\xA5\xE5\xBF\x97";  // 复制日志
 const char *kClearLog    = "\xE6\xB8\x85\xE7\xA9\xBA";                      // 清空
-const char *kStatusReady = "\xE7\x8A\xB6\xE6\x80\x81\xEF\xBC\x9A\xE5\xB0\xB1\xE7\xBB\xAA";  // 状态：就绪
-const char *kStatusRun   = "\xE7\x8A\xB6\xE6\x80\x81\xEF\xBC\x9A\xE5\x90\x8C\xE6\xAD\xA5\xE4\xB8\xAD";  // 状态：同步中
-const char *kStatusDone  = "\xE7\x8A\xB6\xE6\x80\x81\xEF\xBC\x9A\xE5\xB7\xB2\xE5\xAE\x8C\xE6\x88\x90";  // 状态：已完成
-const char *kStatusFail     = "\xE7\x8A\xB6\xE6\x80\x81\xEF\xBC\x9A\xE5\xA4\xB1\xE8\xB4\xA5";  // 状态：失败
-const char *kStatusCanceled = "\xE7\x8A\xB6\xE6\x80\x81\xEF\xBC\x9A\xE5\xB7\xB2\xE5\x8F\x96\xE6\xB6\x88";  // 状态：已取消
+// 进度卡左标签。定稿图是「同步中 · 剩余 24 秒」，**没有「状态：」前缀** ——
+// 原来这里写「状态：就绪 / 状态：同步中」，多出来的三个字和定稿图对不上。
+const char *kStatusReady = "\xE5\xB0\xB1\xE7\xBB\xAA";  // 就绪
+const char *kStatusRun   = "\xE5\x90\x8C\xE6\xAD\xA5\xE4\xB8\xAD";  // 同步中
+const char *kStatusDone  = "\xE5\xB7\xB2\xE5\xAE\x8C\xE6\x88\x90";  // 已完成
+const char *kStatusFail     = "\xE5\xA4\xB1\xE8\xB4\xA5";  // 失败
+const char *kStatusCanceled = "\xE5\xB7\xB2\xE5\x8F\x96\xE6\xB6\x88";  // 已取消
 const char *kNoTool      = "\xE6\x9C\xAA\xE4\xB8\xBA\xE8\xAF\xA5\xE6\x96\x87\xE4\xBB\xB6\xE9\x85\x8D\xE7\xBD\xAE\xE8\xB0\x83\xE7\x94\xA8\xE5\xB7\xA5\xE5\x85\xB7";  // 未为该文件配置调用工具
 
 class CheckHeaderView : public QHeaderView
@@ -230,6 +234,39 @@ protected:
 
 private:
     bool m_checked;
+};
+
+// 数据区的行分隔线。
+//
+// 定稿图实测：数据区**每一行下面一条 #1b263c 细线**，但**没有列竖线**
+// （竖线只有表头那一段有）。所以这里只画横线。
+//
+// 为什么不用 QTableView 自带的 setShowGrid(true)：
+// Qt 内部先把网格线画在**单元格内容之下**，而同步状态列和工具调用列
+// 都是自绘 delegate、整格刷底色，网格线会被盖掉；失败行整行红底
+// （BackgroundRole）同样会盖掉 —— 结果就是"有的行有线、有的行没有"。
+// 在 paintEvent 之后自己补画，两个自绘 delegate 一个都不用动。
+class RowRuleTableView : public QTableView
+{
+public:
+    explicit RowRuleTableView(QWidget *parent = nullptr) : QTableView(parent) {}
+
+protected:
+    void paintEvent(QPaintEvent *e) override
+    {
+        QTableView::paintEvent(e);
+        if (!model())
+            return;
+        QPainter p(viewport());
+        p.setPen(Theme::gridRowLine());
+        const int rows = model()->rowCount();
+        for (int r = 0; r < rows; ++r) {
+            const int y = rowViewportPosition(r) + rowHeight(r) - 1;
+            if (y < 0 || y >= viewport()->height())
+                continue;
+            p.drawLine(0, y, viewport()->width() - 1, y);
+        }
+    }
 };
 
 } // namespace
@@ -372,14 +409,17 @@ SyncPanel::~SyncPanel()
 void SyncPanel::buildUi()
 {
     QVBoxLayout *root = new QVBoxLayout(this);
-    root->setContentsMargins(18, 14, 18, 14);
+    // 定稿图实测：窗口左右留白 ≈15px，表格卡片左右贴边（卡片内左右内边距 0）。
+    // 原来 root 留 18 + 卡片内留 10，表格比定稿图窄了 22px。
+    root->setContentsMargins(14, 14, 14, 14);
     root->setSpacing(12);
 
     // ---- 1. 文件清单卡片 ----
     QFrame *card = new QFrame;
     card->setObjectName(QStringLiteral("listCard"));
     QVBoxLayout *cardLay = new QVBoxLayout(card);
-    cardLay->setContentsMargins(10, 0, 10, 10);
+    // 表格卡片内不留左右内边距：定稿图的表头竖线贴着卡片左右边框。
+    cardLay->setContentsMargins(0, 0, 0, 10);
     cardLay->setSpacing(0);
 
     QFrame *head = new QFrame;
@@ -427,7 +467,7 @@ void SyncPanel::buildUi()
     hline->setFixedHeight(1);
     cardLay->addWidget(hline);
 
-    m_table = new QTableView;
+    m_table = new RowRuleTableView;
     m_model = new FileTableModel(this);
     m_toolDelegate = new ToolColumnDelegate(this);
     m_table->setModel(m_model);
@@ -478,8 +518,8 @@ void SyncPanel::buildUi()
     // 更多…」，按钮必须是**工具名**才能区分；100px 只放得下两个字。
     // 差额让给"文件名"这一列（stretch）。
     m_table->setColumnWidth(FileTableModel::ColSize,     100);
-    m_table->setColumnWidth(FileTableModel::ColCreated,  130);
-    m_table->setColumnWidth(FileTableModel::ColModified, 130);
+    m_table->setColumnWidth(FileTableModel::ColCreated,  140);
+    m_table->setColumnWidth(FileTableModel::ColModified, 140);
     m_table->setColumnWidth(FileTableModel::ColStatus,   90);
     // 156px 死锁：不管配几个工具，这一列都不许变宽（手册 §6.3）。
     m_table->setColumnWidth(FileTableModel::ColTool,     156);
@@ -1523,9 +1563,14 @@ void SyncPanel::renderCountLabel()
     const qint64 h = secs / 3600;
     const qint64 mnt = (secs % 3600) / 60;
     const qint64 s = secs % 60;
-    const QString elapsed = h > 0
-        ? QObject::tr("%1:%2:%3").arg(h).arg(mnt, 2, 10, QLatin1Char('0')).arg(s, 2, 10, QLatin1Char('0'))
-        : QObject::tr("%1:%2").arg(mnt).arg(s, 2, 10, QLatin1Char('0'));
+    // 「已用 N 秒」口径（定稿图：已用 13 秒）。原来写的是 0:00 这种计时器写法，
+    // 和定稿图的文字形状对不上。
+    const QString elapsed =
+        (h > 0) ? QObject::tr("\xE5\xB7\xB2\xE7\x94\xA8 %1 \xE5\xB0\x8F\xE6\x97\xB6 %2 \xE5\x88\x86")
+                       .arg(h).arg(mnt)
+                 : (mnt > 0) ? QObject::tr("\xE5\xB7\xB2\xE7\x94\xA8 %1 \xE5\x88\x86 %2 \xE7\xA7\x92")
+                       .arg(mnt).arg(s)
+                                : QObject::tr("\xE5\xB7\xB2\xE7\x94\xA8 %1 \xE7\xA7\x92").arg(s);
     // 尾巴「· 下次同步 Ns 后」由 updateAutoSyncStatusUi() 维护（m_autoSyncSuffix），
     // 在这里统一拼上。
     //

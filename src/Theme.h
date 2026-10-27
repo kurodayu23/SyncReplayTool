@@ -67,6 +67,9 @@ public:
     static QColor divider()      { return QColor(0x24, 0x32, 0x4d); }  // 分割线
     static QColor canvas()       { return QColor(0x0e, 0x14, 0x24); }  // 窗口底
     static QColor panelBg()      { return QColor(0x15, 0x1d, 0x32); }  // 卡片底
+    // 数据区行分隔线。定稿图实测：每行下面一条 #1b263c 细线
+    //（数据区**没有**列竖线，竖线只有表头那一段有）。
+    static QColor gridRowLine()  { return QColor(0x1b, 0x26, 0x3c); }  // 行分隔线
 
     // ---- 徽章（同步状态）与操作按钮的语义配色 ----
     //
@@ -475,8 +478,12 @@ QLabel#statusOk {
 /* ---- 底部操作条与表格复选框 ---- */
 QCheckBox { color: #c4d3eb; spacing: 6px; font-size: 12.5px; }
 QCheckBox::indicator, QTableView::indicator {
-    width: 14px; height: 14px; border: 1px solid #3a4b6e;
-    border-radius: 2px; background: #0a0f1d;
+    /* 未勾选 = **白色实心方块**（定稿图实测：底栏「仅同步新增文件」和表格里
+       未勾选的行都是白块 + 浅灰描边，没有对勾）。
+       原来这里是深底空心框（#0a0f1d + 深蓝描边），在深色底上几乎看不见，
+       客户看着像"控件没画出来"。 */
+    width: 14px; height: 14px; border: 1px solid #cfd6e2;
+    border-radius: 2px; background: #ffffff;
 }
 QCheckBox::indicator:hover, QTableView::indicator:hover  { border-color: #1f6fe0; }
 QCheckBox::indicator:checked, QTableView::indicator:checked {
@@ -591,6 +598,11 @@ QFrame#settingsGroup {
 QLabel#groupTitle {
     font-size: 12px; font-weight: 700; color: #c4d3eb;
 }
+/* 间隔输入那一行外面的小框（定稿图：自动同步间隔独占一个描边框，
+   和上面的「自动同步」行分开）。 */
+QFrame#intervalBox {
+    background: #0c1220; border: 1px solid #24324d; border-radius: 2px;
+}
 QFrame#switchBoard {
     background: #0c1220; border: 1px solid #24324d; border-radius: 2px;
 }
@@ -664,7 +676,7 @@ QLabel#testLabelFail { font-size: 11.5px; font-weight: 500; color: #fca5a5; }
 
 /* ---- 规则表（设置弹窗内）---- */
 QTableView#ruleTable {
-    background: #151d32; border: 1px solid #24324d; gridline-color: #1b2540; outline: none; color: #e2e8f0;
+    background: #151d32; border: 1px solid #24324d; gridline-color: #1c2740; outline: none; color: #e2e8f0;
 }
 QHeaderView#ruleHeader::section {
     background-color: #111726; color: #9cb1d4;

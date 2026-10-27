@@ -566,6 +566,30 @@ void ConfigStore::saveRememberSettings(bool remember)
     s->setValue(QLatin1String(kRememberKey), remember);
 }
 
+// 把老配置里的 app/rememberSettings 统一迁移成 true。
+//
+// 背景：界面上那个「记住设置」勾选框按客户意见移除后，这个键就只能恒为 true。
+// 老配置里存着 false 的那批用户，升级上来时这个键必须被改掉 ——
+//
+//   ① 不改：ini 里躺着一个 false，而界面上没有任何地方能改它，
+//      用户看配置、排查问题都会撞上一个"程序里没有入口的开关"；
+//   ② 改成 true：ini 里只剩一个与实际行为一致的键。
+//
+// 迁移放在**启动时**做（main() 调它），早于任何 target 配置的读与写。
+void ConfigStore::migrateRememberSettingsToTrue()
+{
+    auto s = openSettings();
+    if (!s->contains(QLatin1String(kRememberKey))) {
+        s->setValue(QLatin1String(kRememberKey), true);
+        flushSettings(s.get());
+        return;
+    }
+    if (!s->value(QLatin1String(kRememberKey), true).toBool()) {
+        s->setValue(QLatin1String(kRememberKey), true);
+        flushSettings(s.get());
+    }
+}
+
 bool ConfigStore::loadAutoSyncEnabled()
 {
     auto s = openSettings();
@@ -890,22 +914,16 @@ bool ConfigStore::isPlainPortText(const QString &text)
 
 TargetConfig ConfigStore::loadTarget()
 {
-    // 「记住设置」不勾 = 不恢复目标连接信息。
+    // 「记住设置」这个键**恒为 true**，界面上已经没有任何地方能改它了。
     //
-    // 原来这个复选框只记录**自己**被勾没被勾，实际落盘与恢复走的是另一条路：
-    //   落盘：saveTarget 无条件写 target/*
-    //   恢复：loadTarget 无条件读 target/*
-    // 于是用户取消勾选之后，IP/账号/密码照样写进配置文件、下次启动照样自动填回，
-    // 界面上那个勾选框等于摆设。
+    // 为什么不能继续"读一个可能为 false 的键"：
+    //   · 界面上的勾选框按客户意见移除后，这个键就成了**只写不读**的死键；
+    //   · 老配置里存着 false 的用户（v2.1 之前取消过勾选的那批），
+    //     升级上来会：启动时 loadTarget() 读不到自己的 IP/账号/口令（界面是空的），
+    //     而 saveTarget() 看到 false 还会把 ini 里的 target/* **整个删掉** ——
+    //     用户根本没机会表达过"别记"，连接信息却被静默抹掉了。
     //
-    // 这里必须在**读任何键之前**返回：不勾就不该把配置里的连接信息读出来。
-    if (!loadRememberSettings()) {
-        TargetConfig t;
-        t.port = 22;
-        t.autoAcceptHostKey = true;
-        return t;
-    }
-
+    // 所以这里不再看这个键，直接**永远记住**；老键在启动时迁移成 true（见 main()）。
     auto s = openSettings();
 
     TargetConfig t;
@@ -996,37 +1014,14 @@ void ConfigStore::saveTarget(const TargetConfig &target)
 {
     auto s = openSettings();
 
-    // 「记住设置」不勾 = 不保存目标连接信息，并且**清掉配置文件里原有的那些**。
+    // 「记住设置」恒为 true（界面上已无入口能改它）⇒ **无条件**写 target/*。
     //
-    // 清掉这一步是必须的：用户的直觉是"别把我的口令留在机器上"。
-    // 只是不写、却把旧密文留在文件里，等于没兑现。
-    //
-    // 这个闸门必须放在**最前面**：
-    //   1) 放在 password 分支之前 —— 不然「口令框是空的」那一支的
-    //      s->remove("target/password") 会在用户**没要求清空**的情况下
-    //      把那份"本机解不开、换台机器也许能解开"的密文删掉；
-    //   2) 放在任何 setValue 之前 —— 不勾就不能写。
-    if (!loadRememberSettings()) {
-        static const char *kTargetKeys[] = {
-            "host", "port", "user", "keyPath", "password",
-            "remoteRoot", "localRoot", "autoAcceptHostKey"
-        };
-        bool had = false;
-        for (unsigned i = 0; i < sizeof(kTargetKeys) / sizeof(kTargetKeys[0]); ++i) {
-            const QString key = QStringLiteral("target/") + QLatin1String(kTargetKeys[i]);
-            if (s->contains(key)) {
-                s->remove(key);
-                had = true;
-            }
-        }
-        flushSettings(s.get());
-        if (had) {
-            notice(QString::fromUtf8(u8"按「记住设置」的当前状态，配置文件里原有的目标连接信息"
-                                     u8"（IP、端口、账号、密码、私钥、目录）已经清除。"));
-        }
-        return;
-    }
-
+    // 原来这里有一道"不勾就删掉 target/*"的闸门。它的问题不是"清得狠"，
+    // 而是**它读的是一个界面上已经没人能改的键**：
+    //   老配置里存着 false 的用户升级上来 → 启动时读不回自己的连接信息，
+    //   而每次保存又会把 ini 里的 target/* 删掉 —— 用户没表达过"别记"，
+    //   信息却被抹了。界面上又没有地方能改回来，这属于**静默丢数据**。
+    // 现在语义定死成"永远记住"，闸门整段去掉。
     s->setValue(QStringLiteral("target/host"), target.host);
     s->setValue(QStringLiteral("target/port"), target.port);
     s->setValue(QStringLiteral("target/user"), target.user);

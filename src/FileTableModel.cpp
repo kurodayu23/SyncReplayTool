@@ -139,10 +139,12 @@ QVariant FileTableModel::data(const QModelIndex &index, int role) const
         case ColCreated:
             // 手册 §9.3.3：时间列 **100% 保留原有时间**。
             // 换成同步时间会让频谱时序回放错乱，二次增量判定也跟着失效。
-            return f.created.isValid() ? f.created.toString(QStringLiteral("MM-dd HH:mm"))
+            // 格式照定稿图：完整 yyyy-MM-dd HH:mm:ss（原来只写 MM-dd HH:mm，
+            // 丢了年份和秒，客户在图上看到的就是完整时间戳）。
+            return f.created.isValid() ? f.created.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
                                       : QString();
         case ColModified:
-            return f.modified.isValid() ? f.modified.toString(QStringLiteral("MM-dd HH:mm"))
+            return f.modified.isValid() ? f.modified.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
                                         : QString();
         case ColStatus: {
             FileState st = m_states.value(row);
@@ -235,9 +237,9 @@ QVariant FileTableModel::data(const QModelIndex &index, int role) const
             f.setPixelSize(11);
             f.setWeight(QFont::Normal);
         } else if (index.column() == ColName) {
-            const QString mono = Theme::resolvedMono();
-            if (!mono.isEmpty())
-                f.setFamily(mono);
+            // 文件名列用**比例字体**（定稿图实测：字符宽窄不一，
+            // "20261027_104500_870MHz_IQ.spe" 里 .spe 明显窄于数字）。
+            // 文件名不是数字列，等宽只会让它看起来像一列日志。
             f.setPixelSize(12);
             f.setWeight(QFont::Medium);
         }

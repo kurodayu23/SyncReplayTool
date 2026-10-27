@@ -634,6 +634,72 @@ int runSelfCheck()
                 << "\tpanelWritesCfg=" << (panelWrites ? 1 : 0)
                 << "\n";
 
+    // ----------------------------------------------------------------
+    // 「记住设置」必须**恒为 true**：连接信息不能被静默抹掉。
+    //
+    // 界面上那个勾选框按客户意见移除后，app/rememberSettings 就成了
+    // "程序里没有入口的开关"。之前它是**被读的**（loadTarget / saveTarget
+    // 两道闸门看这个键），于是老配置里存着 false 的用户升级上来会：
+    //   ① 启动时读不回自己的 IP/账号/口令（界面是空的）；
+    //   ② 每次保存又会把 ini 里的 target/* **整个删掉** ——
+    //      用户从没表达过"别记"，信息却被抹了，界面上还没地方能改回来。
+    //
+    // 判据：**故意**在沙箱 ini 里写 app/rememberSettings=false，
+    // 然后要求 ① loadTarget() 照样读得到 host；② saveTarget() 不会删掉
+    // target/*；③ 迁移函数把那个键改成 true。
+    // 变异锁：把 loadTarget/saveTarget 里的两道闸门放回去（读键 / 删键），
+    // 本项立刻红。
+    {
+        QTemporaryDir sandbox;
+        const QByteArray oldDir = qgetenv("SRT_CONFIG_DIR");
+        bool envOk = false;
+        if (sandbox.isValid()) {
+            qputenv("SRT_CONFIG_DIR", sandbox.path().toLocal8Bit());
+            envOk = true;
+        }
+        if (!envOk) {
+            ++bad;
+            out << "FAIL\tremember-settings-always-remember\tcannot create a temp sandbox\n";
+        } else {
+            {
+                QSettings ini(sandbox.filePath(QStringLiteral("SyncReplayTool.ini")),
+                              QSettings::IniFormat);
+                ini.setIniCodec("UTF-8");
+                ini.setValue(QStringLiteral("app/rememberSettings"), false);
+                ini.setValue(QStringLiteral("target/host"), QStringLiteral("192.168.77.9"));
+                ini.setValue(QStringLiteral("target/user"), QStringLiteral("remember-me"));
+                ini.sync();
+            }
+            const TargetConfig t1 = ConfigStore::loadTarget();
+            const bool readBack = (t1.host == QLatin1String("192.168.77.9"))
+                               && (t1.user == QLatin1String("remember-me"));
+
+            // 再存一次：闸门放回去的话，target/* 这一轮就会被删掉。
+            TargetConfig t2 = t1;
+            t2.host = QStringLiteral("10.0.0.8");
+            ConfigStore::saveTarget(t2);
+            const TargetConfig t3 = ConfigStore::loadTarget();
+            const bool survived = (t3.host == QLatin1String("10.0.0.8"));
+
+            // 老键迁移：false → true。
+            ConfigStore::migrateRememberSettingsToTrue();
+            const bool migrated = ConfigStore::loadRememberSettings();
+
+            const bool ok = readBack && survived && migrated;
+            if (!ok)
+                ++bad;
+            out << (ok ? "PASS\t" : "FAIL\t") << "remember-settings-always-remember"
+                << "\treadBack=" << (readBack ? 1 : 0)
+                << "\tsurvivedSave=" << (survived ? 1 : 0)
+                << "\tmigratedToTrue=" << (migrated ? 1 : 0)
+                << "\n";
+        }
+        if (oldDir.isEmpty())
+            qunsetenv("SRT_CONFIG_DIR");
+        else
+            qputenv("SRT_CONFIG_DIR", oldDir);
+    }
+
             // 自动同步状态与周期的持久化验证
             const bool asDefFalse = !ConfigStore::loadAutoSyncEnabled();
             ConfigStore::saveAutoSyncEnabled(true);
@@ -2951,6 +3017,22 @@ int main(int argc, char *argv[])
     // FileItem 要跨线程从扫描线程传回界面线程。没注册元类型的话
     // Qt 的排队连接会**直接把这个信号丢掉**，现象是点了扫描永远没反应。
     qRegisterMetaType<QVector<FileItem>>("QVector<FileItem>");
+
+    // 「记住设置」必须在这里、也就是**任何 target 配置被读或被写之前**就迁移成 true。
+    //
+    // 为什么：界面上那个「记住设置」勾选框已按客户意见移除（Jira Tools-60），
+    // 它的真实语义是「目标连接信息要不要写进本机配置文件」，而界面上已经
+    // 没有地方能改它了 —— 这个键只能恒为 true。
+    //
+    // 钉的位置很要紧。以前它写在**设置窗口的构造函数**里，于是：
+    //   1) 启动时 loadTarget() 先看到老配置里的 false → 直接返回空配置，
+    //      用户的 IP/账号/口令根本读不回来，界面是空的；
+    //   2) 更糟的是 saveTarget() 看到 false 会把 ini 里的 target/* **删掉**
+    //      （那是"用户没要求清空"的场景，用户根本没机会表达过意愿），
+    //      于是连接信息被静默抹掉。
+    // 闸门本身也已经从 loadTarget/saveTarget 里去掉（那里恒为"永远记住"），
+    // 这里只负责把老配置里那个没人能改的键迁移掉。
+    ConfigStore::migrateRememberSettingsToTrue();
 
     // 早于任何同步动作清残留。上次异常退出留下的 %TEMP%\srt_pass_* 是**明文口令**，
     // 正常退出时 cleanupSecrets() 会删，崩溃/强杀/断电则不会，只能下次启动补。

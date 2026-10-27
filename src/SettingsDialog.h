@@ -14,6 +14,7 @@ class QCheckBox;
 class QTimeEdit;
 class QTableWidget;
 class QFrame;
+class QScrollArea;
 class QWidget;
 
 // 「传输与工具设置」弹窗。
@@ -156,4 +157,6 @@ private:
     // 拖拽窗口位移
     bool   m_dragging = false;
     QPoint m_dragOffset;
+    // 规则表高度随规则数变化时，要跟着把滚动区/面板一起调高或调低。
+    QScrollArea *m_scrollArea = nullptr;
 };

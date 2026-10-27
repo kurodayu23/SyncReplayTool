@@ -41,6 +41,10 @@ public:
     // 「记住设置」勾选框的持久化（默认 true，允许用户选择下次是否沿用/记住设置）
     static bool                    loadRememberSettings();
     static void                    saveRememberSettings(bool remember);
+    // 老配置里的 app/rememberSettings=false 迁移成 true。
+    // 界面上那个勾选框已按客户意见移除 ⇒ 这个键只能恒为 true，
+    // 不迁移就会在 ini 里躺着一个"程序里没有入口的开关"。
+    static void                    migrateRememberSettingsToTrue();
 
     // 「自动同步」启用状态与检测周期的持久化（默认关闭）
     //
@@ -160,7 +164,9 @@ public:
     //
     // 原来这个复选框只记录自己被勾没被勾，实际的落盘与恢复走的是另一条路
     // （saveTarget 无条件写、loadTarget 无条件读），所以它等于摆设。
-    // 现在 saveTarget / loadTarget 两侧都加了闸门。
+    // 界面上那个勾选框已按客户意见移除（Jira Tools-60）⇒ 这个键恒为 true，
+    // saveTarget / loadTarget 两侧的闸门整段去掉，老键由
+    // migrateRememberSettingsToTrue() 在启动时迁移。
 
     // 最近一次落盘失败的原因。空串 = 上次写成功了。
     //
