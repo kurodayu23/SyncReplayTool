@@ -14,6 +14,7 @@
 #include <QElapsedTimer>
 #include <QLineEdit>
 #include <QTimeEdit>
+#include <QPushButton>
 #include <QRadioButton>
 #include <QProcess>
 #include <QFontMetrics>
@@ -1302,8 +1303,9 @@ int runSelfCheck()
             SettingsDialog dlg;
             QLineEdit *le = dlg.findChild<QLineEdit *>(QStringLiteral("settingAutoSyncInterval"));
             QTimeEdit *te = dlg.findChild<QTimeEdit *>(QStringLiteral("settingAutoSyncDailyTime"));
-            QRadioButton *ri = dlg.findChild<QRadioButton *>(QStringLiteral("chkAutoSyncModeInterval"));
-            QRadioButton *rd = dlg.findChild<QRadioButton *>(QStringLiteral("chkAutoSyncModeDaily"));
+            // 模式二选一现在是**分段按钮**（定稿图 .seg-group），不再是单选圆点。
+            QPushButton *ri = dlg.findChild<QPushButton *>(QStringLiteral("chkAutoSyncModeInterval"));
+            QPushButton *rd = dlg.findChild<QPushButton *>(QStringLiteral("chkAutoSyncModeDaily"));
             const bool found = (le && te && ri && rd);
             bool okDaily = false, okInterval = false;
             if (found) {
@@ -2337,7 +2339,8 @@ int runSelfCheck()
     }
 
     // ----------------------------------------------------------------
-    // 工具按钮：1 个工具显示工具名，多个仍是「打开」+「更多」，超长省略
+    // 工具按钮：1/2/3 个工具**全部**直接显示工具名；超过 3 个才折叠成
+    // 「前两个 + 第 3 格「…」」；超长名省略、按钮不许越列也不许消失
     {
         const QString toolName = QStringLiteral("Replayer");
 
@@ -2365,21 +2368,69 @@ int runSelfCheck()
         const QVector<QRect> oneRects = delegate.buttonRectsForTest(cell, oneLabels);
         const bool okSingleName = (oneLabels.size() == 1) && (oneLabels.at(0) == toolName);
 
-        // 多工具：必须仍然是「打开」+「更多」，两个都要有，且不能等于工具名
-        ToolRule two = one;
-        two.toolNames    << toolName << QStringLiteral("iqAnalyzer");
-        two.toolExePaths << QStringLiteral("/opt/tools/replayer") << QStringLiteral("/opt/tools/iq");
-        two.toolArgs     << QString() << QString();
+        // 造 n 个工具的规则。**必须每个都从头造**：
+        // `ToolRule two = one;` 是复制 —— one 里已经有 "Replayer" 了，
+        // 再 append 两个就成了 3 个工具，判据测的根本不是"2 个工具"这一档。
+        auto makeRule = [](int n) {
+            ToolRule r;
+            r.suffix = QStringLiteral("spe");
+            for (int i = 0; i < n; ++i) {
+                r.toolNames    << QStringLiteral("T%1").arg(i + 1);
+                r.toolExePaths << QStringLiteral("/opt/tools/t%1").arg(i + 1);
+                r.toolArgs     << QString();
+            }
+            return r;
+        };
+
+        // 2 个工具：两个都直接显示工具名，**不**折叠
+        const ToolRule two = makeRule(2);
         QHash<QString, ToolRule> twoHash;
         twoHash.insert(QStringLiteral("spe"), two);
         model.setFiles(files, twoHash, QStringLiteral("/data"));
         const QStringList twoLabels = delegate.buttonLabelsForTest(cell, 0, &model);
         const bool okTwo = (twoLabels.size() == 2)
-                           && !twoLabels.at(0).isEmpty() && !twoLabels.at(1).isEmpty()
-                           && twoLabels.at(0) != toolName && twoLabels.at(1) != toolName
-                           && (twoLabels.at(0) != twoLabels.at(1));
+                           && (twoLabels.at(0) == QStringLiteral("T1"))
+                           && (twoLabels.at(1) == QStringLiteral("T2"));
         // 反向锁：两条标签不能是空的（照抄成两个空串也会"size()==2"）
         const bool okNotBlank = !twoLabels.at(0).trimmed().isEmpty() && !twoLabels.at(1).trimmed().isEmpty();
+        // 两个按钮的矩形都必须画得出来：排不下就是空矩形，
+        // 空矩形在 paint 里被跳过、在 editorEvent 里被当成"没点中" ——
+        // 用户看到的是第二个按钮**消失**、点不动。
+        const QVector<QRect> twoRects = delegate.buttonRectsForTest(cell, twoLabels);
+        const bool okTwoRects = (twoRects.size() == 2)
+                                && !twoRects.at(0).isNull() && !twoRects.at(1).isNull()
+                                && (twoRects.at(1).right() <= cell.right() - 18);
+
+        // 3 个工具：三个**全部**显示，一个都不藏
+        const ToolRule three = makeRule(3);
+        QHash<QString, ToolRule> threeHash;
+        threeHash.insert(QStringLiteral("spe"), three);
+        model.setFiles(files, threeHash, QStringLiteral("/data"));
+        const QStringList threeLabels = delegate.buttonLabelsForTest(cell, 0, &model);
+        const bool okThree = (threeLabels.size() == 3)
+                             && (threeLabels.at(0) == QStringLiteral("T1"))
+                             && (threeLabels.at(1) == QStringLiteral("T2"))
+                             && (threeLabels.at(2) == QStringLiteral("T3"));
+        const QVector<QRect> threeRects = delegate.buttonRectsForTest(cell, threeLabels);
+        const bool okThreeRects = (threeRects.size() == 3)
+                                  && !threeRects.at(0).isNull()
+                                  && !threeRects.at(1).isNull()
+                                  && !threeRects.at(2).isNull()
+                                  && (threeRects.at(2).right() <= cell.right() - 18);
+
+        // 4 个工具：折叠成「前两个 + 第 3 格「…」，第 4 个只能出现在菜单里
+        const ToolRule four = makeRule(4);
+        QHash<QString, ToolRule> fourHash;
+        fourHash.insert(QStringLiteral("spe"), four);
+        model.setFiles(files, fourHash, QStringLiteral("/data"));
+        const QStringList fourLabels = delegate.buttonLabelsForTest(cell, 0, &model);
+        const bool okFour = (fourLabels.size() == 3)
+                            && (fourLabels.at(0) == QStringLiteral("T1"))
+                            && (fourLabels.at(1) == QStringLiteral("T2"))
+                            && (fourLabels.at(2) == QObject::tr("\xE2\x80\xA6"));
+        // 反向锁：第 4 个工具**不许**被画成按钮 ——
+        // 画出来就等于根本没折叠，这条判据要能抓住它。
+        const bool okNoFourth = !fourLabels.contains(QStringLiteral("T4"));
 
         // 超长名：必须出现省略号，且按钮矩形不许越界
         QString longName;
@@ -2406,13 +2457,21 @@ int runSelfCheck()
                                && (oneRects.at(0).right() <= cell.right() - 18);
 
         const bool ok = okSingleName && okTwo && okNotBlank && shorter && hasElide
-                        && rectOk && okShortUncut && oneRectOk;
+                        && rectOk && okShortUncut && oneRectOk
+                        && okTwoRects && okThree && okThreeRects && okFour && okNoFourth;
         if (!ok)
             ++bad;
         out << (ok ? "PASS\t" : "FAIL\t") << "tool-button-label"
             << "\tcellW=" << cell.width()
             << " singleLabel=" << (okSingleName ? 1 : 0)
-            << " multiStillGeneric=" << (okTwo ? 1 : 0) << " multiNotBlank=" << (okNotBlank ? 1 : 0)
+            << " twoNames=" << (okTwo ? 1 : 0) << " multiNotBlank=" << (okNotBlank ? 1 : 0)
+            << " twoRects=" << (okTwoRects ? 1 : 0)
+            << " threeNames=" << (okThree ? 1 : 0) << " threeRects=" << (okThreeRects ? 1 : 0)
+            // 诊断：把三个按钮实际画出来的文字打出来。
+            // 失败时一眼能看出是"被裁成省略号"还是"压根没画出来"，
+            // 不用再反推一遍字体度量。
+            << " threeLabels=[" << (threeLabels.isEmpty() ? QString() : threeLabels.join("|")) << "]"
+            << " fourFolded=" << (okFour ? 1 : 0) << " noFourthBtn=" << (okNoFourth ? 1 : 0)
             << " longElided=" << (hasElide ? 1 : 0)
             << " longLen=" << (longLabels.isEmpty() ? -1 : longLabels.at(0).length())
             << " origLen=" << longName.length()
@@ -2420,6 +2479,43 @@ int runSelfCheck()
             << " label=[" << (longLabels.isEmpty() ? QString() : longLabels.at(0)) << "]"
             << " rectInsideColumn=" << (rectOk ? 1 : 0)
             << " shortUncut=" << (okShortUncut ? 1 : 0)
+            << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // 带宽限制：预置档位齐全 + **自定义值放行** + 非法值回落不限速
+    //
+    // 自定义值这一条最容易写错：客户在界面上填了 12 MB/s，
+    // 如果归一化按"不在预置档位里"给抹成 0，那就是**偷偷取消了客户的限速**。
+    // 两条反向锁一起才有效：
+    //   - "非法值 → 0" 和 "自定义值 → 原样保留" 同时成立，
+    //     恒返回 0 的实现和恒返回入参的实现都过不了。
+    {
+        const QVector<int> opts = ConfigStore::bandwidthLimitOptionsMBps();
+        const bool hasZero  = opts.contains(0);
+        const bool hasAll   = opts.contains(1) && opts.contains(5) && opts.contains(10)
+                               && opts.contains(20) && opts.contains(50) && opts.contains(100);
+        const int custom = 12;
+        const bool okCustomKept = (ConfigStore::clampBandwidthMBps(custom) == custom)
+                                  && !opts.contains(custom);
+        const bool okBad = (ConfigStore::clampBandwidthMBps(-3) == 0)
+                           && (ConfigStore::clampBandwidthMBps(99999) == 0);
+        const bool okZero = (ConfigStore::clampBandwidthMBps(0) == 0);
+        const bool okRange = (ConfigStore::clampBandwidthMBps(ConfigStore::bandwidthCustomMinMBps())
+                              == ConfigStore::bandwidthCustomMinMBps())
+                             && (ConfigStore::clampBandwidthMBps(ConfigStore::bandwidthCustomMaxMBps())
+                                 == ConfigStore::bandwidthCustomMaxMBps());
+        const bool ok = hasZero && hasAll && okCustomKept && okBad && okZero && okRange;
+        if (!ok)
+            ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "bandwidth-range"
+            << "\tzero=" << (hasZero ? 1 : 0)
+            << " presets=" << (hasAll ? 1 : 0)
+            << " custom12Kept=" << (okCustomKept ? 1 : 0)
+            << " badFallsBack=" << (okBad ? 1 : 0)
+            << " bounds=" << (okRange ? 1 : 0)
+            << " optCount=" << opts.size()
+            << " customMax=" << ConfigStore::bandwidthCustomMaxMBps()
             << "\n";
     }
 
@@ -2782,7 +2878,7 @@ static int runSecretCheck(QApplication &app, int rounds)
     f.close();
 
     MainWindow w;
-    w.resize(830, 480);
+    w.resize(980, 460);
     sc.panel = w.syncPanelForTest();
     if (!sc.panel) {
         sc.out << "FAIL\tno-sync-panel" << "\n";
@@ -2961,7 +3057,11 @@ int main(int argc, char *argv[])
     MainWindow w;
     if (parser.isSet(optShotSettings)) {
         const QString shotPath = parser.value(optShotSettings);
-        w.resize(830, 480);
+        w.resize(980, 460);
+        // 截图探针**不弹窗**：WA_DontShowOnScreen 让窗口走完整的 Windows 字体
+        // 与布局（offscreen 平台没有字体，截出来全是空框），但一个像素都不上屏、
+        // 也不抢焦点。截图结果和真机显示完全一致。
+        w.setAttribute(Qt::WA_DontShowOnScreen, true);
         w.show();
         w.showSettingsForProbe();
         QTimer::singleShot(600, [&w, shotPath] {
@@ -2990,7 +3090,37 @@ int main(int argc, char *argv[])
     }
     if (parser.isSet(optShot)) {
         const QString shotPath = parser.value(optShot);
-        w.resize(830, 480);
+        w.resize(980, 460);
+        // 同上：不弹窗、不抢焦点，但用真实 Windows 字体渲染。
+        w.setAttribute(Qt::WA_DontShowOnScreen, true);
+        // SRT_SHOT_ROOT：往表格里灌一批样例文件 + 工具规则。
+        // 截图探针默认跑在空目录上，表格是空的 —— 那样根本看不出
+        // 行高、状态药丸、工具按钮这几样对不对。真实使用时目录里本来就有文件。
+        {
+            const QByteArray seedRoot = qgetenv("SRT_SHOT_ROOT");
+            SyncPanel *seedPanel = w.syncPanelForTest();
+            if (!seedRoot.isEmpty() && seedPanel) {
+                seedPanel->setLocalRootForTest(QString::fromLocal8Bit(seedRoot));
+                QVector<ToolRule> seedRules;
+                struct { const char *suffix; const char *tool; } seedData[] = {
+                    { "spe", "\xE4\xBF\xA1\xE5\x8F\xB7\xE5\x9B\x9E\xE6\x94\xBE" },       // 信号回放
+                    { "dat", "\xE6\x95\xB0\xE6\x8D\xAE\xE5\x88\x86\xE6\x9E\x90" },       // 数据分析
+                    { "h5",  "\xE9\xA2\x91\xE8\xB0\xB1\xE6\x9F\xA5\xE7\x9C\x8B" }        // 频谱查看
+                };
+                for (unsigned i = 0; i < sizeof(seedData) / sizeof(seedData[0]); ++i) {
+                    ToolRule r;
+                    r.suffix   = QString::fromLatin1(seedData[i].suffix);
+                    r.toolNames    << QString::fromUtf8(seedData[i].tool);
+                    // 工具路径必须**真实存在**：产品只在 exe 存在时才画工具按钮
+                    // （不存在就显示「未配置工具」）。这里直接用程序自己的 exe，
+                    // 哪个机器上都一定在。
+                    r.toolExePaths << QCoreApplication::applicationFilePath();
+                    seedRules << r;
+                }
+                seedPanel->setToolRulesForTest(seedRules);
+                seedPanel->scanFilesForTest();
+            }
+        }
         w.show();
         QTimer::singleShot(600, [&w, shotPath] {
             QApplication::processEvents();

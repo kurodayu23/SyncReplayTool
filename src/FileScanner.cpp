@@ -626,6 +626,19 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
             stack.append(qMakePair(sub, depth + 1));
         }
     }
+    // 列表按**修改时间倒序**排，同时间再按文件名升序。
+    //
+    // 定稿图里 5 个文件是"最近改动的在最上面"（104500 → 103000 → 101500 →
+    // 100000 → 前一天的 220000），而原来这里是纯字典序（20261026_… 排在
+    // 20261027_… 前面），和定稿图对不上。
+    //
+    // 同时间必须再按文件名排：不然同一秒里改的两个文件顺序会随机跳，
+    // 用户每刷新一次表格顺序就变。
+    std::sort(items.begin(), items.end(), [](const FileItem &a, const FileItem &b) {
+        if (a.modified != b.modified)
+            return a.modified > b.modified;
+        return a.relativePath < b.relativePath;
+    });
     return items;
 }
 

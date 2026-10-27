@@ -159,17 +159,17 @@ QVariant FileTableModel::data(const QModelIndex &index, int role) const
                                       : U("\xE5\x90\x8C\xE6\xAD\xA5\xE4\xB8\xAD ") + note;
             }
             case StateOk:
-                return U("\xE2\x9C\x93 \xE5\xB7\xB2\xE5\xAE\x8C\xE6\x88\x90");  // ✓ 已完成
+                return U("\xE5\xB7\xB2\xE5\x90\x8C\xE6\xAD\xA5");  // 已同步
             case StateFailed:
-                return U("\xE2\x9D\x8C \xE5\xA4\xB1\xE8\xB4\xA5");                // ✕ 失败
+                return U("\xE5\xA4\xB1\xE8\xB4\xA5");                // 失败
             case StateSkipped:
-                return U("\xE8\xBF\x9C\xE7\xAB\xAF\xE5\xB7\xB2\xE6\x9C\x89");    // 远端已有
+                return U("\xE5\xB7\xB2\xE8\xB7\xB3\xE8\xBF\x87");    // 已跳过
             case StateCanceled:
-                // 和「远端已有」必须分开：这一行是用户取消的结果，一个字节都没传。
+                // 和「已跳过」必须分开：这一行是用户取消的结果，一个字节都没传。
                 return U("\xE5\xB7\xB2\xE5\x8F\x96\xE6\xB6\x88");              // 已取消
             case StateWait:
             default:
-                return U("\xE5\xBE\x85\xE4\xBC\xA0\xE8\xBE\x93");                // 待传输
+                return U("\xE5\xBE\x85\xE5\x90\x8C\xE6\xAD\xA5");                // 待同步
             }
         }
         case ColTool:
@@ -181,29 +181,37 @@ QVariant FileTableModel::data(const QModelIndex &index, int role) const
     }
 
     // 徽章配色。按状态给药丸背景色，和 QSS 里的 statusXxx 保持同一组色。
+    //
+    // 这组色是 AP500BJ 深色版：底色都是深色，亮的是字。
+    // 原来那组（#1e3a8a / #064e3b …）是浅色界面时代的中蓝/深绿底，
+    // 放到深色底上会变成一块块刺眼的亮斑。
     case Qt::BackgroundRole: {
+        FileState st = m_states.value(row);
+        // 失败行**整行**红底（定稿图 .row-alert）：这一轮失败的文件必须一眼可见，
+        // 光靠状态列里一颗红标签，列表一长就淹没在其它行里。
+        if (st == StateFailed)
+            return Theme::rowAlertBg();
         if (index.column() != ColStatus)
             return QVariant();
-        FileState st = m_states.value(row);
         switch (st) {
-        case StateSyncing: return QColor(0x1e, 0x3a, 0x8a);
-        case StateOk:      return QColor(0x06, 0x4e, 0x3b);
-        case StateFailed:  return QColor(0x7f, 0x1d, 0x1d);
-        case StateSkipped: return QColor(0x13, 0x4e, 0x4a);
-        case StateCanceled: return QColor(0x78, 0x35, 0x0f);
-        default:           return QColor(0x2a, 0x30, 0x3c);
+        case StateSyncing: return QColor(0x13, 0x34, 0x65);
+        case StateOk:      return QColor(0x0b, 0x36, 0x25);
+        case StateFailed:  return QColor(0x5a, 0x17, 0x1d);
+        case StateSkipped: return QColor(0x10, 0x39, 0x3b);
+        case StateCanceled: return QColor(0x3a, 0x2a, 0x0a);
+        default:           return QColor(0x1a, 0x24, 0x38);
         }
     }
     case Qt::ForegroundRole: {
         if (index.column() == ColStatus) {
             FileState st = m_states.value(row);
             switch (st) {
-            case StateSyncing: return QColor(0x60, 0xa5, 0xfa);
-            case StateOk:      return QColor(0x34, 0xd3, 0x99);
-            case StateFailed:  return QColor(0xf8, 0x71, 0x71);
-            case StateSkipped: return QColor(0x2d, 0xd4, 0xbf);
+            case StateSyncing: return QColor(0x6d, 0xb0, 0xff);
+            case StateOk:      return QColor(0x4a, 0xde, 0x80);
+            case StateFailed:  return QColor(0xfc, 0xa5, 0xa5);
+            case StateSkipped: return QColor(0x6f, 0xd6, 0xde);
             case StateCanceled: return QColor(0xfb, 0xbf, 0x24);
-            default:           return QColor(0x94, 0xa3, 0xb8);
+            default:           return QColor(0x8f, 0xa0, 0xc0);
             }
         }
         if (index.column() == ColSize || index.column() == ColCreated || index.column() == ColModified)
@@ -236,11 +244,13 @@ QVariant FileTableModel::data(const QModelIndex &index, int role) const
         return f;
     }
     case Qt::TextAlignmentRole: {
+        // 数据列对齐同样照定稿图：数值与时间都是**左对齐**（表头左对齐、格子也左对齐，
+        // 起始 x 对得上），只有「同步状态」居中（药丸自己画宽度）。
         switch (index.column()) {
-        case ColSize:    return static_cast<int>(Qt::AlignRight | Qt::AlignVCenter);
         case ColStatus:  return Qt::AlignCenter;
+        case ColSize:
         case ColCreated:
-        case ColModified:return Qt::AlignCenter;
+        case ColModified:return static_cast<int>(Qt::AlignLeft | Qt::AlignVCenter);
         default:         return static_cast<int>(Qt::AlignLeft | Qt::AlignVCenter);
         }
     }
@@ -273,9 +283,24 @@ bool FileTableModel::setData(const QModelIndex &index, const QVariant &value, in
 
 QVariant FileTableModel::headerData(int section, Qt::Orientation orientation, int role) const
 {
-    if (role != Qt::DisplayRole)
-        return QVariant();
     if (orientation == Qt::Horizontal) {
+        // 表头对齐照定稿图：「文件名 / 文件大小 / 创建时间 / 修改时间」四列都是
+        // **左对齐**（表头文字和下面的数据文字起始于同一个 x），「同步状态 / 工具调用」
+        // 居中。默认表头是居中的，文件名那一列又宽，一居中就跟定稿图明显对不上。
+        if (role == Qt::TextAlignmentRole) {
+            switch (section) {
+            case ColCheck:    return static_cast<int>(Qt::AlignCenter);
+            case ColName:
+            case ColSize:
+            case ColCreated:
+            case ColModified: return static_cast<int>(Qt::AlignLeft | Qt::AlignVCenter);
+            case ColStatus:
+            case ColTool:     return static_cast<int>(Qt::AlignCenter);
+            default:          return QVariant();
+            }
+        }
+        if (role != Qt::DisplayRole)
+            return QVariant();
         switch (section) {
         case ColCheck:    return QString();  // 表头画全选框，不写字
         case ColName:     return U("\xE6\x96\x87\xE4\xBB\xB6\xE5\x90\x8D");                    // 文件名

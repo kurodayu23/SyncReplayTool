@@ -1,5 +1,6 @@
 ﻿#include "SettingsDialog.h"
 
+#include <cstdio>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGridLayout>
@@ -31,22 +32,21 @@
 namespace {
 const char *kTxtHost       = "\xE7\x9B\xAE\xE6\xA0\x87\xE7\x94\xb5\xE8\x84\x91 IP";      // 目标电脑 IP
 const char *kTxtPort       = "SSH \xE7\xAB\xAF\xE5\x8F\xA3";      // SSH 端口
-const char *kTxtKeyFile    = "\xE7\xA7\x81\xE9\x92\xA5\xE6\x96\x87\xE4\xBB\xB6";      // 私钥文件
+const char *kTxtKeyFile    = "SSH \xE7\xA7\x81\xE9\x92\xA5\xE6\x96\x87\xE4\xBB\xB6";      // SSH 私钥文件
 const char *kTxtBrowseFile = "\xE9\x80\x89\xE6\x8B\xA9\xE6\x96\x87\xE4\xBB\xB6";      // 选择文件
 const char *kTxtUser       = "\xE7\x99\xBB\xE5\xBD\x95\xE8\xB4\xA6\xE5\x8F\xB7";      // 登录账号
 const char *kTxtPassword   = "\xE7\x99\xBB\xE5\xBD\x95\xE5\xAF\x86\xE7\xA0\x81";      // 登录密码
-const char *kTxtRemoteRoot = "\xE7\x9B\xAE\xE6\xA0\x87\xE8\x90\xBD\xE7\x9B\x98\xE8\xB7\xAF\xE5\xBE\x84";  // 目标落盘路径
-const char *kTxtSourceDir  = "\xE6\x9C\xAC\xE6\x9C\xBA\xE6\x96\x87\xE4\xBB\xB6\xE7\x9B\xAE\xE5\xBD\x95";  // 本机文件目录
+const char *kTxtRemoteRoot = "\xE8\xBF\x9C\xE7\xAB\xAF\xE4\xBF\x9D\xE5\xAD\x98\xE7\x9B\xAE\xE5\xBD\x95";  // 远端保存目录
+const char *kTxtSourceDir  = "\xE6\x9C\xAC\xE6\x9C\xBA\xE5\x90\x8C\xE6\xAD\xA5\xE7\x9B\xAE\xE5\xBD\x95";  // 本机同步目录
 const char *kTxtBrowse     = "\xE9\x80\x89\xE6\x8B\xA9\xE7\x9B\xAE\xE5\xBD\x95";      // 选择目录
 const char *kTxtTools      = "\xE6\x96\x87\xE4\xBB\xB6\xE6\x89\x93\xE5\xBC\x80\xE5\xB7\xA5\xE5\x85\xB7";  // 文件打开工具
 const char *kTxtAddRule    = "+ \xE6\xB7\xBB\xE5\x8A\xA0\xE8\xA7\x84\xE5\x88\x99";    // + 添加规则
 const char *kTxtTestConn   = "\xE6\xB5\x8B\xE8\xAF\x95\xE7\xBD\x91\xE7\xBB\x9C\xE8\xBF\x9E\xE6\x8E\xA5";  // 测试网络连接
 const char *kTxtSave       = "\xE4\xBF\x9D\xE5\xAD\x98\xE8\xAE\xBE\xE7\xBD\xAE";      // 保存设置
-const char *kTxtDialogTitle= "\xE4\xBC\xA0\xE8\xBE\x93\xE4\xB8\x8E\xE5\xB7\xA5\xE5\x85\xB7\xE8\xAE\xBE\xE7\xBD\xAE";  // 传输与工具设置
+const char *kTxtDialogTitle= "\xE8\xAE\xBE\xE7\xBD\xAE";  // 设置
 const char *kTxtColSuffix  = "\xE6\x96\x87\xE4\xBB\xB6\xE7\xB1\xBB\xE5\x9E\x8B";      // 文件类型
 const char *kTxtColTool    = "\xE5\xB7\xA5\xE5\x85\xB7\xE5\x90\x8D\xE7\xA7\xB0";      // 工具名称
-const char *kTxtColPath    = "\xE5\x85\xB3\xE8\x81\x94\xE7\xA8\x8B\xE5\xBA\x8F\xE8\xB7\xAF\xE5\xBE\x84";  // 关联程序路径
-const char *kTxtHint       = "\xE6\x8F\x90\xE7\xA4\xBA\xEF\xBC\x9A\xE5\x88\x97\xE8\xA1\xA8\xE4\xB8\xAD\xE7\x9A\x84\xE5\xB7\xA5\xE5\x85\xB7\xE6\x8C\x89\xE9\x92\xAE\xE7\x9B\xB4\xE6\x8E\xA5\xE4\xBD\x9C\xE7\x94\xA8\xE4\xBA\x8E\xE5\xBD\x93\xE5\x89\x8D\xE9\x80\x89\xE4\xB8\xAD\xE7\x9A\x84\xE6\x96\x87\xE4\xBB\xB6\xE3\x80\x82";  // 提示：在列表中点击对应的工具按钮，即可直接打开选中文件。
+const char *kTxtColPath    = "\xE5\x85\xB3\x8C\xE8\x81\x94\xE7\xA8\x8B\xE5\xBA\x8F\xE8\xB7\xAF\xE5\xBE\x84";  // 关联程序路径
 // 带上范围：客户看得出可以填多少。
 // 原来这里只有"自动同步间隔"，而输入框挂了 QIntValidator(10, 86400)
 // —— 客户想填 5 秒会被**静默拒绝**（输入框不反应），以为软件坏了。
@@ -71,6 +71,30 @@ QLineEdit *mkInput(const char *objName, const QString &value, const QString &ph)
     e->setMaximumHeight(28);
     return e;
 }
+
+// 已经是 QString 的文案（比如运行时拼出来的组标题）。
+QLabel *mkLabelQ(const QString &text, const char *objName)
+{
+    QLabel *l = new QLabel(text);
+    l->setObjectName(QString::fromLatin1(objName));
+    return l;
+}
+
+// 一个带标题的分组卡片（定稿图 .grp-box：卡片 + 左上角一行组标题）。
+//
+// 设置窗口原来把所有字段**平铺**在一列里，一屏看下去全是输入框，
+// 不知道哪几个是一回事。定稿图分成三组：路径与网络 / 同步选项 / 文件打开工具。
+QFrame *mkGroupBox(const QString &title, QVBoxLayout **layOut)
+{
+    QFrame *box = new QFrame;
+    box->setObjectName(QStringLiteral("settingsGroup"));
+    QVBoxLayout *lay = new QVBoxLayout(box);
+    lay->setContentsMargins(14, 10, 14, 12);
+    lay->setSpacing(8);
+    lay->addWidget(mkLabelQ(title, "groupTitle"));
+    *layOut = lay;
+    return box;
+}
 } // namespace
 
 SettingsDialog::SettingsDialog(QWidget *parent)
@@ -94,7 +118,11 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     // 改成 Qt::Window 没有功能损失。
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
     setAttribute(Qt::WA_TranslucentBackground);
-    setFixedWidth(570);
+    // 定稿图（用户 2026-10-27 给的设置弹窗截图）实测宽度 960px，缩放比 1.5
+    // （标题栏 38px、弹窗边框 1px 都对得上）⇒ 逻辑宽度 = 960 / 1.5 = 640px。
+    // 原来的 570px 是照更早一版原型抄的，字段挤在一起（选择目录/选择文件按钮
+    // 直接被输入框顶掉）。HTML 定稿 .dialog-card 也是 640px。
+    setFixedWidth(640);
     // SettingsDialog.h 一直承诺"整体 max-height 80vh"，但构造函数里从来没实现：
     // 只有宽度上限，高度被 sizeHint 顶到 ~690px，而 X11 分配的窗口只有 533px，
     // 无边框 + 透明背景下没有 WM 兜底，超出部分直接被裁 —— 实测"本机文件目录 /
@@ -102,7 +130,7 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     // 中间那块是 QScrollArea，限高之后自然出滚动条，字段一条都不会丢。
     const QRect avail = QGuiApplication::primaryScreen()->availableGeometry();
     setMinimumHeight(320);
-    setMaximumHeight(qMax(320, avail.height() * 4 / 5));
+    setMaximumHeight(qMax(320, avail.height() - 40));
 
     QVBoxLayout *outerLayout = new QVBoxLayout(this);
     outerLayout->setContentsMargins(10, 10, 10, 10);
@@ -116,7 +144,10 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     cardLayout->setContentsMargins(0, 0, 0, 0);
     cardLayout->setSpacing(0);
 
-    // ---- 顶栏（图三风格：左侧科技蓝齿轮 + 标题，右侧细叉关闭，可拖动）----
+    // 顶栏：左边只有「设置」两个字，右边一个细叉关闭，可拖动。
+    //
+    // 原来标题前面还有一颗齿轮 —— 定稿图的设置弹窗标题栏**没有**这颗齿轮，
+    // 顶部栏只有标题和叉。齿轮反而和主窗口那颗撞车，容易被当成两套设置入口。
     m_header = new QFrame;
     m_header->setObjectName(QStringLiteral("dialogHeader"));
     m_header->setFixedHeight(44);
@@ -124,14 +155,6 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     QHBoxLayout *hl = new QHBoxLayout(m_header);
     hl->setContentsMargins(18, 0, 12, 0);
     hl->setSpacing(8);
-
-    QLabel *gearLabel = new QLabel;
-    // 深色下原来取 #60a5fa。gearIcon() 漏了 setPen、画出来一直是 Qt 默认黑，
-    // 这个色其实一直没生效过（见 Theme.h gearIcon 注释）。现在 pen 补上了，
-    // 统一走 Theme::chromeIcon()，两套主题各一份，不再在这里另挑一个蓝。
-    gearLabel->setPixmap(Theme::gearIcon(16, Theme::chromeIcon()));
-    gearLabel->setFixedSize(16, 16);
-    hl->addWidget(gearLabel);
 
     QLabel *titleLabel = mkLabel(kTxtDialogTitle, "dialogTitle");
     QFont tf = titleLabel->font();
@@ -166,8 +189,20 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     scroll->setWidget(body);
     cardLayout->addWidget(scroll, 1);
 
-    // 1. 本机文件目录 + 选择目录
-    bl->addWidget(mkLabel(kTxtSourceDir, "settingLabel"));
+    // ==== 组 1：路径与网络 ====
+    //
+    // 定稿图把设置窗口分成三组卡片：路径与网络 / 同步选项 / 文件打开工具。
+    // 原来所有字段**平铺**在一列里，一屏看下去全是输入框，
+    // 哪几个是一回事、哪个属于哪块，完全看不出来。
+    QVBoxLayout *netLay = nullptr;
+    QFrame *gNet = mkGroupBox(QString::fromUtf8(u8"路径与网络"), &netLay);
+    // 定稿图「路径与网络」这一组实测高 267px（截图 960×1129，1.5 倍缩放），
+    // 默认间距 8 会把它撑到 299px。四行字段各挤 4px，整体正好回到定稿图。
+    netLay->setSpacing(4);
+    bl->addWidget(gNet);
+
+    // 1.1 本机同步目录 + 选择目录
+    netLay->addWidget(mkLabel(kTxtSourceDir, "settingLabel"));
     QHBoxLayout *srcRow = new QHBoxLayout;
     srcRow->setSpacing(8);
     m_sourceDir = mkInput("settingSourceDir", QString(),
@@ -178,10 +213,10 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     browse->setCursor(Qt::PointingHandCursor);
     srcRow->addWidget(m_sourceDir, 1);
     srcRow->addWidget(browse);
-    bl->addLayout(srcRow);
+    netLay->addLayout(srcRow);
     connect(browse, SIGNAL(clicked()), this, SLOT(browseSourceDir()));
 
-    // 2. 目标电脑 IP + SSH 端口（两列并排）
+    // 1.2 目标电脑 IP + SSH 端口（两列并排）
     //
     // 端口这一栏以前不存在，于是 ssh 一律连 22。可后端从一开始就是支持的：
     // ConfigStore 存 target/port（默认 22）、RsyncRunner 用 `ssh -p <端口>`。
@@ -202,51 +237,56 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     g1->addWidget(m_port, 1, 1);
     g1->setColumnStretch(0, 1);
     g1->setColumnStretch(1, 0);
-    bl->addLayout(g1);
+    netLay->addLayout(g1);
 
-    // 3. 登录账号 + 登录密码（两列并排）
-    QGridLayout *g2 = new QGridLayout;
-    g2->setSpacing(10);
-    g2->addWidget(mkLabel(kTxtUser, "settingLabel"), 0, 0);
-    g2->addWidget(mkLabel(kTxtPassword, "settingLabel"), 0, 1);
+    // 1.3 远端保存目录 + 登录账号（两列并排）
+    //
+    // 字段顺序照定稿图：远端保存目录在登录账号**左边**、同一行。
+    // 原来远端保存目录被排到私钥那一行下面，一眼看过去顺序是乱的。
+    QGridLayout *g3 = new QGridLayout;
+    g3->setSpacing(10);
+    g3->addWidget(mkLabel(kTxtRemoteRoot, "settingLabel"), 0, 0);
+    g3->addWidget(mkLabel(kTxtUser, "settingLabel"), 0, 1);
+    m_remoteRoot = mkInput("settingRemoteRoot", QString(),
+                           QString::fromUtf8("\xE4\xBE\x8B\xE5\xA6\x82\xEF\xBC\x9A\x44:/Data"));  // 例如: D:/Data
     m_user = mkInput("settingUser", QString(),
                      QString::fromUtf8("\xE4\xBE\x8B\xE5\xA6\x82\xEF\xBC\x9A\x41\x64ministrator"));  // 例如: Administrator
+    g3->addWidget(m_remoteRoot, 1, 0);
+    g3->addWidget(m_user, 1, 1);
+    g3->setColumnStretch(0, 1);
+    g3->setColumnStretch(1, 1);
+    netLay->addLayout(g3);
+
+    // 1.4 登录密码 + SSH 私钥文件（+ 选择文件）
+    //
+    // 私钥这一栏（选填）：填了就用密钥认证，不填就回落到密码认证 ——
+    // RsyncRunner 一直按这个语义在跑（`useKey()` 为真时走 `ssh -i`，
+    // 并额外用 `-o` 关掉密码交互；为假且密码非空时走 askpass 脚本喂密码）。
+    // 同样地：ConfigStore 存 target/keyPath，后端全支持，**只有界面没接上**。
+    // 为什么要补：企业客户基本都改成密钥认证了，没有这一栏他们只能改配置文件。
+    QGridLayout *g4 = new QGridLayout;
+    g4->setSpacing(10);
+    g4->addWidget(mkLabel(kTxtPassword, "settingLabel"), 0, 0);
+    g4->addWidget(mkLabel(kTxtKeyFile, "settingLabel"), 0, 1);
     m_password = mkInput("settingPassword", QString(),
                          QString::fromUtf8("\xE8\xBE\x93\xE5\x85\xA5\xE8\xBF\x9C\xE7\xA8\x8B\xE7\x99\xBB\xE5\xBD\x95\xE5\xAF\x86\xE7\xA0\x81"));  // 输入远程登录密码
     m_password->setEchoMode(QLineEdit::Password);
-    g2->addWidget(m_user, 1, 0);
-    g2->addWidget(m_password, 1, 1);
-    g2->setColumnStretch(0, 1);
-    g2->setColumnStretch(1, 1);
-    bl->addLayout(g2);
-
-    // 3b. 私钥文件（选填）
-    //
-    // 填了就用密钥认证，不填就回落到密码认证 —— RsyncRunner 一直按这个语义在跑
-    // （RsyncRunner.cpp: `useKey()` 为真时走 `ssh -i`，并额外用 `-o` 关掉密码交互；
-    //  为假且密码非空时走 askpass 脚本喂密码）。
-    // 同样地：ConfigStore 存 target/keyPath，后端全支持，**只有界面没接上**。
-    //
-    // 为什么要补：企业客户基本都改成密钥认证了，没有这一栏他们只能改配置文件。
-    bl->addWidget(mkLabel(kTxtKeyFile, "settingLabel"));
-    QHBoxLayout *keyRow = new QHBoxLayout;
-    keyRow->setSpacing(8);
     m_keyPath = mkInput("settingKeyPath", QString(),
                         QString::fromUtf8("\xE7\x95\x99\xE7\xA9\xBA\xE5\x88\x99\xE7\x94\xA8\xE5\xAF\x86\xE7\xA0\x81\xE7\x99\xBB\xE5\xBD\x95"));  // 留空则用密码登录
     QPushButton *keyBrowse = new QPushButton(QString::fromUtf8(kTxtBrowseFile));
     keyBrowse->setObjectName(QStringLiteral("btnBrowseKey"));
     keyBrowse->setFixedHeight(28);
     keyBrowse->setCursor(Qt::PointingHandCursor);
+    QHBoxLayout *keyRow = new QHBoxLayout;
+    keyRow->setSpacing(8);
     keyRow->addWidget(m_keyPath, 1);
     keyRow->addWidget(keyBrowse);
-    bl->addLayout(keyRow);
+    g4->addWidget(m_password, 1, 0);
+    g4->addLayout(keyRow, 1, 1);
+    g4->setColumnStretch(0, 1);
+    g4->setColumnStretch(1, 2);
+    netLay->addLayout(g4);
     connect(keyBrowse, SIGNAL(clicked()), this, SLOT(browseKeyFile()));
-
-    // 4. 目标落盘路径
-    bl->addWidget(mkLabel(kTxtRemoteRoot, "settingLabel"));
-    m_remoteRoot = mkInput("settingRemoteRoot", QString(),
-                           QString::fromUtf8("\xE4\xBE\x8B\xE5\xA6\x82\xEF\xBC\x9A\x44:/Data"));  // 例如: D:/Data
-    bl->addWidget(m_remoteRoot);
 
     // 4b. 自动同步：**两种互斥模式**（需求 10 的"类似 cron"）
     //
@@ -260,19 +300,81 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     //
     // 两套控件**互斥**：当前模式之外的那一套被**藏起来并禁用**，
     // 免得用户填了一个不生效的值还以为软件坏了。
-    QHBoxLayout *modeRow = new QHBoxLayout;
-    modeRow->setSpacing(16);
-    m_modeInterval = new QRadioButton(QString::fromUtf8(u8"按间隔重复"));
-    m_modeInterval->setObjectName(QStringLiteral("chkAutoSyncModeInterval"));
-    m_modeDaily = new QRadioButton(QString::fromUtf8(u8"每天定时"));
-    m_modeDaily->setObjectName(QStringLiteral("chkAutoSyncModeDaily"));
-    modeRow->addWidget(m_modeInterval);
-    modeRow->addWidget(m_modeDaily);
-    modeRow->addStretch(1);
-    bl->addLayout(modeRow);
+    // 「自动同步」总开关。
+    //
+    // 它原来摆在主界面底栏，Jira 上的方案评审把它放进了设置窗口：
+    // 底栏那一排只留「同步范围 / 带宽限制 / 开始同步」这种随手可调的，
+    // 需要配置的东西（开关、周期、时刻）归设置窗口 —— 同一个开关在两处
+    // 都能改，客户会不知道到底听谁的。
+    //
+    // 勾上 = 按下面选的周期自动跑；不勾 = 只在手动点「开始同步」时才跑。
+    // ==== 组 2：同步选项 ====
+    //
+    // 自动同步：**两种互斥模式**（需求 10 的"类似 cron"）
+    //
+    //   「按间隔重复」—— 老版本的行为，每 N 秒一次（默认 30 秒）
+    //   「每天定时」  —— 每天 HH:MM 一次（默认 03:00）
+    //
+    // 为什么不给 cron 表达式：需求 10 原文「不要让用户手填 cron」。
+    // 表达式会带出"看起来对但永远不触发"的组合，客户填错一个字段就静默停摆。
+    // 为什么默认 03:00：客户机多半晚上不干活、凌晨带宽空闲 ——
+    // 但这**只是默认值**，客户可以改（不同客户的上传/维护窗口不一样）。
+    //
+    // 两套控件**互斥**：当前模式之外的那一套被**藏起来并禁用**，
+    // 免得用户填了一个不生效的值还以为软件坏了。
+    QVBoxLayout *optLay = nullptr;
+    QFrame *gOpt = mkGroupBox(QString::fromUtf8(u8"同步选项"), &optLay);
+    bl->addWidget(gOpt);
 
-    // 4b-1. 间隔输入（只有「按间隔重复」时可见可用）
-    QHBoxLayout *intervalRow = new QHBoxLayout;
+    // 内嵌的控制板（定稿图 .switch-board）：比组卡片再深一档。
+    QFrame *board = new QFrame;
+    board->setObjectName(QStringLiteral("switchBoard"));
+    QVBoxLayout *boardLay = new QVBoxLayout(board);
+    boardLay->setContentsMargins(12, 10, 12, 10);
+    boardLay->setSpacing(9);
+    optLay->addWidget(board);
+
+    // 2.1 第一行：左侧「自动同步」总开关，右侧「同步方式」分段按钮。
+    //
+    // 「自动同步」总开关原来摆在主界面底栏，Jira 上的方案评审把它放进了设置窗口：
+    // 底栏那一排只留「同步范围 / 带宽限制 / 开始同步」这种随手可调的，
+    // 需要配置的东西（开关、周期、时刻）归设置窗口 —— 同一个开关在两处
+    // 都能改，客户会不知道到底听谁的。
+    //
+    // 勾上 = 按下面选的周期自动跑；不勾 = 只在手动点「开始同步」时才跑。
+    QHBoxLayout *topRow = new QHBoxLayout;
+    topRow->setSpacing(8);
+    m_autoSyncBox = new QCheckBox(QString::fromUtf8(u8"自动同步"));
+    m_autoSyncBox->setObjectName(QStringLiteral("chkAutoSyncEnabled"));
+    m_autoSyncBox->setCursor(Qt::PointingHandCursor);
+    m_autoSyncBox->setChecked(ConfigStore::loadAutoSyncEnabled());
+    m_autoSyncBox->setToolTip(QString::fromUtf8(
+        u8"勾上：按下面选的周期自动同步。\n"
+        u8"不勾：只在手动点「开始同步」时同步。"));
+    topRow->addWidget(m_autoSyncBox);
+    topRow->addStretch(1);
+    topRow->addWidget(mkLabelQ(QString::fromUtf8(u8"同步方式"), "settingHint"));
+
+    // 模式二选一。定稿图上是**分段按钮**（选中的蓝底白字），不是单选圆点 ——
+    // 两颗单选圆点挂在设置窗口里太像表单控件，和整套 AP500BJ 的直角按钮语言不一致。
+    m_modeInterval = new QPushButton(QString::fromUtf8(u8"按间隔重复"));
+    m_modeInterval->setObjectName(QStringLiteral("chkAutoSyncModeInterval"));
+    m_modeInterval->setCheckable(true);
+    m_modeInterval->setAutoExclusive(true);
+    m_modeInterval->setCursor(Qt::PointingHandCursor);
+    m_modeDaily = new QPushButton(QString::fromUtf8(u8"每天定时"));
+    m_modeDaily->setObjectName(QStringLiteral("chkAutoSyncModeDaily"));
+    m_modeDaily->setCheckable(true);
+    m_modeDaily->setAutoExclusive(true);
+    m_modeDaily->setCursor(Qt::PointingHandCursor);
+    topRow->addWidget(m_modeInterval);
+    topRow->addWidget(m_modeDaily);
+    boardLay->addLayout(topRow);
+
+    // 2.2 间隔输入（只有「按间隔重复」时可见可用）
+    QWidget *intervalBox = new QWidget;
+    QHBoxLayout *intervalRow = new QHBoxLayout(intervalBox);
+    intervalRow->setContentsMargins(0, 0, 0, 0);
     intervalRow->setSpacing(8);
     QLabel *intervalLabel = mkLabel(kTxtAutoInterval, "settingLabel");
     m_autoSyncInterval = mkInput("settingAutoSyncInterval",
@@ -302,10 +404,13 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     intervalRow->addStretch(1);
     intervalRow->addWidget(m_autoSyncInterval);
     intervalRow->addWidget(secLabel);
-    bl->addLayout(intervalRow);
+    boardLay->addWidget(intervalBox);
+    m_intervalRowBox = intervalBox;
 
-    // 4b-2. 定点时刻选择（只有「每天定时」时可见可用）
-    QHBoxLayout *dailyRow = new QHBoxLayout;
+    // 2.3 定点时刻选择（只有「每天定时」时可见可用）
+    QWidget *dailyBox = new QWidget;
+    QHBoxLayout *dailyRow = new QHBoxLayout(dailyBox);
+    dailyRow->setContentsMargins(0, 0, 0, 0);
     dailyRow->setSpacing(8);
     QLabel *dailyLabel = mkLabel(kTxtDailyTime, "settingLabel");
     m_autoSyncDailyTime = new QTimeEdit(AutoSyncScheduler::defaultDailyTime());
@@ -318,24 +423,16 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     dailyRow->addWidget(dailyLabel);
     dailyRow->addStretch(1);
     dailyRow->addWidget(m_autoSyncDailyTime);
-    bl->addLayout(dailyRow);
+    boardLay->addWidget(dailyBox);
+    m_dailyRowBox = dailyBox;
 
-    // 模式的初始状态来自配置（老配置没有模式键 → 按间隔重复 = 老版本行为）。
-    //
-    // 顺序很重要：先 setChecked 再 connect。
-    // 反过来的话，构造时的 setChecked 会触发 toggled →
-    // onAutoSyncModeChanged() 把"读到的状态"当成"用户刚点的"处理。
-    // （这里不会落盘 —— 模式只在点「保存设置」时才写。）
-    m_modeInterval->setChecked(ConfigStore::loadAutoSyncMode() != AutoSyncScheduler::ModeDaily);
-    connect(m_modeInterval, &QRadioButton::toggled, this, &SettingsDialog::onAutoSyncModeChanged);
-    connect(m_modeDaily, &QRadioButton::toggled, this, &SettingsDialog::onAutoSyncModeChanged);
-    onAutoSyncModeChanged();
-
-    // 4c. 开机自动启动
+    // 2.4 开机自动启动（定稿图里靠右对齐）
     //
     // **只负责启动程序**，不擅自开启自动同步：程序被自启拉起来后，
     // 沿用用户上次勾选的「自动同步」状态（sync/autoSyncEnabled）。
     // 这一点必须写在界面上 —— 否则客户会以为"开了开机自启就等于每天自动传"。
+    QHBoxLayout *autoStartRow = new QHBoxLayout;
+    autoStartRow->addStretch(1);
     m_autoStartBox = new QCheckBox(QString::fromUtf8(u8"开机自动启动"));
     m_autoStartBox->setObjectName(QStringLiteral("chkAutoStart"));
     m_autoStartBox->setCursor(Qt::PointingHandCursor);
@@ -349,23 +446,28 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     // 把"读到的状态"当成"用户点的"写回配置 —— 老配置会被写脏。
     m_autoStartBox->setChecked(ConfigStore::loadAutoStartEnabled());
     connect(m_autoStartBox, &QCheckBox::toggled, this, &SettingsDialog::onAutoStartToggled);
-    bl->addWidget(m_autoStartBox);
+    autoStartRow->addWidget(m_autoStartBox);
+    boardLay->addLayout(autoStartRow);
 
-    // 5. 文件打开工具规则表（图四）
-    QHBoxLayout *toolsHead = new QHBoxLayout;
-    QLabel *toolsLabel = mkLabel(kTxtTools, "dialogTitle");
-    QFont rtf = toolsLabel->font();
-    rtf.setBold(true);
-    rtf.setPixelSize(12);
-    toolsLabel->setFont(rtf);
-    toolsHead->addWidget(toolsLabel);
-    toolsHead->addStretch(1);
+    // 模式的初始状态来自配置（老配置没有模式键 → 按间隔重复 = 老版本行为）。
+    //
+    // 顺序很重要：先 setChecked 再 connect。
+    // 反过来的话，构造时的 setChecked 会触发 toggled →
+    // onAutoSyncModeChanged() 把"读到的状态"当成"用户刚点的"处理。
+    // （这里不会落盘 —— 模式只在点「保存设置」时才写。）
+    {
+        const bool dailyMode = (ConfigStore::loadAutoSyncMode() == AutoSyncScheduler::ModeDaily);
+        m_modeDaily->setChecked(dailyMode);
+        m_modeInterval->setChecked(!dailyMode);
+    }
+    connect(m_modeInterval, &QPushButton::toggled, this, &SettingsDialog::onAutoSyncModeChanged);
+    connect(m_modeDaily, &QPushButton::toggled, this, &SettingsDialog::onAutoSyncModeChanged);
+    onAutoSyncModeChanged();
 
-    m_addRule = new QPushButton(QString::fromUtf8(kTxtAddRule));
-    m_addRule->setObjectName(QStringLiteral("btnAddRule"));
-    m_addRule->setCursor(Qt::PointingHandCursor);
-    toolsHead->addWidget(m_addRule);
-    bl->addLayout(toolsHead);
+    // ==== 组 3：文件打开工具 ====
+    QVBoxLayout *toolsLay = nullptr;
+    QFrame *gTools = mkGroupBox(QString::fromUtf8(kTxtTools), &toolsLay);
+    bl->addWidget(gTools);
 
     m_ruleTable = new QTableWidget(0, 3);
     m_ruleTable->setObjectName(QStringLiteral("ruleTable"));
@@ -377,16 +479,26 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     m_ruleTable->verticalHeader()->setVisible(false);
     m_ruleTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_ruleTable->setShowGrid(false);
-    m_ruleTable->setFixedHeight(160);
+    // 定稿图「文件打开工具」这一组实测高 171px：组标题 + 规则表（表头 + 2 行）
+    // + 「+ 添加规则」按钮。规则表原来死锁 160px（能塞 4 行），整组被撑到 244px，
+    // 面板因此比定稿图高出 70 多 px、第三组差点被挤出屏幕。
+    m_ruleTable->setFixedHeight(96);
     m_ruleTable->horizontalHeader()->setStretchLastSection(true);
     m_ruleTable->setColumnWidth(0, 95);
     m_ruleTable->setColumnWidth(1, 140);
-    bl->addWidget(m_ruleTable);
+    toolsLay->addWidget(m_ruleTable);
 
-    QLabel *hint = mkLabel(kTxtHint, "settingHint");
-    hint->setWordWrap(true);
-    bl->addWidget(hint);
+    // 「+ 添加规则」放在表格**下面**（定稿图 .btn-add 就是这么排的），
+    // 原来它挂在标题行右边，和组标题挤在一起。
+    m_addRule = new QPushButton(QString::fromUtf8(kTxtAddRule));
+    m_addRule->setObjectName(QStringLiteral("btnAddRule"));
+    m_addRule->setCursor(Qt::PointingHandCursor);
+    toolsLay->addWidget(m_addRule, 0, Qt::AlignLeft);
 
+    // 定稿图里「文件打开工具」这一组是：标题 + 规则表 + 「+ 添加规则」，
+    // **下面没有提示文字**。原来这里多挂了一行「提示：在列表中点击对应的工具按钮…」。
+    // 用户要的是"跟定稿图完全一模一样"，这行字去掉。
+    // （行为本身没变：点工具按钮照样直接打开选中文件，写在手册里。）
     connect(m_addRule, SIGNAL(clicked()), this, SLOT(addRuleRow()));
 
     // ---- 底栏（图四风格：左侧[测试网络连接]，右侧[保存设置]）----
@@ -414,34 +526,16 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     m_saveTip->setVisible(false);
     fl->addWidget(m_saveTip);
 
-    m_rememberBox = new QCheckBox(QString::fromUtf8(u8"记住设置"));
-    m_rememberBox->setObjectName(QStringLiteral("chkRememberSettings"));
-    m_rememberBox->setCursor(Qt::PointingHandCursor);
-    m_rememberBox->setChecked(ConfigStore::loadRememberSettings());
-    connect(m_rememberBox, &QCheckBox::toggled, this, [](bool on) {
-        ConfigStore::saveRememberSettings(on);
-    });
-    // 「记住设置」的实际语义（2026-10-20 全文查证 ConfigStore 后确认，
-    // 2026-10-21 已让它真正生效）：
+    // 「记住设置」勾选框已按客户意见从界面上移除（Jira Tools-60）。
     //
-    // 勾上   —— 目标连接信息（IP、端口、账号、密码、私钥、本机目录、远端路径）
-    //           写进本机配置文件，下次启动自动填回；
-    // 不勾   —— 这些信息不写进配置文件，并且配置文件里原有的那一份会被清除
-    //           （清除时会在日志抽屉里说一声）。
+    // 它的真实语义是「目标连接信息要不要写进本机配置文件」—— 界面上只写
+    // 「记住设置」四个字，客户看不懂它管什么，评审时明确要求去掉。
     //
-    // 工具规则与同步规则不受它影响：那两组在各自的面板里，不在这个弹窗里。
-    //
-    // 原来的实现里这个勾选框只记录自己被勾没被勾，实际的落盘与恢复走的是
-    // 另一条路（saveTarget 无条件写、loadTarget 无条件读），所以它等于摆设。
-    // 现在 ConfigStore::saveTarget / loadTarget 两侧都加了闸门。
-    //
-    // 上面这段说明同时挂成 tooltip，让用户在界面上就能看到真实行为。
-    m_rememberBox->setToolTip(QString::fromUtf8(
-        u8"勾上：点「保存设置」后，目标电脑 IP、SSH 端口、登录账号、登录密码、私钥文件、"
-        u8"本机文件目录、目标落盘路径会写入本机配置文件，下次启动自动填回。\n"
-        u8"不勾：这些信息不写入本机配置文件；配置文件里原有的那一份会被清除。\n"
-        u8"工具规则与同步规则不受这个勾选框影响。"));
-    fl->addWidget(m_rememberBox);
+    // 底下的闸门还在（ConfigStore::saveTarget / loadTarget 会看这个键），
+    // 而界面上已经没有任何地方能改它了 —— 这个键必须被定死成「保存」：
+    // 否则老配置里存着 false 的人，升级后连接信息会突然不写盘，
+    // 而且界面上再也找不回来把它改回 true。
+    ConfigStore::saveRememberSettings(true);
     fl->addSpacing(10);
 
     m_btnSave = new QPushButton(QString::fromUtf8(kTxtSave));
@@ -450,6 +544,39 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     fl->addWidget(m_btnSave);
 
     cardLayout->addWidget(footer);
+
+    // ---- 面板高度：按内容整高显示，三组卡片一屏全露 ----
+    //
+    // 定稿图里「路径与网络 / 同步选项 / 文件打开工具」三组**一次全看得见**，没有滚动条。
+    //
+    // 原来窗口只长到 640×526：QScrollArea::sizeHint() 在内容还没真正上屏时算不准
+    // （Qt 5.9 会把它截到 viewport 的尺寸上限），于是窗口只够放下一组卡片，
+    // 第三组「文件打开工具」整组被裁掉 —— 用户根本看不到工具规则表。
+    //
+    // 这里用**内容布局自己算出来的**高度兜底：内容放得下就整高显示（不滚），
+    // 屏幕确实不够高（麒麟 768p 那种）才退回复制滚动，一个字段都不会丢。
+    bl->activate();
+    const int contentH = bl->sizeHint().height();
+    // setFixedHeight 会同时写死 minimumHeight，这里读它比读 sizeHint 准
+    // （sizeHint 对 QFrame 来说只是内部布局的建议值，不是实际高度）。
+    const int chromeH  = m_header->minimumHeight() + footer->minimumHeight()
+                       + outerLayout->contentsMargins().top() + outerLayout->contentsMargins().bottom();
+    // 限高按**屏幕实际可用高度**算，不按 80vh：80vh 是给麒麟 768p 那种矮屏留的，
+    // 在 1080p 上会白白砍掉 100 多 px，面板被迫滚动、三组卡片露不全。
+    // 留 40px 余量给窗口边框/任务栏，矮屏上仍然自动退回滚动。
+    const int limitH   = qMax(320, avail.height() - 40);
+    // 分层高度诊断（设 SRT_DEBUG_LAYOUT=1 才打印）：三组卡片各占多高、
+    // 内容一共多高、屏幕允许多高 —— 对不上定稿图时按这三个数定位。
+    if (!qgetenv("SRT_DEBUG_LAYOUT").isEmpty()) {
+        printf("[layout] net=%d opt=%d tools=%d content=%d chrome=%d limit=%d screen=%dx%d\n",
+               gNet->sizeHint().height(), gOpt->sizeHint().height(), gTools->sizeHint().height(),
+               contentH, chromeH, limitH, avail.width(), avail.height());
+        fflush(stdout);
+    }
+    if (contentH > 0 && contentH + chromeH <= limitH) {
+        scroll->setMinimumHeight(contentH);
+        setFixedHeight(contentH + chromeH);
+    }
 
     connect(m_btnSave, SIGNAL(clicked()), this, SLOT(onSaveClicked()));
     connect(test, SIGNAL(clicked()), this, SIGNAL(settingsTestConnectionRequested()));
@@ -509,6 +636,14 @@ void SettingsDialog::onSaveClicked()
     // 顺序反了的话，这一轮排程用的还是旧模式，要等下次开设置才对。
     ConfigStore::saveAutoSyncMode(autoSyncMode());
     ConfigStore::saveAutoSyncDailyTime(autoSyncDailyTime());
+    // 「自动同步」总开关也在这一刻落盘。
+    //
+    // 顺序同样重要：必须在 emit settingsAccepted() **之前** ——
+    // 那条信号会走到 SyncPanel::applyFromSettings()，它读的就是这个键
+    // （读到新的勾选状态才会重新排程）。顺序反了的话，
+    // 本轮排程仍按旧的开关状态走，要等下次打开设置才对。
+    if (m_autoSyncBox)
+        ConfigStore::saveAutoSyncEnabled(m_autoSyncBox->isChecked());
     emit settingsAccepted();
 
     // 落盘结果必须**如实**反映。
@@ -571,6 +706,15 @@ void SettingsDialog::onAutoSyncModeChanged()
         m_autoSyncDailyTime->setVisible(daily);
         m_autoSyncDailyTime->setEnabled(daily);
     }
+    // 整行一起藏：只藏输入框的话，"自动同步间隔"和"秒"两个标签会变成孤儿 ——
+    // 界面上剩一行"自动同步间隔　　秒"，中间是空的。
+    //
+    // 输入框仍然**单独**藏一次：自检判据 auto-sync-mode-exclusive-ui 判的是
+    // isHidden()（控件自己被 setVisible(false) 过），父容器藏起来不算。
+    if (m_intervalRowBox)
+        m_intervalRowBox->setVisible(!daily);
+    if (m_dailyRowBox)
+        m_dailyRowBox->setVisible(daily);
 }
 
 AutoSyncScheduler::Mode SettingsDialog::autoSyncMode() const
@@ -707,8 +851,9 @@ void SettingsDialog::loadConfig(const TargetConfig &target,
     if (m_autoSyncDailyTime)
         m_autoSyncDailyTime->setTime(ConfigStore::loadAutoSyncDailyTime());
     onAutoSyncModeChanged();
-    if (m_rememberBox)
-        m_rememberBox->setChecked(ConfigStore::loadRememberSettings());
+    // 「自动同步」总开关：每次打开弹窗都按已存的值回填。
+    if (m_autoSyncBox)
+        m_autoSyncBox->setChecked(ConfigStore::loadAutoSyncEnabled());
 
     m_ruleTable->setRowCount(0);
     m_rowExists.clear();
@@ -893,13 +1038,13 @@ void SettingsDialog::showTestResult(const QString &text, bool ok, bool testing)
         return;
     if (testing) {
         m_testLabel->setText(text);
-        m_testLabel->setStyleSheet(QStringLiteral("color: #60a5fa; font-weight: 500; font-size: 11px;"));
+        m_testLabel->setStyleSheet(QStringLiteral("color: #6db0ff; font-weight: 500; font-size: 11px;"));
         m_testLabel->setVisible(true);
         return;
     }
     m_testLabel->setText(text);
-    m_testLabel->setStyleSheet(ok ? QStringLiteral("color: #34d399; font-weight: 600; font-size: 11px;")
-                                  : QStringLiteral("color: #f87171; font-weight: 600; font-size: 11px;"));
+    m_testLabel->setStyleSheet(ok ? QStringLiteral("color: #4ade80; font-weight: 600; font-size: 11px;")
+                                  : QStringLiteral("color: #fca5a5; font-weight: 600; font-size: 11px;"));
     m_testLabel->setVisible(true);
 }
 

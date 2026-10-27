@@ -11,10 +11,10 @@ class QLineEdit;
 class QLabel;
 class QPushButton;
 class QCheckBox;
-class QRadioButton;
 class QTimeEdit;
 class QTableWidget;
 class QFrame;
+class QWidget;
 
 // 「传输与工具设置」弹窗。
 //
@@ -84,15 +84,9 @@ private:
     QPushButton *m_btnClose = nullptr;
     QPushButton *m_addRule = nullptr;
     QPushButton *m_btnSave = nullptr;
-    // 「记住设置」复选框。
-    //
-    // 实际语义（2026-10-20 查证 ConfigStore 全文后确认）：
-    // 它的开关状态只被记到 ini 的 app/rememberSettings 键；
-    // 目标连接信息（IP / 端口 / 账号 / 密码 / 私钥 / 本机目录 / 目标落盘路径）
-    // 的落盘与恢复由「保存设置」这一动作决定，路径在 ConfigStore::saveTarget /
-    // ConfigStore::loadTarget。界面上的行为说明放在 SettingsDialog.cpp 的构造里
-    // （tooltip），供用户直接读到。
-    QCheckBox   *m_rememberBox = nullptr;
+    // 「自动同步」总开关。原先它摆在主界面底栏，方案评审后移进设置窗口，
+    // 底栏不再重复同一个开关。
+    QCheckBox   *m_autoSyncBox = nullptr;
     QLabel      *m_testLabel = nullptr;
     QLabel      *m_saveTip = nullptr;
     QTableWidget *m_ruleTable = nullptr;
@@ -107,10 +101,18 @@ private:
     QLineEdit *m_autoSyncInterval = nullptr;
 
     // 自动同步模式二选一：按间隔重复 / 每天定时。
-    QRadioButton *m_modeInterval = nullptr;
-    QRadioButton *m_modeDaily = nullptr;
+    //
+    // 这两个是**分段按钮**（定稿图 .seg-group），不是单选圆点：
+    // 两颗 radio 挂在设置窗口里太像表单控件，和整套 AP500BJ 的直角按钮语言不一致。
+    // 互斥靠 setAutoExclusive(true) —— 和 radio 的 autoExclusive 同义。
+    QPushButton *m_modeInterval = nullptr;
+    QPushButton *m_modeDaily = nullptr;
     // 每天定点的时刻选择器（只有「每天定时」模式下可用）。
     QTimeEdit *m_autoSyncDailyTime = nullptr;
+    // 间隔行 / 定点行的**整行**容器：模式切换时整行藏掉，
+    // 只藏输入框的话，标签会变成孤儿（"自动同步间隔  秒"）。
+    QWidget    *m_intervalRowBox = nullptr;
+    QWidget    *m_dailyRowBox = nullptr;
 
     // 「开机自动启动」勾选框。
     //

@@ -15,18 +15,20 @@ struct Pill {
     bool pulse;     // 同步中带一个 5px 的呼吸点
 };
 
-// 三种色照抄原型 .status-ok / .status-wait / .status-syncing。
-// 失败与跳过原型没给（HTML 里只出现过这三种 class），但传输失败必须一眼看出来，
-// 所以按同一套药丸语法补红、琥珀两色 —— 缺色会落回浏览器默认样式，
-// 界面上就是一个没背景的裸文字。
-//
-// 配色全部取自 Theme 的 chipXxx()，不再在本文件里写死深色值：
-// 这里原来每个 case 都直接 QColor(0x..)，浅色模式下界面变白而药丸仍是深底，
-// 白色面板上压着一排深灰块。语义色（哪一档表示什么）归 Theme 管，
+// 配色全部取自 Theme 的 chipXxx()，不在本文件里写死：
+// 语义色（哪一档表示什么、底/字/边各是什么色）归 Theme 管，
 // 这里只负责"这个状态用哪一档"。
+//
+// AP500BJ 深色版（ui_preview.html 的 .tag-*）：
+//   同步中 底#133465 字#6db0ff 边#1f6fe0
+//   已同步 底#0b3625 字#4ade80 边#059669
+//   失败   底#5a171d 字#fca5a5 边#dc2626
+//   待同步 底#1a2438 字#8fa0c0 边#2b3a57
+//   已跳过 底#10393b 字#6fd6de 边#1f6b70
+// Theme 那一层是**唯一**色源：改配色只改 Theme.h。
 Pill pillOf(FileTableModel::FileState st)
 {
-    Pill p = { Theme::textSub(), Theme::chipWait().bg, Theme::chipWait().border, false, false };
+    Pill p = { Theme::chipWait().fg, Theme::chipWait().bg, Theme::chipWait().border, false, false };
     switch (st) {
     case FileTableModel::StateOk:
         p = { Theme::chipOk().fg, Theme::chipOk().bg, Theme::chipOk().border, false, false };
@@ -65,9 +67,14 @@ void StatusPillDelegate::paint(QPainter *painter, const QStyleOptionViewItem &op
     const FileTableModel *model = qobject_cast<const FileTableModel *>(index.model());
     const QString text = index.data(Qt::DisplayRole).toString();
 
-    // 选中行底色走 Theme：原来这里和 ToolColumnDelegate 都写死深蓝 #1e3a8a，
-    // 浅色模式下一选中就是一条深蓝带压在白底上。ToolColumnDelegate 同一处已改。
-    QColor rowBg = (option.state & QStyle::State_Selected) ? Theme::rowSelectedBg() : Theme::panelBg();
+    // 行底色：选中 / 失败红底 / 普通。
+    // 三种必须在**每一列**上一致 —— 这一列是自绘的，原来固定刷 panelBg，
+    // 于是失败行的红底被这一列和工具列冲掉，红底断成一截一截。
+    QColor rowBg = Theme::panelBg();
+    if (option.state & QStyle::State_Selected)
+        rowBg = Theme::rowSelectedBg();
+    else if (model && model->fileState(index.row()) == FileTableModel::StateFailed)
+        rowBg = Theme::rowAlertBg();
     painter->fillRect(option.rect, rowBg);
 
     if (!model || text.isEmpty()) {
@@ -112,7 +119,10 @@ void StatusPillDelegate::paint(QPainter *painter, const QStyleOptionViewItem &op
     painter->setRenderHint(QPainter::Antialiasing, true);
     painter->setPen(QPen(p.border, 1));
     painter->setBrush(p.bg);
-    painter->drawRoundedRect(pill.adjusted(0, 0, -1, -1), h / 2.0, h / 2.0);
+    // AP500BJ 定稿：状态标签是**直角**（ui_preview.html 的 .tag 是 2px），
+    // 不是胶囊。这里原来画的是 h/2 全圆角 —— 一排药丸压在深色表格里像一串气泡，
+    // 和 AP500BJ「直角外框 + 发丝分隔」的整体语言对不上。
+    painter->drawRoundedRect(pill.adjusted(0, 0, -1, -1), 2.0, 2.0);
 
     QRect textR(pill);
     textR.setLeft(textR.left() + padH + dot + gap);
@@ -123,9 +133,9 @@ void StatusPillDelegate::paint(QPainter *painter, const QStyleOptionViewItem &op
 
     if (p.pulse) {
         painter->setPen(Qt::NoPen);
-        // 原型 .pulse-dot { background: #2563eb }。文字色是 #1d4ed8（.status-syncing），
-        // 两者不是同一个蓝 —— 跟着原型走。
-        painter->setBrush(QColor(0x25, 0x63, 0xeb));
+        // AP500BJ：呼吸点用「同步中」徽章的亮字色 #6db0ff。
+        // 底色是 #133465（深蓝），原来的 #2563eb 压在上面几乎看不出在动。
+        painter->setBrush(QColor(0x6d, 0xb0, 0xff));
         painter->drawEllipse(QPointF(pill.left() + padH + 2.5, pill.center().y() + 0.5), 2.5, 2.5);
     }
     painter->restore();

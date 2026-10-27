@@ -6,6 +6,8 @@
 #include <QHeaderView>
 #include <QTableView>
 #include <QCheckBox>
+#include <QToolButton>
+#include <QInputDialog>
 #include <QLabel>
 #include <QPushButton>
 #include <QProgressBar>
@@ -141,7 +143,7 @@ QString T(const char *s) { return QString::fromUtf8(s); }
 // 使用手册 §4：「多个参数用空格分开」。用户会在参数里写 "C:\带空格的路径"，
 // 按空格硬拆会把路径撕成两段，工具收到的就是错参数。
 const char *kTabAll      = "\xE5\x85\xA8\xE9\x83\xA8";                      // 全部
-const char *kRefresh     = "\xE5\x88\xB7\xE6\x96\xB0";                      // 刷新
+const char *kRefresh     = "\xE9\x87\x8D\xE6\x96\xB0\xE6\x89\xAB\xE6\x8F\x8F";          // 重新扫描
 const char *kOnlyNew     = "\xE4\xBB\x85\xE5\x90\x8C\xE6\xAD\xA5\xE6\x96\xB0\xE5\xA2\x9E\xE6\x96\x87\xE4\xBB\xB6";  // 仅同步新增文件
 const char *kStartSync   = "\xE5\xBC\x80\xE5\xA7\x8B\xE5\x90\x8C\xE6\xAD\xA5";  // 开始同步
 const char *kCancelSync  = "\xE5\x8F\x96\xE6\xB6\x88";                        // 取消
@@ -201,7 +203,9 @@ protected:
                 painter->drawLine(QPointF(x + 5.5, y + 9.8), QPointF(x + 11.2, y + 3.8));
             } else {
                 painter->setPen(QPen(Theme::border(), 1));
-                painter->setBrush(QColor(0x1e, 0x22, 0x2b));
+                // 未勾选的复选框：底色跟表头一致（#111726 一带），
+                // 原来写死 #1e222b，跟新表头底差一档，远看像"脏点"。
+                painter->setBrush(QColor(0x11, 0x17, 0x26));
                 painter->drawRoundedRect(chkBox, 3, 3);
             }
             painter->restore();
@@ -407,19 +411,14 @@ void SyncPanel::buildUi()
     m_refresh = new QPushButton(T(kRefresh));
     m_refresh->setObjectName(QStringLiteral("refreshScan"));
     m_refresh->setFixedHeight(22);
+    // 定稿图这个按钮是**纯文字**，没有图标；给它一个最小宽度，
+    // 免得窗口一窄就被页签挤扁成"⟳ 重新…"。
+    m_refresh->setMinimumWidth(86);
     m_refresh->setCursor(Qt::PointingHandCursor);
-    m_refresh->setIcon(QIcon(Theme::refreshIcon(12, Theme::textSub())));
-    m_refresh->setIconSize(QSize(12, 12));
-    // 刷新按钮不再显示。
-    //
-    // 用户的诉求是「保存设置后自动刷新，不用这个刷新按钮」：改完设置点保存，
-    // 清单自己就更新了（见 applyFromSettings 末尾），还留一个按钮等于
-    // 告诉用户「你得记得点一下才生效」。
-    //
-    // 控件本身保留而不是删掉：refreshScanClicked() 仍是内部重扫的编程入口，
-    // m_refresh 也还挂在 setBusy/setEnabled 的几处状态切换上。
-    // 隐藏的控件在 QHBoxLayout 里不占空间。
-    m_refresh->setVisible(false);
+    // 「重新扫描」按钮**恢复显示**：定稿图的分类 Tab 栏右边就有它。
+    // 之前把它藏起来了（理由是「保存设置后自动刷新，不用手动点」），
+    // 但定稿图一直留着这个入口，而且它本来就是产品原有功能 ——
+    // 拿原型当唯一依据去砍功能，方向就反了。
     headLay->addWidget(m_refresh);
     cardLay->addWidget(head);
 
@@ -446,7 +445,7 @@ void SyncPanel::buildUi()
     // 原来这里是 setFixedHeight(235)。卡片内三个子项（页签 32 / 分隔线 1 / 表格 235）
     // 全是固定高度、且 cardLay 里 stretch 全为 0 —— 窗口一放大，多出来的高度就被
     // QVBoxLayout 平分插到子项之间：页签被推下去、列头被推下去，上下留白越拉越多
-    // （实测 830×480 几乎无空白，1920×1080 变成 892px 的大空卡片）。
+    // （实测 980×460 几乎无空白，1920×1080 变成 892px 的大空卡片）。
     //
     // 改成「最小高度 + stretch=1」：多余高度全部给表格，表格紧贴页签下方铺开，
     // 大屏不再浪费；小窗口仍保底 235px，手册 §2 的数值不变。
@@ -472,16 +471,26 @@ void SyncPanel::buildUi()
     hv->setSectionResizeMode(FileTableModel::ColStatus,   QHeaderView::Fixed);
     hv->setSectionResizeMode(FileTableModel::ColTool,     QHeaderView::Fixed);
     m_table->setColumnWidth(FileTableModel::ColCheck,    36);
-    m_table->setColumnWidth(FileTableModel::ColSize,     75);
-    m_table->setColumnWidth(FileTableModel::ColCreated,  90);
-    m_table->setColumnWidth(FileTableModel::ColModified, 90);
-    m_table->setColumnWidth(FileTableModel::ColStatus,   85);
+    // 列宽按定稿图量出来的比例改：用户定稿截图是 1.5 倍缩放，
+    // 文件大小 100 / 创建时间 140 / 修改时间 140 / 同步状态 90 / 工具调用 100。
+    // 工具调用这一列**不跟 100**，仍按手册 §6.3 锁 156px：
+    // 那一列要放"按后缀匹配到的工具按钮"，用户定的规则是「≤3 个全列、>3 个折叠成
+    // 更多…」，按钮必须是**工具名**才能区分；100px 只放得下两个字。
+    // 差额让给"文件名"这一列（stretch）。
+    m_table->setColumnWidth(FileTableModel::ColSize,     100);
+    m_table->setColumnWidth(FileTableModel::ColCreated,  130);
+    m_table->setColumnWidth(FileTableModel::ColModified, 130);
+    m_table->setColumnWidth(FileTableModel::ColStatus,   90);
     // 156px 死锁：不管配几个工具，这一列都不许变宽（手册 §6.3）。
     m_table->setColumnWidth(FileTableModel::ColTool,     156);
     // 表格吃掉卡片内所有多余高度（配合上面的 setMinimumHeight），页签和分隔线保持固定高度贴顶。
     cardLay->addWidget(m_table, 1);
-    // 清单卡片吃掉窗口内所有多余高度，进度区和底部操作条保持自然高度。
-    root->addWidget(card, 1);
+    // 清单卡片**不**占满窗口剩余高度：定稿图里清单卡片是"内容多高就多高"，
+    // 卡片下方留一段窗口底色，然后才是进度区和底部条。
+    // 原来这里是 addWidget(card, 1) —— 卡片一路顶到进度区，和定稿图对不上。
+    root->addWidget(card, 0);
+    // 这段留白就是定稿图里清单卡片和进度区之间的那一条空档。
+    root->addStretch(1);
 
     connect(m_refresh, SIGNAL(clicked()), this, SLOT(refreshScanClicked()));
     connect(m_toolDelegate, SIGNAL(toolButtonClicked(int,int)),
@@ -512,7 +521,10 @@ void SyncPanel::buildUi()
     m_progress->setRange(0, 100);
     m_progress->setValue(0);
     m_progress->setTextVisible(false);
-    m_progress->setFixedHeight(6);
+    // 进度条刻意做细：4px。客户在 Jira 上明确说过进度条「太粗、太抢眼」。
+    // 6px 在深色底上仍然是一根显眼的横杠，把注意力从文件清单上拉走；
+    // 4px 既能看出进度位置，又不喧宾夺主。
+    m_progress->setFixedHeight(4);
     progLay->addWidget(m_progress);
     root->addWidget(progCard);
 
@@ -561,18 +573,75 @@ void SyncPanel::buildUi()
     // 和它并排时，肉眼能看到整排按钮在微微晃动。
     // 倒计时放在**计数行**（进度区那一行），那里本来就是刷新的地方。
     m_chkAutoSync->setMinimumWidth(78);
+    // 「自动同步」总开关搬到了设置窗口里 —— 底栏不再摆第二个同名开关，
+    // 同一个功能出现两处、两个地方都能改，用户会不知道到底听谁的。
+    //
+    // 控件本身留着，只是不摆进底栏：它是自动同步逻辑的唯一开关，
+    // 隐藏控件在 QHBoxLayout 里不占位置，toggled 信号照常有效。
+    // 设置窗口保存后由 applyFromSettings() 把它的状态对齐过来，
+    // 调度器的启停逻辑一行都不用改。
+    m_chkAutoSync->setParent(this);
+    m_chkAutoSync->hide();
+
+    // ---- 带宽限制（rsync --bwlimit）----
+    //
+    // 档位与后台共用一份：ConfigStore::bandwidthLimitOptionsMBps() 给出
+    // {0, 1, 5, 10, 20, 50, 100}（0 = 不限速）。UI 不自己另写一份，
+    // 否则两边各写一份、以后改档位就会对不上。
+    //
+    // 另有「自定义…」：客户自己填一个整数（值域由 ConfigStore 给）。
+    //
+    // 展示规则（用户 2026-10-27 定，和表格「工具调用」列是同一套）：
+    // 选项超过 3 个时**只露 2 个**，第 3 格是「更多…」，点开才是完整列表。
+    //
+    // 默认是**不限速**：老版本没有这个键，升级上来不该凭空慢下来。
+    m_bwLimit = new QToolButton;
+    m_bwLimit->setObjectName(QStringLiteral("cmbBandwidthLimit"));
+    m_bwLimit->setFixedHeight(24);
+    m_bwLimit->setFixedWidth(96);
+    m_bwLimit->setCursor(Qt::PointingHandCursor);
+    // InstantPopup：点按钮直接弹菜单，不需要再点一下右侧的小箭头。
+    m_bwLimit->setPopupMode(QToolButton::InstantPopup);
+    m_bwLimit->setMenu(new QMenu(m_bwLimit));
+    connect(m_bwLimit->menu(), &QMenu::aboutToShow,
+            this, &SyncPanel::rebuildBandwidthMenu);
+    m_bwLimit->setText(bandwidthDisplayText(ConfigStore::loadBandwidthLimitMBps()));
+
     m_toggleLog = new QPushButton(T(kLogOpen));
     m_toggleLog->setObjectName(QStringLiteral("btnToggleLog"));
     m_toggleLog->setFixedHeight(28);
     m_toggleLog->setCursor(Qt::PointingHandCursor);
     m_toggleLog->setIcon(QIcon(Theme::docIcon(12, Theme::textSub())));
     m_toggleLog->setIconSize(QSize(12, 12));
-    // 左：查看日志；中：两个同步策略开关；右：主动作。
+    // 中间这块控制带（定稿图 .bottom-center-ctrls）：一个带边框的窄盒子，
+    // 里面是「仅同步新增文件 | 带宽限制」。
+    //
+    // 原来这些控件是**散在**底栏里的，看上去像一排互不相干的同级项；
+    // 定稿图把它们收进一个盒子，并且用一条竖线把"同步范围"和"限速"分开。
+    QFrame *ctrlBand = new QFrame;
+    ctrlBand->setObjectName(QStringLiteral("bottomCtrlBand"));
+    ctrlBand->setFixedHeight(32);
+    QHBoxLayout *bandLay = new QHBoxLayout(ctrlBand);
+    bandLay->setContentsMargins(12, 0, 12, 0);
+    bandLay->setSpacing(12);
+    bandLay->addWidget(m_onlyNew);
+
+    QFrame *split = new QFrame;
+    split->setObjectName(QStringLiteral("splitLine"));
+    split->setFixedSize(1, 14);
+    bandLay->addWidget(split);
+
+    // 带宽限制必须有文字标题：光一个下拉（不限速 / 5 MB/s）说不清是干什么的。
+    QLabel *bwLabel = new QLabel(QString::fromUtf8(u8"带宽限制"));
+    bwLabel->setFixedHeight(24);
+    bandLay->addWidget(bwLabel);
+    bandLay->addWidget(m_bwLimit);
+
+    // 左：查看日志；中：控制带；右：主动作。
     // 原来日志按钮夹在两个勾选框后面，开关和按钮混排，读起来像一串同级功能。
     foot->addWidget(m_toggleLog);
-    foot->addSpacing(6);
-    foot->addWidget(m_chkAutoSync);
-    foot->addWidget(m_onlyNew);
+    foot->addStretch(1);
+    foot->addWidget(ctrlBand);
     foot->addStretch(1);
     m_startBtn = new QPushButton(T(kStartSync));
     m_startBtn->setObjectName(QStringLiteral("btnStartSync"));
@@ -732,6 +801,113 @@ ToolRule SyncPanel::toolRuleForRow(int row) const
         if (ToolRunner::normSuffix(m_toolRules.at(i).suffix) == suf)
             return m_toolRules.at(i);
     return ToolRule();
+}
+
+// ---- 带宽限制（底栏）----
+//
+// 菜单条目一共 8 个（不限速 / 自定义… / 6 个预置档位），
+// 按「超过 3 个只露 2 个、第 3 格是「更多…」」的规则铺。
+//
+// 每次展开前都重铺一遍：勾选状态必须跟着**当前落盘的值**走。
+// 建菜单时把值记下来再复用是不行的 —— 别的窗口（设置窗口）改过配置后，
+// 这里会一直显示旧的那一份勾。
+void SyncPanel::rebuildBandwidthMenu()
+{
+    QMenu *menu = m_bwLimit ? m_bwLimit->menu() : nullptr;
+    if (!menu)
+        return;
+    menu->clear();
+
+    const int cur = ConfigStore::loadBandwidthLimitMBps();
+    const QVector<int> opts = ConfigStore::bandwidthLimitOptionsMBps();
+    const bool curIsPreset = opts.contains(cur);
+    const bool curIsCustom = (cur > 0) && !curIsPreset;
+
+    // 条目：(显示文字, 值)。值 -1 = 「自定义…」这一项
+    // （真实档位值都是 >= 0，不会和哨兵撞）。
+    QVector<QPair<QString, int> > items;
+    items.append(qMakePair(QString::fromUtf8(u8"不限速"), 0));
+    // 当前是自定义值时，把数值也写在这一项上：
+    // 光一个「自定义…」看不出当前限到多少。
+    items.append(qMakePair(curIsCustom
+                                ? QString::fromUtf8(u8"自定义…（%1 MB/s）").arg(cur)
+                                : QString::fromUtf8(u8"自定义…"),
+                            -1));
+    for (int i = 0; i < opts.size(); ++i) {
+        const int mbps = opts.at(i);
+        if (mbps <= 0)
+            continue;                       // 不限速已经是第一项了
+        items.append(qMakePair(QString::fromUtf8(u8"%1 MB/s").arg(mbps), mbps));
+    }
+
+    // 折叠规则：不超过 3 个就全列；超过 3 个只露前 2 个，第 3 格是「更多…」。
+    const int visible = (items.size() <= 3) ? items.size() : 2;
+    for (int pass = 0; pass < 2; ++pass) {
+        // pass 0 = 直接露出来的前两项，pass 1 = 「更多…」子菜单里的其余项。
+        QMenu *target = (pass == 0) ? menu : menu->addMenu(QString::fromUtf8(u8"更多…"));
+        const int from = (pass == 0) ? 0 : visible;
+        const int to   = (pass == 0) ? visible : items.size();
+        if (pass == 1 && items.size() <= visible)
+            break;
+        for (int i = from; i < to; ++i) {
+            const int v = items.at(i).second;
+            QAction *a = target->addAction(items.at(i).first);
+            a->setCheckable(true);
+            a->setChecked(v < 0 ? curIsCustom : (cur == v));
+            if (v < 0) {
+                connect(a, &QAction::triggered,
+                        this, &SyncPanel::askCustomBandwidthLimit);
+            } else {
+                connect(a, &QAction::triggered, this, [this, v]() {
+                    applyBandwidthLimit(v, false);
+                });
+            }
+        }
+    }
+}
+
+void SyncPanel::askCustomBandwidthLimit()
+{
+    const int cur = ConfigStore::loadBandwidthLimitMBps();
+    const int minV = ConfigStore::bandwidthCustomMinMBps();
+    const int maxV = ConfigStore::bandwidthCustomMaxMBps();
+    // 上次填过就拿上次当初值，没填过（或上次填的是不限速）给 10。
+    const int start = (cur >= minV && cur <= maxV) ? cur : 10;
+    bool ok = false;
+    const int v = QInputDialog::getInt(
+        this,
+        QString::fromUtf8(u8"自定义带宽限制"),
+        QString::fromUtf8(u8"请输入带宽上限（单位 MB/s）："),
+        start, minV, maxV, 1, &ok);
+    if (!ok)
+        return;                       // 取消：什么都不改，也不写日志
+    applyBandwidthLimit(v, true);
+}
+
+void SyncPanel::applyBandwidthLimit(int mbps, bool custom)
+{
+    // 存盘前先归一化：越界值在这一步就落成不限速，
+    // 不会把一个荒唐的数写进配置文件。
+    const int v = ConfigStore::clampBandwidthMBps(mbps);
+    ConfigStore::saveBandwidthLimitMBps(v);
+    if (m_bwLimit)
+        m_bwLimit->setText(bandwidthDisplayText(v));
+    // rsync 的限速只在进程启动时生效，所以这里必须说清「下次同步起生效」，
+    // 不能让用户以为这一次同步已经被限速了。
+    appendLogLine(QStringLiteral("INFO"),
+                  v <= 0
+                      ? QString::fromUtf8(u8"带宽限制已取消，下次同步起生效")
+                      : (custom
+                             ? QString::fromUtf8(u8"带宽限制已设为 %1 MB/s（自定义），下次同步起生效").arg(v)
+                             : QString::fromUtf8(u8"带宽限制已设为 %1 MB/s，下次同步起生效").arg(v)),
+                  0);
+}
+
+QString SyncPanel::bandwidthDisplayText(int mbps)
+{
+    if (mbps <= 0)
+        return QString::fromUtf8(u8"不限速");
+    return QString::fromUtf8(u8"%1 MB/s").arg(mbps);
 }
 
 void SyncPanel::onToolButtonClicked(int row, int toolIndex)
@@ -1083,11 +1259,11 @@ void SyncPanel::appendLogLine(const QString &tag, const QString &msg, int tagKin
     // 正文里的 HTML 元字符必须转义 —— rsync 的输出里带 < > & 是常事，
     // 直接拼进 HTML 会把整行吃掉，而且报错指向完全无关的地方。
     static const char *kTagCss[5] = {
-        "background:#1e293b;color:#94a3b8",   // 0 INFO
-        "background:#1e3a8a;color:#60a5fa",   // 1 SYNC
-        "background:#064e3b;color:#34d399",   // 2 DONE
-        "background:#78350f;color:#fbbf24",   // 3 WARN
-        "background:#7f1d1d;color:#f87171",   // 4 ERR
+        "background:#1a2438;color:#8fa0c0",   // 0 INFO
+        "background:#133465;color:#6db0ff",   // 1 SYNC
+        "background:#0b3625;color:#4ade80",   // 2 DONE
+        "background:#3a2a0a;color:#fbbf24",   // 3 WARN
+        "background:#5a171d;color:#fca5a5",   // 4 ERR
     };
     const int kind = (tagKind >= 0 && tagKind <= 4) ? tagKind : 0;
 
@@ -1106,11 +1282,11 @@ void SyncPanel::appendLogLine(const QString &tag, const QString &msg, int tagKin
         m_logRecords.removeFirst();
 
     pushLogLine(QString(
-        "<span style=\"color:#64748b;font-family:Consolas,Monaco,monospace;font-size:10px;\">[%1]</span>"
+        "<span style=\"color:#5c6c87;font-family:Consolas,Monaco,monospace;font-size:10px;\">[%1]</span>"
         "&nbsp;"
-        "<span style=\"%2;font-family:Consolas,Monaco,monospace;font-size:9px;font-weight:700;border-radius:3px;padding:1px 5px;\">%3</span>"
+        "<span style=\"%2;font-family:Consolas,Monaco,monospace;font-size:9px;font-weight:700;border-radius:2px;padding:1px 5px;\">%3</span>"
         "&nbsp;&nbsp;"
-        "<span style=\"color:#cbd5e1;\">%4</span>")
+        "<span style=\"color:#dbe4f3;\">%4</span>")
                     .arg(ts)
                     .arg(QLatin1String(kTagCss[kind]))
                     .arg(paddedTag, safeMsg));
@@ -2225,6 +2401,16 @@ void SyncPanel::applyFromSettings(const TargetConfig &t, const QString &localRoo
     m_localRoot = localRoot;
     m_toolRules = tools;
 
+    // 「自动同步」总开关现在住在设置窗口里，底栏那个同名勾选框是隐藏的。
+    // 设置窗口保存后会把新状态写进配置，这里把隐藏勾选框的状态对齐过来 ——
+    // setChecked 会触发 toggled → onAutoSyncToggled()，调度器的启停照常走，
+    // 自动同步逻辑本身一行没改。
+    if (m_chkAutoSync) {
+        const bool wantAuto = ConfigStore::loadAutoSyncEnabled();
+        if (m_chkAutoSync->isChecked() != wantAuto)
+            m_chkAutoSync->setChecked(wantAuto);
+    }
+
     // 后缀规则跟着工具规则走：配了哪些后缀就同步哪些后缀。
     // 同一后缀配多条工具时只建一条落地规则（取第一条工具的），避免重复传同一批文件。
     //
@@ -2373,6 +2559,13 @@ void SyncPanel::applyFromSettings(const TargetConfig &t, const QString &localRoo
 }
 
 // ---------------------------------------------------------------- 配置提示
+
+void SyncPanel::logInfo(const QString &msg)
+{
+    // 对外的"写一条普通信息"入口。tag / tagKind 是内部编码，
+    // 外部组件只该关心"把这句话记进日志"。
+    appendLogLine(QStringLiteral("INFO"), msg, 0);
+}
 
 void SyncPanel::appendNotice(const QString &text)
 {

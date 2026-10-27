@@ -2,6 +2,7 @@
 
 #include <QFrame>
 #include <QLabel>
+#include <QPushButton>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -30,9 +31,17 @@ QString T(const char *s) { return QString::fromUtf8(s); }
 const char *kAppName     = "\xE6\x95\xB0\xE6\x8D\xAE\xE5\x90\x8C\xE6\xAD\xA5\xE5\xB7\xA5\xE5\x85\xB7";  // 数据同步工具
 const char *kSplashReady = "\xE6\xAD\xA3\xE5\x9C\xA8\xE5\x88\x9D\xE5\xA7\x8B\xE5\x8C\x96\xE5\x90\x8C\xE6\xAD\xA5\xE5\xBC\x95\xE6\x93\x8E...";  // 正在初始化同步引擎...
 
-// 窗口尺寸严格死锁 830x480（完全复原 HTML 原型黄金矩形，杜绝正方形失真）。
-const int kWindowWidth = 830;
-const int kWindowHeight = 480;
+// 窗口宽度严格对齐 HTML 定稿原型（.window-frame width: 980px）。
+//
+// 原来死锁 830px：那是从**更早一版**原型抄下来的数字，后来原型已经改成 980，
+// 交付包却还停在 830 —— 于是同一份设计稿，HTML 预览和真程序对不上，
+// 客户一眼就能看出"不是同一个东西"。表格 7 列加起来 596px 固定，
+// 多出来的 150px 全部给「文件名」列（Stretch），正好是定稿图里那一列的比例。
+const int kWindowWidth = 980;
+// 高度同样按定稿图反推：用户定稿截图 1477×691，量出来标题栏 38px、
+// 行高 34px 等特征都是 1.5 倍缩放，所以逻辑高度 = 691 / 1.5 ≈ 460。
+// 480 是更早一版原型抄下来的（HTML 预览实测帧高 441）。
+const int kWindowHeight = 460;
 
 int g_splashMs = 2000;
 bool g_skipSplash = false;
@@ -46,7 +55,7 @@ QFrame *makeFlowBar()
 {
     QFrame *bar = new QFrame;
     bar->setFixedHeight(2);
-    bar->setStyleSheet(QStringLiteral("background: #e2e8f0; border-radius: 1px;"));
+    bar->setStyleSheet(QStringLiteral("background: #1f6fe0; border-radius: 1px;"));
     return bar;
 }
 } // namespace
@@ -97,8 +106,8 @@ void MainWindow::tickSplashPulse()
     m_splashPulseOn = !m_splashPulseOn;
     m_splashDot->setFixedSize(m_splashPulseOn ? 10 : 6, m_splashPulseOn ? 10 : 6);
     m_splashDot->setStyleSheet(m_splashPulseOn
-        ? QStringLiteral("background: #3b82f6; border-radius: 5px;")
-        : QStringLiteral("background: #3b82f6; border-radius: 3px;"));
+        ? QStringLiteral("background: #2b7cf0; border-radius: 5px;")
+        : QStringLiteral("background: #1f6fe0; border-radius: 3px;"));
 }
 
 MainWindow::~MainWindow()
@@ -147,7 +156,7 @@ void MainWindow::buildSplash()
     nf.setPixelSize(17);                 // 原型 16.5px，整数像素取 17
     nf.setWeight(QFont::Bold);
     m_splashName->setFont(nf);
-    m_splashName->setStyleSheet(QStringLiteral("color: #0f172a;"));
+    m_splashName->setStyleSheet(QStringLiteral("color: #f8fafc;"));
     m_splashName->setAlignment(Qt::AlignCenter);
     lay->addSpacing(14);
     lay->addWidget(m_splashName);
@@ -160,14 +169,14 @@ void MainWindow::buildSplash()
     subLay->setSpacing(6);
     m_splashDot = new QFrame;
     m_splashDot->setFixedSize(6, 6);
-    m_splashDot->setStyleSheet(QStringLiteral("background: #3b82f6; border-radius: 3px;"));
+    m_splashDot->setStyleSheet(QStringLiteral("background: #1f6fe0; border-radius: 3px;"));
     subLay->addWidget(m_splashDot, 0, Qt::AlignVCenter);
 
     m_splashStatus = new QLabel(T(kSplashReady));
     QFont sf = QApplication::font();
     sf.setPixelSize(11);
     m_splashStatus->setFont(sf);
-    m_splashStatus->setStyleSheet(QStringLiteral("color: #64748b;"));  // 原型次文字色
+    m_splashStatus->setStyleSheet(QStringLiteral("color: #8fa0c0;"));  // AP500BJ 次文字色
     subLay->addWidget(m_splashStatus);
     subLay->addStretch(1);
     lay->addSpacing(5);
@@ -198,7 +207,7 @@ void MainWindow::tickSplashMorph()
     if (m_splashLogo)
         m_splashLogo->setPixmap(Theme::splashSync(64));
     if (m_splashBarFill)
-        m_splashBarFill->setStyleSheet(QStringLiteral("background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #60a5fa,stop:1 #2563eb); border-radius: 1px;"));
+        m_splashBarFill->setStyleSheet(QStringLiteral("background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #2b7cf0,stop:1 #1f6fe0); border-radius: 1px;"));
 }
 
 void MainWindow::finishSplash()
@@ -231,78 +240,58 @@ void MainWindow::buildTitleBar()
     lay->setContentsMargins(14, 0, 8, 0);
     lay->setSpacing(6);
 
-    QLabel *logo = new QLabel;
-    logo->setPixmap(Theme::logo(26));
-    logo->setFixedSize(26, 26);
-    lay->addWidget(logo);
-
+    // 标题栏左侧**只有文字**，不放 logo。
+    // 定稿图（ui_preview.html 的 .window-titlebar）就是这么画的：一个蓝底圆角
+    // 图形杵在「数据同步工具」左边，和 AP500「纯净工控、无装饰」的语言相反。
+    // 用户 2026-10-27 明确要求去掉，程序图标（任务栏那个）保留。
     QLabel *title = new QLabel(T(kAppName));
     title->setObjectName(QStringLiteral("appTitle"));
     lay->addWidget(title);
-    lay->addSpacing(9);
     lay->addStretch(1);
 
-    m_themeToggle = new QToolButton;
-    m_themeToggle->setObjectName(QStringLiteral("themeToggleBtn"));
-    m_themeToggle->setIcon(QIcon(Theme::themeToggleIcon(16, Theme::chromeIcon(), Theme::isDark())));
-    m_themeToggle->setIconSize(QSize(16, 16));
-    m_themeToggle->setFixedSize(28, 28);
-    m_themeToggle->setCursor(Qt::PointingHandCursor);
-    m_themeToggle->setToolTip(QString::fromUtf8("\xE5\x88\x87\xE6\x8D\xA2\xE5\xA4\x96\xE8\xA7\x82\xE9\xA3\x8E\xE6\xA0\xBC (\xE6\x9A\x97\xE9\xBB\x91\xE5\xB7\xA5\xE6\x8E\xA7 / \xE6\x98\x8E\xE4\xBA\xAE\xE6\xB5\x85\xE8\x89\xB2)"));  // 切换外观风格 (暗黑工控 / 明亮浅色)
-    lay->addWidget(m_themeToggle);
-    connect(m_themeToggle, SIGNAL(clicked()), this, SLOT(onToggleTheme()));
-
-    m_gear = new QToolButton;
-    m_gear->setObjectName(QStringLiteral("gearBtn"));
-    {
-        QIcon gearIco;
-        gearIco.addPixmap(Theme::gearIcon(16, Theme::chromeIcon()), QIcon::Normal, QIcon::Off);
-        gearIco.addPixmap(Theme::gearIcon(16, Theme::chromeIconOn()), QIcon::Normal, QIcon::On);
-        m_gear->setIcon(gearIco);
-    }
-    m_gear->setIconSize(QSize(16, 16));
-    m_gear->setFixedSize(28, 28);
-    m_gear->setCheckable(true);
-    m_gear->setCursor(Qt::PointingHandCursor);
-    m_gear->setToolTip(QString::fromUtf8("\xE4\xBC\xA0\xE8\xBE\x93\xE4\xB8\x8E\xE5\xB7\xA5\xE5\x85\xB7\xE8\xAE\xBE\xE7\xBD\xAE"));  // 传输与工具设置
-    lay->addWidget(m_gear);
-
-    QFrame *sep = new QFrame;
-    sep->setObjectName(QStringLiteral("titleBarLine"));
-    sep->setFrameShape(QFrame::VLine);
-    // 这里原来写死 `background: #374151` 且**没有 objectName**。
-    // 两个问题叠加：颜色是两套主题共用的深灰，浅色模式下白底上一道黑杠
-    // （用户 2026-10-16 报的"齿轮旁边还有黑色的东西"）；
-    // 而 Theme.h 里 `QFrame#titleBarLine` 那两条正确的两套配色规则
-    // 因为选择器对不上，从来没生效过。
-    //
-    // 修法是删掉 widget 级的 setStyleSheet、交给 app 级 QSS 按主题给色。
-    // 不能只改颜色留在这：widget 级样式表优先级高于 app 级且会阻断继承，
-    // 留着它 Theme.h 里那条规则永远轮不到。
-    sep->setFixedHeight(16);
-    lay->addSpacing(4);
-    lay->addWidget(sep);
-    lay->addSpacing(4);
+    // 右侧顺序与定稿图一致：设置 → 最小化 → 最大化 → 关闭。
+    m_settingsHead = new QPushButton;
+    m_settingsHead->setObjectName(QStringLiteral("settingsHeadBtn"));
+    m_settingsHead->setText(QString::fromUtf8(u8"设置"));
+    m_settingsHead->setFixedHeight(24);
+    m_settingsHead->setCursor(Qt::PointingHandCursor);
+    m_settingsHead->setToolTip(QString::fromUtf8(u8"传输与工具设置"));
+    lay->addWidget(m_settingsHead);
 
     QToolButton *minBtn = new QToolButton;
     minBtn->setObjectName(QStringLiteral("sysBtn"));
     minBtn->setIcon(QIcon(Theme::minIcon(11, Theme::chromeIcon())));
     minBtn->setIconSize(QSize(11, 11));
-    minBtn->setFixedSize(26, 26);
+    minBtn->setFixedSize(34, 26);
     minBtn->setCursor(Qt::PointingHandCursor);
+    minBtn->setToolTip(QString::fromUtf8(u8"最小化"));
     connect(minBtn, SIGNAL(clicked()), this, SLOT(showMinimized()));
     lay->addWidget(minBtn);
 
+    // 最大化 / 还原。定稿图标题栏右上角是三键：最小、最大化、关闭，
+    // 原来 Qt 这边只有最小和关闭，少了中间那一个 —— 界面和定稿对不上。
+    m_maxBtn = new QToolButton;
+    m_maxBtn->setObjectName(QStringLiteral("sysBtn"));
+    m_maxBtn->setIcon(QIcon(Theme::maxIcon(11, Theme::chromeIcon())));
+    m_maxBtn->setIconSize(QSize(11, 11));
+    m_maxBtn->setFixedSize(34, 26);
+    m_maxBtn->setCursor(Qt::PointingHandCursor);
+    m_maxBtn->setToolTip(QString::fromUtf8(u8"最大化"));
+    connect(m_maxBtn, SIGNAL(clicked()), this, SLOT(onToggleMaximize()));
+    lay->addWidget(m_maxBtn);
+
     QToolButton *closeBtn = new QToolButton;
     closeBtn->setObjectName(QStringLiteral("sysBtnClose"));
-    closeBtn->setIcon(QIcon(Theme::closeIcon(11, Theme::chromeIcon())));
+    // 关闭键是红的（定稿图 .ico-close #ff3b30），最小/最大化才是蓝灰。
+    closeBtn->setIcon(QIcon(Theme::closeIcon(11, Theme::chromeIconClose())));
     closeBtn->setIconSize(QSize(11, 11));
-    closeBtn->setFixedSize(26, 26);
+    closeBtn->setFixedSize(34, 26);
     closeBtn->setCursor(Qt::PointingHandCursor);
+    closeBtn->setToolTip(QString::fromUtf8(u8"关闭"));
     connect(closeBtn, SIGNAL(clicked()), this, SLOT(close()));
     lay->addWidget(closeBtn);
 
-    connect(m_gear, SIGNAL(clicked()), this, SLOT(onOpenSettings()));
+    connect(m_settingsHead, SIGNAL(clicked()), this, SLOT(onOpenSettings()));
     // 标题栏空白处用来拖窗：手写实现，不依赖 FramelessWindowHint 的系统行为 ——
     // 那在不同平台/不同 Qt 版本上表现并不一致。
     m_titleBar->installEventFilter(this);
@@ -341,13 +330,15 @@ void MainWindow::onOpenSettings()
     m_settings->loadConfig(m_syncPanel->targetConfig(),
                            m_syncPanel->localRoot(),
                            m_syncPanel->toolRules());
+    // 探针截图模式下设置面板也不上屏（WA_DontShowOnScreen 必须在 show() 之前设）。
+    if (m_probeNoScreen)
+        m_settings->setAttribute(Qt::WA_DontShowOnScreen, true);
     m_settings->show();
-    if (m_gear)
-        m_gear->setChecked(true);
 }
 
 void MainWindow::showSettingsForProbe()
 {
+    m_probeNoScreen = true;
     onOpenSettings();
 }
 
@@ -376,8 +367,6 @@ void MainWindow::switchPageForTest(int index)
 }
 
 void MainWindow::onSettingsAccepted(){
-    if (m_gear)
-        m_gear->setChecked(false);
     // 「保存设置」过去只调了 QDialog::accept() 关闭弹窗，applyConfig 根本没被调用 ——
     // 用户把 IP、账号、密码、本机目录全改完点保存，界面关掉，配置一个字没变，
     // 下次打开还是旧值。这里才是真正落盘的地方。
@@ -433,6 +422,10 @@ void MainWindow::flushConfigNotices()
 
 void MainWindow::refitToScreen()
 {
+    // 最大化状态下不重设尺寸：setFixedSize 会把死锁重新装回去，
+    // 最大化窗口当场被压回 830x480。
+    if (isMaximized())
+        return;
     QScreen *scr = QGuiApplication::primaryScreen();
     if (!scr)
         return;
@@ -515,32 +508,28 @@ void MainWindow::closeEvent(QCloseEvent *event)
     event->accept();
 }
 
-void MainWindow::onToggleTheme()
+// 最大化 / 还原。
+//
+// 定稿图标题栏右上角是三键（最小 / 最大化 / 关闭），原来 Qt 这边只有两键。
+//
+// 窗口平时是**死锁宽度** 830px（手册 §2 的黄金矩形），所以最大化时必须先
+// 把这个死锁解开 —— 否则按了最大化、窗口纹丝不动，比没有这个键更糟；
+// 还原时再把死锁装回去，位置也回到屏幕中间。
+void MainWindow::onToggleMaximize()
 {
-    Theme::toggleMode();
-    qApp->setStyleSheet(Theme::buildQss(Theme::currentMode()));
-    if (m_themeToggle) {
-        m_themeToggle->setIcon(QIcon(Theme::themeToggleIcon(16, Theme::chromeIcon(), Theme::isDark())));
-        m_themeToggle->setToolTip(Theme::isDark()
-            ? QString::fromUtf8("\xE5\x88\x87\xE6\x8D\xA2\xE5\x88\xB0\xE6\xB5\x85\xE8\x89\xB2\xE6\xA8\xA1\xE5\xBC\x8F")
-            : QString::fromUtf8("\xE5\x88\x87\xE6\x8D\xA2\xE5\x88\xB0\xE6\x9A\x97\xE9\xBB\x91\xE5\xB7\xA5\xE6\x8E\xA7\xE6\xA8\xA1\xE5\xBC\x8F"));
-    }
-    if (m_gear) {
-        QIcon gearIco;
-        gearIco.addPixmap(Theme::gearIcon(16, Theme::chromeIcon()), QIcon::Normal, QIcon::Off);
-        gearIco.addPixmap(Theme::gearIcon(16, Theme::chromeIconOn()), QIcon::Normal, QIcon::On);
-        m_gear->setIcon(gearIco);
-    }
-    update();
-
-    // 状态徽章和工具按钮是 delegate 里用 QPainter 现画的，颜色每次 paint 都现读
-    // Theme。qApp->setStyleSheet() 只会让 QSS 那一半重刷，delegate 自绘的那一半
-    // 要显式 update 才会重新取色 —— 不补这一句，切换主题后界面主体变了、
-    // 表格里那两列还停在上一个主题的颜色上。
-    const QWidgetList all = QApplication::allWidgets();
-    for (int i = 0; i < all.size(); ++i) {
-        QAbstractScrollArea *sa = qobject_cast<QAbstractScrollArea *>(all.at(i));
-        if (sa && sa->viewport())
-            sa->viewport()->update();
+    if (!m_maxBtn)
+        return;
+    if (isMaximized()) {
+        m_maxBtn->setIcon(QIcon(Theme::maxIcon(11, Theme::chromeIcon())));
+        m_maxBtn->setToolTip(QString::fromUtf8(u8"最大化"));
+        showNormal();
+        refitToScreen();
+    } else {
+        m_maxBtn->setIcon(QIcon(Theme::restoreIcon(11, Theme::chromeIcon())));
+        m_maxBtn->setToolTip(QString::fromUtf8(u8"还原"));
+        // 解开宽高的死锁，才真的能铺满可用区域。
+        setMinimumSize(0, 0);
+        setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+        showMaximized();
     }
 }

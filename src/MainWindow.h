@@ -9,19 +9,21 @@ class ToolPanel;
 class SettingsDialog;
 class QFrame;
 class QLabel;
+class QPushButton;
 class QToolButton;
 class QTimer;
 
 // 主窗体。结构照定稿原型：
 //
-//   ┌ 标题栏（logo + 名称 | 齿轮 + 最小化 + 关闭）  44px
+//   ┌ 标题栏（名称 | 设置 + 最小化 + 最大化 + 关闭）  44px
 //   ├ SyncPanel（表格 + 进度区 + 底部条 + 日志抽屉）
 //
 // 无边框（Qt::FramelessWindowHint）+ 半透明背景 + 圆角根容器，
 // 这样才有手册 §10.1 要的"微晶悬浮"质感，而不是 Windows 原生灰白标题栏。
 //
-// 窗口宽固定 830px（手册 §8）：表格 7 列加起来正好 596px，
-// 加上两侧留白仍然宽裕；再宽就会出现大片空白，表格却还是那么窄。
+// 窗口宽固定 980px：这一版按用户给的定稿图（1477×691 截图，1.5 倍缩放）
+// 反推出来的，HTML 定稿 .window-frame 也是 980px。原来的 830px 是从更早一版
+// 原型抄下来的，导致同一份设计稿"HTML 预览 980 / 真程序 830"对不上。
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -90,7 +92,7 @@ private slots:
     void finishSplash();
     void tickSplashMorph();
     void tickSplashPulse();
-    void onToggleTheme();
+    void onToggleMaximize();
 
 private:
     void buildSplash();
@@ -114,8 +116,8 @@ private:
 
     QWidget          *m_body = nullptr;
     QFrame           *m_titleBar = nullptr;
-    QToolButton      *m_themeToggle = nullptr;
-    QToolButton      *m_gear = nullptr;
+    QPushButton      *m_settingsHead = nullptr;   // 标题栏右侧的「设置」文字按钮
+    QToolButton      *m_maxBtn = nullptr;         // 最大化 / 还原
     SyncPanel        *m_syncPanel = nullptr;
     ToolPanel        *m_toolPanel = nullptr;
     SettingsDialog   *m_settings = nullptr;
@@ -125,4 +127,6 @@ private:
     QStringList       m_configNotices;
     bool              m_noticeScheduled = false;
     qreal             m_startDpr = 1.0;
+    // 探针截图模式：主窗和设置面板都不上屏、不抢焦点，只把控件渲染进 PNG。
+    bool              m_probeNoScreen = false;
 };

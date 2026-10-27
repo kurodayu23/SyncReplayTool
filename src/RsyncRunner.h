@@ -56,6 +56,28 @@ public:
     // true = "结果未确认"，false = "数据确实有问题"。
     bool abortedUnfinished() const { return m_abortedUnfinished; }
 
+    // ---- 带宽限制（rsync --bwlimit）----
+
+    // 本轮同步**实际生效**的限速（MB/s，0 = 不限速）。
+    //
+    // 在 start() 时快照 —— 一次同步可能分成好几组、每组起一个 rsync 进程，
+    // 本轮所有组都用同一个值。中途改档位不会改变本轮（见 bandwidthLimitNotice）。
+    int currentBandwidthMBps() const;
+
+    // 限速改动的**真实**反馈文案。
+    //
+    // 返回空串 = 不用特别提示（没在同步，或选的就是当前正在用的值）。
+    // 非空 = 客户应该看到的话，例如「本次同步仍在按 5 MB/s 进行，
+    // 新的限速（10 MB/s）将在下次同步时生效」。
+    //
+    // 为什么不给"已生效"：rsync 的 --bwlimit 只在进程启动时生效，
+    // 同步中途改档位，本次同步根本用不上 —— 说"已生效"是骗人。
+    QString bandwidthLimitNotice(int newMBps) const;
+
+    // 限速档位（MB/s）→ rsync --bwlimit 的值（KB/s）。
+    // 1 MB/s = 1024 KB/s。0（不限速）→ 0，调用方据此**不加**这个参数。
+    static int bwlimitKBpsFor(int mbPerSec);
+
     // 口令登录时 ssh 没有终端可输密码，必须靠 SSH_ASKPASS。
     // createAskpass 返回空串表示成功，调用方负责事后 remove() 掉两个临时文件。
     static QString createAskpass(const TargetConfig &target, QString *askpassPath, QString *passFilePath);
@@ -229,6 +251,8 @@ signals:
     // 界面用它把那些已经被 --out-format=%n 标成「已完成」的行改回「失败」。
     void fileFailedInGroup(const QString &relativePath);
     void allFinished(bool ok);
+    // 同步进行中改了限速：本次同步仍按旧值跑，新值下次同步生效。
+    void bandwidthLimitDeferred(int effectiveMBps, int selectedMBps);
 
 private slots:
     void onStdout();
@@ -244,6 +268,8 @@ private slots:
     void closeJob();
     void onVerifyStdout();
     void onWatchdogTimeout();
+    // 配置里的限速档位被改了：判断这次改动是"立刻生效"还是"本次同步结束后生效"。
+    void onBandwidthLimitSaved(int mbps);
 
 
 private:
@@ -396,6 +422,18 @@ private:
     // 两者互斥（--ignore-existing 根本不看内容），所以按取值二选一，
     // 不能两个一起加，也不能都不加。
     bool            m_onlyNew = false;
+    // 本轮快照的限速（MB/s，0 = 不限速）。在 start() 里从配置读一次。
+    //
+    // 为什么是"每轮快照"而不是"每次起 rsync 都去读"：一次同步会分好几组、
+    // 每组起一个 rsync 进程。用户在传输途中改了档位，后面的组就用新值、
+    // 前面的组用旧值 —— 半程换挡，既不像"已生效"也不像"没生效"。
+    // 快照成一轮一个值，改动统一到下一轮，行为才说得清。
+    int             m_bwlimitMBps = 0;
+    // 本轮同步是不是正在进行中（从 start() 真正开跑，到 allFinished）。
+    //
+    // 不用 m_proc 判断：两组之间 m_proc 是空的（进程退出到下一个起来之间），
+    // 拿它当"正在同步"的判据会在组间窗口里判错。
+    bool            m_roundActive = false;
     // 同一份清单的哈希索引。contains() 在 stdout 热路径上，rsync 每吐一行就调一次；
     // 用 QStringList 的线性查找，一组 5000 个文件就是 2500 万次字符串比较。
     // 列表本身保留，onFinished 还要按顺序遍历。

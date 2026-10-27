@@ -264,10 +264,10 @@ bool ToolPanel::runButtonEnabledForTest() const
 void ToolPanel::setStatus(const QString &text, bool error)
 {
     const char *style = error
-        ? "background:#fef2f2; color:#dc2626; border:1px solid #fbcfcf;"
-          " border-radius:11px; padding:4px 14px; font-size:12px; font-weight:500;"
-        : "background:#f1f3f7; color:#5b6272; border:1px solid #e6e8ee;"
-          " border-radius:11px; padding:4px 14px; font-size:12px; font-weight:500;";
+        ? "background:#5a171d; color:#fca5a5; border:1px solid #dc2626;"
+          " border-radius:2px; padding:4px 14px; font-size:12px; font-weight:500;"
+        : "background:#1a2438; color:#8fa0c0; border:1px solid #24324d;"
+          " border-radius:2px; padding:4px 14px; font-size:12px; font-weight:500;";
     m_statusLabel->setText(text);
     m_statusLabel->setStyleSheet(QString::fromLatin1(style));
 }

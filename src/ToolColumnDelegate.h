@@ -10,10 +10,16 @@
 // 一万个文件就是一万个控件，滚动直接卡死，内存直接爆。
 // 这里全部用 painter 画，点击区域自己算。
 //
-// 三档降级（手册 §6.3，列宽 156px 死锁，绝不撑宽）：
-//   1 个工具    -> 一个按钮，舒展占满
-//   2 个工具    -> 两个按钮并排
-//   3 个及以上  -> 第一个按钮 + 「更多」，点开 QMenu 选其余的
+// 折叠规则（用户 2026-10-27 定；列宽 156px 死锁，绝不撑宽）：
+//   1 个工具      -> 一个按钮，舒展占满
+//   2 个工具      -> 两个按钮并排
+//   3 个工具      -> 三个按钮并排（**不**提前折叠）
+//   4 个及以上    -> 前两个按钮 + 第 3 格「…」，点开 QMenu 选其余的
+//
+// 为什么「3 个以内全显示、超过 3 个才折叠」：
+// 同一个后缀配多个工具是现场常见做法（回放 + 转换 + 导出）。
+// 早早就把第 3 个藏进菜单，等于让用户每次都要多点一次才能看见自己配了什么，
+// 而 3 个按钮在 156px 里是排得下的 —— 没排下再折。
 class ToolColumnDelegate : public QStyledItemDelegate
 {
     Q_OBJECT
@@ -41,7 +47,7 @@ public:
 signals:
     // 点中了该行第 toolIndex 个工具按钮（toolIndex 从 0 起，按实际配置序）。
     void toolButtonClicked(int row, int toolIndex);
-    // 点中了「更多」。view 必须弹 QMenu 让用户选，不许在 delegate 里替他挑第一个 ——
+    // 点中了折叠格「…」。view 必须弹 QMenu 让用户选，不许在 delegate 里替他挑第一个 ——
     // 原始需求描述：「点击调用会弹出一个菜单让用户选择用哪一个工具打开」。
     void toolMoreClicked(int row, int firstHiddenIndex);
 
@@ -49,8 +55,14 @@ private slots:
     void onButtonClicked(const QModelIndex &index);
 
 private:
-    // 返回该行实际要画几个按钮（0 / 1 / 2，其中第 2 个可能是「更多」）。
+    // 返回该行实际要画几个**槽位**（0 / 1 / 2 / 3）。
+    // 槽位 ≠ 工具按钮：4 个及以上时，第 3 个槽位是折叠格「…」，
+    // 点它弹菜单，而不是直接调用第 3 个工具。
     int visibleButtonCount(int toolTotal) const;
+    // 折叠格「…」在第几个槽位（0 起）；没有折叠格时返回 -1。
+    // paint() 和 editorEvent() 都必须用这一份判断"这个格是不是折叠格"，
+    // 各写一份的话就会出现"画的是「…」、点的是第 3 个工具"。
+    int foldSlotIndex(int toolTotal) const;
     // paint() 与 editorEvent() 共用的标签构造。**必须**只有这一份：
     // 两边各写一份的话，改了一边就会出现"画得出来、点不到"。
     QStringList labelsForCell(const QRect &cell, int row, const FileTableModel *model) const;

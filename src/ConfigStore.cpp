@@ -444,6 +444,9 @@ static const char *kAutoSyncDailyTimeKey = "sync/autoSyncDailyTime";
 // 「开机自动启动」的开关。它是**用户意图**；系统里实际有没有落地
 // 由 applyAutoStart() / isAutoStartActive() 单独回答。
 static const char *kAutoStartKey = "app/autoStartEnabled";
+// 带宽限制（rsync --bwlimit）。单位 MB/s，0 = 不限速。
+// 和自动同步那几个键同在 **sync/** 段 —— 它管的是"怎么传"，不是"应用本身"。
+static const char *kBandwidthLimitKey = "sync/bandwidthLimitMBps";
 
 // 自启项在 Windows 注册表里的位置与值名。
 #ifdef _WIN32
@@ -479,6 +482,74 @@ void ConfigStore::saveOnlyNewFiles(bool onlyNew)
 {
     auto s = openSettings();
     s->setValue(QLatin1String(kOnlyNewKey), onlyNew);
+}
+
+// ---- 带宽限制（rsync --bwlimit）----
+
+QVector<int> ConfigStore::bandwidthLimitOptionsMBps()
+{
+    // 0 必须排在第一个：界面铺菜单项时按这个顺序，
+    // 第一项就是「不限速」，也是默认值。
+    //
+    // 档位覆盖现场常见的网口：1/5/10/20/50/100 MB/s
+    //（百兆 ≈ 12.5、千兆 ≈ 125、万兆 ≈ 1250）。
+    // 20 和 100 是后补的：原来 10 和 50 之间跨得太远，现场没有中间档可选。
+    QVector<int> opts;
+    opts << 0 << 1 << 5 << 10 << 20 << 50 << 100;
+    return opts;
+}
+
+int ConfigStore::bandwidthCustomMinMBps()
+{
+    return 1;      // 1 MB/s = 1024 KB/s，已经是最小的有意义的一档
+}
+
+int ConfigStore::bandwidthCustomMaxMBps()
+{
+    return 1024;   // 1 GB/s。再大没有实际意义（千兆网口都跑不满）
+}
+
+int ConfigStore::clampBandwidthMBps(int rawMBps)
+{
+    // 0 = 不限速（默认，也是所有非法值的落点）。
+    if (rawMBps == 0)
+        return 0;
+
+    // 1 ~ 上限之间的整数：**一律接受**。
+    //
+    // 这里刻意**不**查"在不在预置档位里"：客户在界面上填了 12 MB/s，
+    // 那是明确要求的限速，不在 {0,1,5,10,20,50,100} 里只能说明它是自定义值，
+    // 不能说明它写坏了 —— 把它抹成不限速等于**偷偷取消客户的限速**，
+    // 这是比"限速值不在档位表里"严重得多的行为回归。
+    if (rawMBps >= bandwidthCustomMinMBps() && rawMBps <= bandwidthCustomMaxMBps())
+        return rawMBps;
+
+    // 越界（负数、99999）：宁可不限速，也不要给客户一个他没要求的降速，
+    // 也不要让 rsync 拿着一个荒唐的 --bwlimit 去跑。
+    return 0;
+}
+
+int ConfigStore::loadBandwidthLimitMBps()
+{
+    auto s = openSettings();
+    // 键不存在 = 还没配过 → 不限速（和 v2.2 的行为完全一致）。
+    //
+    // **且不要因为读不到就把文件写回去** —— 老配置必须逐字节不变，
+    // "升级到新版本"不能变成"顺手改了我的配置"。
+    if (!s->contains(QLatin1String(kBandwidthLimitKey)))
+        return 0;
+    return clampBandwidthMBps(s->value(QLatin1String(kBandwidthLimitKey), 0).toInt());
+}
+
+void ConfigStore::saveBandwidthLimitMBps(int mbps)
+{
+    const int v = clampBandwidthMBps(mbps);
+    auto s = openSettings();
+    s->setValue(QLatin1String(kBandwidthLimitKey), v);
+    // 落盘并把失败原因记下来 —— 写失败必须在日志里说，不能静默。
+    flushSettings(s.get());
+    // 信号在**落盘之后**才发：接收者（后台同步器）拿到的是已经存住的值。
+    emit instance()->bandwidthLimitSaved(v);
 }
 
 bool ConfigStore::loadRememberSettings()

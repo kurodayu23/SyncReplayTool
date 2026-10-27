@@ -2,6 +2,9 @@
 
 #include "ToolRunner.h"
 #include "FileScanner.h"
+// 带宽限制：每轮同步开始前从 ConfigStore 读一次档位快照（配置在 ConfigStore 里，
+// 缺这个 include 会编译不过）。
+#include "ConfigStore.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -1604,6 +1607,74 @@ RsyncRunner::RsyncRunner(QObject *parent)
 {
     m_watchdog.setSingleShot(true);
     connect(&m_watchdog, &QTimer::timeout, this, &RsyncRunner::onWatchdogTimeout);
+
+    // 配置里的限速档位被改了 —— 本对象要知道，才能如实告诉用户
+    // 「本次同步仍在按旧值跑，新的限速下次生效」。
+    //
+    // 放在构造里连：RsyncRunner 活在整个同步过程里，界面改档位时它一定在。
+    connect(ConfigStore::instance(), &ConfigStore::bandwidthLimitSaved,
+            this, &RsyncRunner::onBandwidthLimitSaved);
+}
+
+// ---- 带宽限制（rsync --bwlimit）----
+
+int RsyncRunner::bwlimitKBpsFor(int mbPerSec)
+{
+    // 不限速（0）→ 0，调用方据此**不加** --bwlimit 这个参数。
+    if (mbPerSec <= 0)
+        return 0;
+    // 1 MB/s = 1024 KB/s。rsync 的 --bwlimit 单位就是 KB/s。
+    return mbPerSec * 1024;
+}
+
+int RsyncRunner::currentBandwidthMBps() const
+{
+    // 正在同步 → 本轮快照的值（就是真正在跑的那个值）；
+    // 没在同步 → 配置里存的值（下次同步会用它）。
+    if (m_roundActive)
+        return m_bwlimitMBps;
+    return ConfigStore::loadBandwidthLimitMBps();
+}
+
+QString RsyncRunner::bandwidthLimitNotice(int newMBps) const
+{
+    // 没在同步 → 新值下次直接生效，不用特别提示。
+    if (!m_roundActive)
+        return QString();
+
+    const int wanted = ConfigStore::clampBandwidthMBps(newMBps);
+    // 选的就是当前正在用的值 → 没有变化，不用提示。
+    if (wanted == m_bwlimitMBps)
+        return QString();
+
+    const QString cur = (m_bwlimitMBps <= 0)
+        ? QString::fromUtf8(u8"不限速")
+        : QString::fromUtf8(u8"%1 MB/s").arg(m_bwlimitMBps);
+    const QString nxt = (wanted <= 0)
+        ? QString::fromUtf8(u8"不限速")
+        : QString::fromUtf8(u8"%1 MB/s").arg(wanted);
+
+    // 说人话，不说实现细节（不提 --bwlimit、不提进程启动时机）。
+    if (m_bwlimitMBps <= 0)
+        return QString::fromUtf8(u8"本次同步未限速，新的限速（%1）将在下次同步时生效").arg(nxt);
+    return QString::fromUtf8(u8"本次同步仍在按 %1 进行，新的限速（%2）将在下次同步时生效")
+        .arg(cur, nxt);
+}
+
+void RsyncRunner::onBandwidthLimitSaved(int mbps)
+{
+    const QString notice = bandwidthLimitNotice(mbps);
+    if (notice.isEmpty())
+        return;
+
+    // 两件事都要做：
+    //   1. 写进同步日志 —— 用户在日志抽屉里能看见"刚才那次改动没立刻生效"；
+    //   2. 发信号 —— 界面要弹一句即时提示的话。
+    //
+    // 只做 1 的话，界面可能什么都不显示（用户没开日志抽屉）；
+    // 只做 2 的话，日志里查不到这次改动。两件都做。
+    emit logText(notice);
+    emit bandwidthLimitDeferred(m_bwlimitMBps, ConfigStore::clampBandwidthMBps(mbps));
 }
 
 RsyncRunner::~RsyncRunner()
@@ -1895,6 +1966,16 @@ void RsyncRunner::start(const TargetConfig &target,
     m_target = target;
     m_localRoot = localRoot;
     cleanupListFiles();
+
+    // 带宽限制：每轮开跑前快照一次。
+    //
+    // 本轮所有分组都用这一个值 —— 一次同步会起好几个 rsync 进程，
+    // 传输途中改档位如果被后半程读到，就成了"半程换挡"，
+    // 既不像"已生效"也不像"没生效"。统一到下一轮，行为才说得清。
+    //
+    // 配置里没有这个键（老版本升上来）→ 0 = 不限速，
+    // 和 v2.2 的行为完全一致，升级不会让客户的速度凭空掉下来。
+    m_bwlimitMBps = ConfigStore::loadBandwidthLimitMBps();
 
     // 扫描阶段的"跳过清单"写进同步日志（**跳过必须留痕**，D-1 起）。
     //
@@ -2279,6 +2360,9 @@ void RsyncRunner::start(const TargetConfig &target,
         m_sourceSnapshot.append(s);
     }
 
+    // 本轮**真正开跑**了 —— 从这里起，中途改限速就是"本次结束后生效"。
+    m_roundActive = true;
+
     ensureRemoteDirs();
 }
 
@@ -2378,6 +2462,7 @@ void RsyncRunner::ensureRemoteDirs()
 {
     if (m_cancelRequested) {
         cleanupSecrets();
+        m_roundActive = false;
         emit allFinished(!m_failed && !m_cancelRequested);
         return;
     }
@@ -2700,6 +2785,7 @@ void RsyncRunner::launchNext()
         if (!m_abortedUnfinished)
             m_failed = true;
         runFinishCleanup();
+        m_roundActive = false;
         emit allFinished(false);
         return;
     }
@@ -2737,6 +2823,7 @@ void RsyncRunner::launchNext()
         if (m_onlyNew && !m_failed && !m_cancelRequested && m_total > m_done)
             emit logText(QString::fromUtf8(u8"\u52FE\u4E86\u300C\u4EC5\u540C\u6B65\u65B0\u589E\u6587\u4EF6\u300D\uFF1A\u672C\u6B21\u6709 %1 \u4E2A\u6587\u4EF6\u6CA1\u6709\u4F20\u8F93\uFF0C\u56E0\u4E3A\u8FDC\u7AEF\u5DF2\u7ECF\u5B58\u5728\u540C\u540D\u6587\u4EF6\uFF0C\u8FDC\u7AEF\u7684\u5185\u5BB9\u4FDD\u6301\u539F\u6837\u3001\u4E0D\u4F1A\u88AB\u8986\u76D6\u3002\u5982\u679C\u4F60\u60F3\u8986\u76D6\u8FDC\u7AEF\u540C\u540D\u6587\u4EF6\uFF0C\u53D6\u6D88\u8FD9\u4E2A\u52FE\u9009\u518D\u540C\u6B65\u4E00\u6B21\u3002")
                          .arg(m_total - m_done));
+        m_roundActive = false;
         emit allFinished(!m_failed && !m_cancelRequested);
         return;
     }
@@ -2917,8 +3004,21 @@ void RsyncRunner::launchNext()
          << QStringLiteral("--files-from=") + listName
          << QStringLiteral("--out-format=%n")
          << QStringLiteral("--info=progress2")
-         << QStringLiteral("-z")
-         << QStringLiteral("-e") << sshCmd
+         << QStringLiteral("-z");
+
+    // 带宽限制（rsync --bwlimit）。单位 KB/s，1 MB/s = 1024 KB/s。
+    //
+    // 不限速时**不加**这个参数 —— 不是加 --bwlimit=0：
+    // 0 在不同 rsync 版本上语义不一致，而命令行里出现一个"限速=0"
+    // 会让运维以为限速开着。干脆不出现。
+    //
+    // 值取自本轮快照（m_bwlimitMBps）：一次同步里所有组用同一个限速，
+    // 传输途中改档位统一到下一轮生效（见 bandwidthLimitNotice）。
+    const int bwKBps = bwlimitKBpsFor(m_bwlimitMBps);
+    if (bwKBps > 0)
+        args << QStringLiteral("--bwlimit=%1").arg(bwKBps);
+
+    args << QStringLiteral("-e") << sshCmd
          << QStringLiteral("./") << g.remoteBase;
 
     emit logText(QString::fromUtf8(u8"\u2192 %1  (%2 \u4E2A\u6587\u4EF6)")

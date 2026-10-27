@@ -12,65 +12,51 @@
 namespace {
 // 按钮的三种配色，对应原型 .btn-tool-act 的三个修饰类。
 // 用数组而不是散在各处写字符串：配色和用在哪一档必须一眼能对上。
-enum Variant { VarBlue = 0, VarSlate, VarGreen, VarMore, VarNone };
+enum Variant { VarBlue = 0, VarSlate, VarGreen, VarMore, VarFail, VarNone };
 
 struct Skin {
     QColor bg, border, fg, hoverBg, hoverFg, hoverBorder;
 };
 
-// 四档按钮全部取自 Theme 的 chipXxx()，不再在本文件写死深色值。
-// 这里原来每个 case 都直接 QColor(0x..)：浅色模式下界面变白，
-// 按钮仍是深蓝/深绿底 + 亮字，白底上一排深色方块（用户 2026-10-16 报的）。
+// AP500BJ 深色工控配色，直接照 ui_preview.html 的 .btn-tool 取值。
+//
+// 这里原来分浅/深两套值：深色一套是 #1e3a8a/#2563eb 那种高饱和蓝，
+// 浅色一套是翻面的浅底深字。AP500BJ 定稿只有一套外观，
+// 所以这里**不再分模式** —— 免得任何一条分支漏改就把浅色值漏回界面。
+//
+// 工具按钮是卡片内的次级控件：底 #1a253e / 边 #24324d / 字 #9cc2f7，
+// 悬停才是主蓝实底（.btn-tool:hover）。
 Skin skinOf(int v)
 {
     Skin s;
-    const bool dark = Theme::isDark();
     switch (v) {
     case VarSlate:
-        if (dark) {
-            s.bg = QColor(0x33, 0x41, 0x55); s.border = QColor(0x47, 0x55, 0x69);
-            s.fg = QColor(0xe2, 0xe8, 0xf0);
-            s.hoverBg = QColor(0x47, 0x55, 0x69); s.hoverFg = Qt::white; s.hoverBorder = QColor(0x64, 0x74, 0x8b);
-        } else {
-            s.bg = QColor(0xe2, 0xe8, 0xf0); s.border = QColor(0xcb, 0xd5, 0xe1);
-            s.fg = QColor(0x33, 0x41, 0x55);
-            s.hoverBg = QColor(0xcb, 0xd5, 0xe1); s.hoverFg = QColor(0x1e, 0x29, 0x3b); s.hoverBorder = QColor(0x94, 0xa3, 0xb8);
-        }
+        s.bg = QColor(0x1a, 0x25, 0x3e); s.border = QColor(0x24, 0x32, 0x4d);
+        s.fg = QColor(0xc4, 0xd3, 0xeb);
+        s.hoverBg = QColor(0x23, 0x31, 0x4f); s.hoverFg = Qt::white; s.hoverBorder = QColor(0x3a, 0x4b, 0x6e);
         break;
     case VarGreen:
-        if (dark) {
-            s.bg = QColor(0x06, 0x4e, 0x3b); s.border = QColor(0x05, 0x96, 0x69);
-            s.fg = QColor(0x34, 0xd3, 0x99);
-            s.hoverBg = QColor(0x05, 0x96, 0x69); s.hoverFg = Qt::white; s.hoverBorder = QColor(0x10, 0xb9, 0x81);
-        } else {
-            s.bg = QColor(0xd1, 0xfa, 0xe5); s.border = QColor(0x6e, 0xe7, 0xb7);
-            s.fg = QColor(0x04, 0x78, 0x57);
-            s.hoverBg = QColor(0xa7, 0xf3, 0xd0); s.hoverFg = QColor(0x06, 0x5f, 0x46); s.hoverBorder = QColor(0x34, 0xd3, 0x99);
-        }
+        s.bg = QColor(0x0b, 0x36, 0x25); s.border = QColor(0x05, 0x96, 0x69);
+        s.fg = QColor(0x4a, 0xde, 0x80);
+        s.hoverBg = QColor(0x05, 0x96, 0x69); s.hoverFg = Qt::white; s.hoverBorder = QColor(0x10, 0xb9, 0x81);
         break;
     case VarMore:
-        // 「更多」：工控中性暗灰边框与底色
-        if (dark) {
-            s.bg = QColor(0x1f, 0x24, 0x2d); s.border = QColor(0x37, 0x41, 0x51);
-            s.fg = QColor(0x94, 0xa3, 0xb8);
-            s.hoverBg = QColor(0x2d, 0x37, 0x48); s.hoverFg = QColor(0x60, 0xa5, 0xfa); s.hoverBorder = QColor(0x3b, 0x82, 0xf6);
-        } else {
-            s.bg = QColor(0xf8, 0xfa, 0xfc); s.border = QColor(0xe2, 0xe8, 0xf0);
-            s.fg = QColor(0x47, 0x55, 0x69);
-            s.hoverBg = QColor(0xef, 0xf6, 0xff); s.hoverFg = QColor(0x25, 0x63, 0xeb); s.hoverBorder = QColor(0xbf, 0xdb, 0xfe);
-        }
+        // 「更多」：中性折叠入口，和 .btn-log 同族（底 #162036 / 字 #9cb1d4）
+        s.bg = QColor(0x16, 0x20, 0x36); s.border = QColor(0x24, 0x32, 0x4d);
+        s.fg = QColor(0x9c, 0xb1, 0xd4);
+        s.hoverBg = QColor(0x1f, 0x2c, 0x49); s.hoverFg = QColor(0xff, 0xff, 0xff); s.hoverBorder = QColor(0x3a, 0x4b, 0x6e);
+        break;
+    case VarFail:
+        // 失败行的按钮（定稿图 .row-alert 里那行的 .btn-tool 是 #5a171d）。
+        s.bg = QColor(0x5a, 0x17, 0x1d); s.border = QColor(0x8b, 0x26, 0x30);
+        s.fg = QColor(0xfc, 0xa5, 0xa5);
+        s.hoverBg = QColor(0x6b, 0x1d, 0x24); s.hoverFg = Qt::white; s.hoverBorder = QColor(0xef, 0x44, 0x44);
         break;
     case VarBlue:
     default:
-        if (dark) {
-            s.bg = QColor(0x1e, 0x3a, 0x8a); s.border = QColor(0x25, 0x63, 0xeb);
-            s.fg = QColor(0x93, 0xc5, 0xfd);
-            s.hoverBg = QColor(0x25, 0x63, 0xeb); s.hoverFg = Qt::white; s.hoverBorder = QColor(0x60, 0xa5, 0xfa);
-        } else {
-            s.bg = QColor(0xdb, 0xea, 0xfe); s.border = QColor(0x93, 0xc5, 0xfd);
-            s.fg = QColor(0x1d, 0x4e, 0xd8);
-            s.hoverBg = QColor(0x25, 0x63, 0xeb); s.hoverFg = Qt::white; s.hoverBorder = QColor(0x1d, 0x4e, 0xd8);
-        }
+        s.bg = QColor(0x1a, 0x25, 0x3e); s.border = QColor(0x24, 0x32, 0x4d);
+        s.fg = QColor(0x9c, 0xc2, 0xf7);
+        s.hoverBg = QColor(0x1f, 0x6f, 0xe0); s.hoverFg = Qt::white; s.hoverBorder = QColor(0x1f, 0x6f, 0xe0);
         break;
     }
     return s;
@@ -87,9 +73,18 @@ int ToolColumnDelegate::visibleButtonCount(int toolTotal) const
 {
     if (toolTotal <= 0)
         return 0;
-    if (toolTotal == 1)
-        return 1;
-    return 2;      // 2 个及以上：「打开」+ 「更多▾」
+    if (toolTotal <= 3)
+        return toolTotal;   // 3 个以内：全部直接画出来，一个都不藏
+    // 超过 3 个：前两个是真按钮，第 3 格是折叠入口「…」。
+    return 3;
+}
+
+int ToolColumnDelegate::foldSlotIndex(int toolTotal) const
+{
+    // 折叠格固定在第 3 格（index 2），且**只有**工具超过 3 个时才存在。
+    // 3 个工具时第 3 格是货真价实的第 3 个工具按钮，不许变成折叠格 ——
+    // 那会把"3 个以内全显示"这条规则悄悄破掉。
+    return (toolTotal > 3) ? 2 : -1;
 }
 
 // 这一行要画的按钮文字。
@@ -100,16 +95,20 @@ int ToolColumnDelegate::visibleButtonCount(int toolTotal) const
 // 界面上一个字都看不出来，还得多去设置里对一遍才知道点下去会发生什么。
 // 所以：**1 个工具时显示配置里的工具名**。
 //
-// 多个工具时保持「打开」+「更多」不变：
-//   - 「打开」在这个场景下是**真的歧义**（有几个工具就叫哪个），
-//     显示某一个的名字等于替用户挑好了，正是这一列要避免的事；
-//   - 需要区分时那一步已经有 QMenu 了（onToolMoreClicked 弹菜单让用户选）。
+// 多个工具时（2 个 / 3 个）也直接写工具名：
+//   - 每个可见按钮对应**一个确定**的工具，点哪个就是哪个，不存在歧义；
+//   - 原来 3 个及以上一律写成「打开」+「更多」，等于把客户配的工具名藏起来，
+//     用户看一列下来全是「打开」，根本不知道自己配了几个、哪几个。
+//
+// 超过 3 个时：前两个写工具名，第 3 格是折叠入口「…」，点开 QMenu 选其余的。
+// 折叠与否按**个数**判断，不按像素宽度 —— 宽度会随名字变化，
+// 同一份配置换个名字就变了行为。
 //
 // 名字兜底（ToolRule::nameAt 从 exe 文件名兜底）这一路也照常显示：
 // 用户没填名字时，给「speViewer」总比给「打开」多一条信息，
 // 而这一栏本来就是"这台机器上真实存在的工具"。
 //
-// singleName 由调用方**先省略号截断**再传进来（见 fitButtonLabel）：
+// names 由调用方**先省略号截断**再传进来（见 fitButtonLabel）：
 // buttonRects 按文字宽度排布，不截断的话超长名字会算出超宽按钮，
 // 然后因为装不下被整条留空 —— 按钮直接消失，而不是被截断。
 static QStringList buttonLabels(int toolTotal, const QStringList &names)
@@ -125,20 +124,20 @@ static QStringList buttonLabels(int toolTotal, const QStringList &names)
         labels << (n.isEmpty() ? QObject::tr("\xE6\x89\x93\xE5\xBC\x80") : n);
         return labels;
     }
-    if (toolTotal == 2) {
-        // 两个工具：两个都直接写工具名。editorEvent 里 total>2 才弹菜单，
-        // 也就是说第二个按钮本来就是直调第二个工具的，标成「更多」是误导。
-        for (int i = 0; i < 2; ++i) {
+    if (toolTotal <= 3) {
+        // 2 个 / 3 个工具：每个都直接写工具名，点哪个调哪个。
+        for (int i = 0; i < toolTotal; ++i) {
             const QString n = names.value(i).trimmed();
             labels << (n.isEmpty() ? QObject::tr("\xE6\x89\x93\xE5\xBC\x80") : n);
         }
         return labels;
     }
-    // 三个及以上：工具名长短不定，按**个数**判断而不是像素宽度 —— 宽度会随
-    // 名字变化，同一列在「ab/cd」和「数据处理工具/格式转换」两种配置下宽度
-    // 差一大截，拿宽度决定显不显示菜单，同一份配置换个名字就变了行为。
-    labels << QObject::tr("\xE6\x89\x93\xE5\xBC\x80");                  // 打开
-    labels << QObject::tr("\xE6\x9B\xB4\xE5\xA4\x9A");             // 更多
+    // 4 个及以上：前两个写工具名，第 3 格是折叠入口「…」。
+    for (int i = 0; i < 2; ++i) {
+        const QString n = names.value(i).trimmed();
+        labels << (n.isEmpty() ? QObject::tr("\xE6\x89\x93\xE5\xBC\x80") : n);
+    }
+    labels << QObject::tr("\xE2\x80\xA6");       // …（U+2026 水平省略号）
     return labels;
 }
 
@@ -155,6 +154,92 @@ static QStringList buttonLabels(int toolTotal, const QStringList &names)
 int maxSingleButtonTextWidth(int cellWidth)
 {
     return cellWidth - 41;
+}
+
+// 折叠入口「…」本身的文字宽度（和按钮同一个字体：11px DemiBold）。
+static int foldTextWidth()
+{
+    QFont f = QApplication::font();
+    f.setPixelSize(11);
+    f.setWeight(QFont::DemiBold);
+    const QFontMetrics fm(f);
+    return fm.width(QString::fromUtf8("\xE2\x80\xA6"));
+}
+
+// 按钮文字的**自然宽度**（和 buttonRects 用的是同一个字体，量出来才能对得上）。
+static int buttonTextWidth(const QString &s)
+{
+    QFont f = QApplication::font();
+    f.setPixelSize(11);
+    f.setWeight(QFont::DemiBold);
+    return QFontMetrics(f).width(s);
+}
+
+// 一行里摆 n 个真按钮（总槽位 slotCount，其中可能含一个折叠格「…」）时，
+// 每个真按钮分到多宽的文字。
+//
+// 分配规则是**按自然宽度**，不是平均分：
+//   - 短名字（"T1"、两字中文）本来就窄，不该被同行的长名字连累成「…」；
+//   - 只有总宽真的装不下时才开始裁，而且先裁最长的那个。
+//
+// 原来这里是「可用宽 ÷ 名字个数」的平均分，而且还**无条件**扣掉折叠格「…」的宽度：
+//   3 个工具那一档根本没有折叠格（第 3 格是货真价实的第 3 个工具），
+//   却照样被扣掉一个「…」的宽度 ⇒ 每个按钮少 3~4px ⇒ 两字工具名被裁成「回…」
+//   ⇒ 界面上三个按钮全变成省略号（v2.3 自检 tool-button-label 就是这么红的）。
+//
+// 宽度算错的后果不是"字被截短"，而是**按钮整个消失**：buttonRects 排不下就返回
+// 空矩形，空矩形在 paint 里被跳过、在 editorEvent 里被当成"没点中" ——
+// 用户看到的是这一格少一个按钮，而且点不动。
+static QVector<int> allocateButtonTextWidths(int cellWidth, const QStringList &raw,
+                                             int slotCount, int foldW)
+{
+    const int n = raw.size();
+    QVector<int> out;
+    if (n <= 0)
+        return out;
+    if (slotCount <= 1) {
+        out << maxSingleButtonTextWidth(cellWidth);
+        return out;
+    }
+    // 可用于文字的总宽：扣掉左右内边距、每个按钮的左右 padding、按钮间距，
+    // 以及（只有真的存在折叠格时）折叠格自己占的那一份。
+    const int usable = cellWidth - 24;
+    int total = usable - 16 * slotCount - 5 * (slotCount - 1) - 1;
+    if (slotCount > n)
+        total -= foldW;              // 有折叠格才扣它的宽度
+
+    QVector<int> natural;
+    int sum = 0;
+    for (int i = 0; i < n; ++i) {
+        natural << buttonTextWidth(raw.at(i));
+        sum += natural.at(i);
+    }
+    if (sum <= total)
+        return natural;              // 全部按自然宽度摆得下 ⇒ 一个都不裁
+
+    // 装不下：先给每个按钮一个平均份额，剩下的额度再补给"还没拿到自然宽度"的那几个。
+    const int fair = qMax(12, total / n);
+    QVector<int> w;
+    int used = 0;
+    for (int i = 0; i < n; ++i) {
+        w << qMin(natural.at(i), fair);
+        used += w.at(i);
+    }
+    int left = total - used;
+    bool progress = true;
+    while (left > 0 && progress) {
+        progress = false;
+        for (int i = 0; i < n && left > 0; ++i) {
+            if (w.at(i) < natural.at(i)) {
+                // 用 operator[] 而不是 at()：Qt 的 at() 返回 const 引用，
+                // 在它上面 ++ 直接编译不过（C3892：不能给常量赋值）。
+                ++w[i];
+                --left;
+                progress = true;
+            }
+        }
+    }
+    return w;
 }
 
 // 把工具名裁到装得下的宽度。绝不允许溢出到按钮区域之外 ——
@@ -217,6 +302,41 @@ QVector<QRect> ToolColumnDelegate::buttonRects(const QRect &cell, const QStringL
         out.append(QRect(x, y, w, h));
         x += w + gap;
     }
+
+    // 整组按钮**居中**。
+    //
+    // 定稿图实测：工具按钮左右余量相等（截图 1349..1407，列 1303..1453），
+    // 原来一律从列左边 +6px 起排，贴着左边，和定稿图对不上。
+    //
+    // 居中是**排完之后整体平移**：「装不装得下」的判断一个字节都不动
+    //（排不下仍然留空 = 按钮不画、点不到），只把排好的整组挪到列中间，
+    // 这样"判据说装得下、画出去却越列"这类错位不会因为改居中而冒出来。
+    int groupL = -1;
+    int groupR = -1;
+    for (int i = 0; i < out.size(); ++i) {
+        if (out.at(i).isNull())
+            continue;
+        if (groupL < 0)
+            groupL = out.at(i).left();
+        groupR = out.at(i).right();
+    }
+    if (groupL >= 0) {
+        const int groupW = groupR - groupL + 1;
+        // 居中范围用左右各 6px 的对称边距（视觉居中），不是原来 6/18 的不对称留白。
+        int nx = cell.left() + 6 + ((cell.width() - 12) - groupW) / 2;
+        // 平移后不许越出这一列 —— 更不许压到「同步状态」列上去。
+        if (nx + groupW - 1 > right)
+            nx = right - groupW + 1;
+        if (nx < left)
+            nx = left;
+        const int shift = nx - groupL;
+        if (shift != 0) {
+            for (int i = 0; i < out.size(); ++i) {
+                if (!out.at(i).isNull())
+                    out[i].translate(shift, 0);
+            }
+        }
+    }
     return out;
 }
 
@@ -230,20 +350,29 @@ QStringList ToolColumnDelegate::labelsForCell(const QRect &cell, int row,
     const int total = model->toolsForRow(row);
     if (total <= 0)
         return QStringList();
-    if (total >= 3)
-        return buttonLabels(total, QStringList());
-    // 1 个 / 2 个工具：显示配置里的工具名，并**先**裁到装得下的宽度。
+
+    // 需要写出工具名的槽位：1 / 2 / 3 个工具时是全部；
+    // 4 个及以上时只有前 2 个（第 3 格是折叠入口「…」，没有名字可写）。
+    const int named = (total > 3) ? 2 : total;
+    // 变量名不能叫 slots —— 那是 Qt 的关键字（Q_SLOTS），展开后这行就成了
+    // "const int = visibleButtonCount(total);"，编译期直接报 C2513。
+    const int slotCount = visibleButtonCount(total);
+
+    // 每个名字能有多宽：**先**算准，再截断。
+    //
     // 裁在 buttonRects 之前是关键：buttonRects 按文字宽排布，
     // 不裁的话超长名字算出超宽按钮，然后因为装不下被整条留空 ——
     // 按钮直接消失，而不是"名字被截断"。用户看到的是"这一格什么都没有"。
-    // 两个按钮时要各分一半：buttonRects 装不下的那个会被留空（按钮消失），
-    // 而按钮消失时 editorEvent 返回 true 会吃掉点击，这一格就彻底点不动了。
-    const int per = (total >= 2)
-                        ? (maxSingleButtonTextWidth(cell.width()) - 5) / 2
-                        : maxSingleButtonTextWidth(cell.width());
+    //
+    // 宽度按**自然宽度**分配（allocateButtonTextWidths）：
+    // 短名字一个都不裁，只有总宽真的装不下才裁最长的那个。
+    QStringList raw;
+    for (int i = 0; i < named; ++i)
+        raw << model->toolNameAt(row, i);
+    const QVector<int> widths = allocateButtonTextWidths(cell.width(), raw, slotCount, foldTextWidth());
     QStringList names;
-    for (int i = 0; i < total; ++i)
-        names << fitButtonLabel(model->toolNameAt(row, i), per);
+    for (int i = 0; i < raw.size(); ++i)
+        names << fitButtonLabel(raw.at(i), widths.value(i, 12));
     return buttonLabels(total, names);
 }
 
@@ -268,7 +397,8 @@ void ToolColumnDelegate::drawButton(QPainter *p, const QRect &r, const QString &
     p->setRenderHint(QPainter::Antialiasing, true);
     p->setPen(QPen(s.border, 1));
     p->setBrush(s.bg);
-    p->drawRoundedRect(r, 4, 4);
+    // AP500BJ：卡片内的按钮是直角（.btn-tool 是 2px），不是 4px 圆角。
+    p->drawRoundedRect(r, 2, 2);
 
     QFont f = QApplication::font();
     f.setPixelSize(11);
@@ -286,9 +416,6 @@ void ToolColumnDelegate::paint(QPainter *painter, const QStyleOptionViewItem &op
                                const QModelIndex &index) const
 {
     painter->save();
-    QColor rowBg = (option.state & QStyle::State_Selected) ? Theme::rowSelectedBg() : Theme::panelBg();
-    painter->fillRect(option.rect, rowBg);
-
     // paint() 是 const 的，index.model() 给的是 const 指针，
     // qobject_cast 必须转成 const 目标类型，否则 C2440。
     const FileTableModel *model = qobject_cast<const FileTableModel *>(index.model());
@@ -298,6 +425,15 @@ void ToolColumnDelegate::paint(QPainter *painter, const QStyleOptionViewItem &op
         painter->restore();
         return;
     }
+
+    // 行底色：选中 / 失败红底 / 普通。三种要在每一列上一致，
+    // 否则失败行的红底被这一列冲掉，红底断成一截一截。
+    QColor rowBg = Theme::panelBg();
+    if (option.state & QStyle::State_Selected)
+        rowBg = Theme::rowSelectedBg();
+    else if (model->fileState(index.row()) == FileTableModel::StateFailed)
+        rowBg = Theme::rowAlertBg();
+    painter->fillRect(option.rect, rowBg);
 
     const int total = model->toolsForRow(index.row());
     if (total <= 0) {
@@ -313,25 +449,28 @@ void ToolColumnDelegate::paint(QPainter *painter, const QStyleOptionViewItem &op
         return;
     }
 
-    const int bc = visibleButtonCount(total);
-    // 「更多」是折叠入口，不带 ▾ 字形 —— 原型的下拉感来自 QMenu 的弹出位置，
+    const int bc   = visibleButtonCount(total);
+    const int fold = foldSlotIndex(total);
+    // 折叠入口「…」不带 ▾ 字形 —— 原型的下拉感来自 QMenu 的弹出位置，
     // 字体里找一个三角字符反而不统一。
     const QStringList labels = labelsForCell(option.rect, index.row(), model);
     const QVector<QRect> rects = buttonRects(option.rect, labels);
 
-    // 变体分配：第 1 个是主操作（蓝），「更多」是中性折叠入口（灰）。
+    // 变体分配：真按钮是主操作（蓝），折叠入口「…」是中性入口（灰），
+    // 失败行的按钮跟着整行一起变红（定稿图 .row-alert）。
     //
     // 原来还有第三档绿色（"h5 的绿是按后缀给的一档绿"），触发条件是
     // 后缀名等于 h5 或者按钮文字里含「查看数据」—— 后者是**在猜**用户配了什么名字。
     // 按钮既然已经固定成「打开」，按后缀挑颜色更没有任何依据，去掉这一档。
+    const bool failedRow = (model->fileState(index.row()) == FileTableModel::StateFailed);
     for (int i = 0; i < bc; ++i) {
         const QRect r = rects.at(i);
         if (r.isNull())
             continue;
-        if (i == bc - 1 && total > 1)
+        if (i == fold)
             drawButton(painter, r, labels.at(i), VarMore);
         else
-            drawButton(painter, r, labels.at(i), VarBlue);
+            drawButton(painter, r, labels.at(i), failedRow ? VarFail : VarBlue);
     }
     painter->restore();
 }
@@ -375,7 +514,8 @@ bool ToolColumnDelegate::editorEvent(QEvent *event, QAbstractItemModel *model,
     if (total <= 0)
         return true;                       // 「未配置工具」这行是说明文字，不该有任何反应
 
-    const int bc = visibleButtonCount(total);
+    const int bc   = visibleButtonCount(total);
+    const int fold = foldSlotIndex(total);
     // 必须和 paint() 用同一个 labelsForCell()：两边各写一份标签构造的话，
     // 改了一边就会出现"画得出来、点不到"，而且两边都编译得过。
     const QStringList labels = labelsForCell(option.rect, index.row(), fm);
@@ -404,10 +544,13 @@ bool ToolColumnDelegate::editorEvent(QEvent *event, QAbstractItemModel *model,
         // 必须用 press 单独判：Qt 的 MouseButtonDblClick 也带 LeftButton，
         // 不能顺手一起放行，否则双击会变成四次启动。
         if (press) {
-            if (i == bc - 1 && total > 2)
-                // 「更多」：按原始需求「同一个后缀配置了多个工具时，点击调用会弹出一个菜单
+            if (i == fold)
+                // 折叠入口「…」：按原始需求「同一个后缀配置了多个工具时，点击调用会弹出一个菜单
                 // 让用户选择用哪一个工具打开」。必须弹菜单，不许偷偷挑第一个。
-                emit toolMoreClicked(index.row(), bc - 1);
+                //
+                // firstHidden = fold = 2：前两个工具已经是各自独立的按钮了，
+                // 菜单里只列第 3 个及以后。
+                emit toolMoreClicked(index.row(), fold);
             else
                 emit toolButtonClicked(index.row(), i);
         }

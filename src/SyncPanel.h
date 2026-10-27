@@ -19,6 +19,7 @@ class QLabel;
 class QProgressBar;
 class QTextEdit;
 class QCheckBox;
+class QToolButton;
 class QTableView;
 class QHeaderView;
 class QMenu;
@@ -275,6 +276,13 @@ public slots:
     void testConnectionAsync(QWidget *sink);
     void testConnectionWithTarget(const TargetConfig &t, QWidget *sink = nullptr);
     void appendNotice(const QString &text);
+    // 往同步日志写一条 INFO。给 SyncPanel 之外的组件用
+    // （MainWindow 的外观切换提示就走这条路）。
+    //
+    // 为什么不让外面直接调 appendLogLine：那个是**私有槽**，
+    // 参数是内部的 tag / tagKind 编码，外部调用者不该知道这两个值怎么编码。
+    // 这里只暴露"写一条普通信息"这一件事。
+    void logInfo(const QString &msg);
     // 日志抽屉的开关。放 public 是因为 MainWindow 的 switchPageForTest()
     // 要在**状态已经对得上时不动作**（避免探针连调两次把抽屉反复开关），
     // 那是 private 就只能盲目 toggle。
@@ -396,6 +404,18 @@ private:
     // 日志抽屉：2000 行 FIFO，超出淘汰最旧（手册 §3）。
     void pushLogLine(const QString &line);
 
+    // ---- 带宽限制（底栏）----
+    //
+    // 菜单每次展开前重铺一遍：勾选状态必须跟着当前值走，
+    // 不能靠"建菜单时记下的那个值"—— 那会漏掉别的窗口改过配置的情况。
+    void rebuildBandwidthMenu();
+    // 弹自定义输入框，收客户自己填的数值（值域由 ConfigStore 给）。
+    void askCustomBandwidthLimit();
+    // 应用一次档位变更：存盘 + 刷新按钮文字 + 写日志。
+    void applyBandwidthLimit(int mbps, bool custom);
+    // 档位 → 按钮上显示的文字（不限速 / 12 MB/s）。
+    static QString bandwidthDisplayText(int mbps);
+
     FileTableModel   *m_model = nullptr;
     ToolColumnDelegate *m_toolDelegate = nullptr;
     QTableView       *m_table = nullptr;
@@ -408,6 +428,16 @@ private:
     QProgressBar     *m_progress = nullptr;
     QCheckBox        *m_onlyNew = nullptr;
     QCheckBox        *m_chkAutoSync = nullptr;
+    // 带宽限制选择器（QToolButton + QMenu，**不是** QComboBox）。
+    //
+    // 为什么不是下拉框：选项超过 3 个时只露 2 个、第 3 格是「更多…」，
+    // QComboBox 的弹出列表绑死在它自己的 model 上，折叠得另写一套机制；
+    // 用按钮 + 菜单可以直接表达"两个常用项 + 一个展开入口"，
+    // 而且按钮上永远显示**当前值**，不受"当前值恰好不在露出的两项里"影响。
+    //
+    // 档位来自 ConfigStore::bandwidthLimitOptionsMBps()，不在这里另写一份；
+    // 「自定义…」那一项由界面自己加，值域取自 ConfigStore 的上下限。
+    QToolButton     *m_bwLimit = nullptr;
     QTimer           *m_autoSyncTimer = nullptr;
     // 「下次同步 N 秒」倒计时专用的 1 秒定时器。
     //

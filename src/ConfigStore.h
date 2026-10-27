@@ -76,6 +76,38 @@ public:
     static QTime                   loadAutoSyncDailyTime();
     static void                    saveAutoSyncDailyTime(const QTime &t);
 
+    // ---- 带宽限制（rsync --bwlimit）----
+    //
+    // 档位集合（单位 MB/s）：**0 = 不限速**，另有 1 / 5 / 10 / 20 / 50 / 100，
+    // 另外支持客户**自定义**一个 1~1024 之间的整数。
+    // ini 键：sync/bandwidthLimitMBps
+    //
+    // 默认是 0（不限速），这是**必须**的：v2.2 交付给客户的版本就是不限速，
+    // 下一版默认限速 5 MB/s 的话，客户升级后同步速度直接掉到 1/5，
+    // 界面上还没有任何解释 —— 那是行为回归，不是新功能。
+    //
+    // 老 ini 里没有这个键 → 按不限速读，**且不要因为读不到就把文件写回去**
+    // （和上面两个键同一条规矩：老配置必须逐字节不变）。
+    //
+    // 非法值（"abc"、-3、99999）→ 同样回落成不限速。
+    // 宁可不限速，也不要给客户一个他没要求的降速。
+    //
+    // **自定义值是合法的**：客户自己填的 12 MB/s 不在预置档位里，
+    // 但那是客户明确要的限速，不能当成"写坏了"给抹成不限速。
+    static int                     loadBandwidthLimitMBps();
+    static void                    saveBandwidthLimitMBps(int mbps);
+    // 归一化：0 = 不限速；1 ~ bandwidthCustomMaxMBps() 的整数原样保留
+    // （预置档位和自定义值都算）；其余一律归成不限速（0）。
+    static int                     clampBandwidthMBps(int rawMBps);
+    // **预置**档位，供界面铺菜单用（界面不自己另写一份，避免两边漂移）。
+    // 注意这里**不含**自定义值：自定义值只有一个，是客户临时填的，
+    // 不该混进"档位"里让人以为还有别的可选值。
+    static QVector<int>            bandwidthLimitOptionsMBps();
+    // 自定义值的合法区间（MB/s）。界面弹自定义输入框时用这两个值做上下限，
+    // 越界值直接让输入框拒收，不要静默改写成别的数。
+    static int                     bandwidthCustomMinMBps();
+    static int                     bandwidthCustomMaxMBps();
+
     // ---- 「开机自动启动」----
     //
     // 持久化开关（app/autoStartEnabled，默认 false）。
@@ -218,6 +250,15 @@ signals:
     // 落盘/读取环节的「静默丢数据」必须让用户看见：DPAPI 解密失败、加密失败、
     // 规则条数超过 kMaxRules 被截断。
     void configNotice(const QString &message);
+
+    // 带宽限制档位被保存（**落盘之后**发出）。
+    //
+    // 谁需要知道：后台同步器。它要判断"这次改动是不是发生在同步过程中"——
+    // rsync 的 --bwlimit 只在进程启动时生效，同步中途改档位，
+    // 本次同步仍按旧值跑，新值只能下次生效。
+    // 后台收到这个信号才能把这件事**如实**告诉用户，
+    // 而不是显示一句"已生效"的假反馈。
+    void bandwidthLimitSaved(int mbps);
 
 private:
     void                           flushPending();
