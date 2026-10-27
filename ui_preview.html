@@ -1,0 +1,1154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>数据同步工具 - 界面效果预览</title>
+    <style>
+        :root {
+            --bg-win: #0e1424;
+            --bg-card: #151d32;
+            --bg-input: #0a0f1d;
+            --border: #24324d;
+            --border-hover: #3a4b6e;
+            --blue: #1f6fe0;
+            --blue-hover: #2b7cf0;
+            --text: #f8fafc;
+            --text-sub: #8fa0c0;
+            --text-dim: #5c6c87;
+            --green: #10b981;
+            --red: #ef4444;
+            --red-bg: #4c161d;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            user-select: none;
+        }
+
+        body {
+            background-color: #050811;
+            color: var(--text);
+            padding: 30px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 24px;
+        }
+
+        /* 顶部极其简洁的切换器 */
+        .preview-toggle {
+            display: flex;
+            gap: 4px;
+            background: #111728;
+            padding: 3px;
+            border: 1px solid var(--border);
+            border-radius: 2px;
+        }
+        .preview-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-sub);
+            padding: 6px 18px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            border-radius: 2px;
+        }
+        .preview-btn.active {
+            background: var(--blue);
+            color: #ffffff;
+        }
+
+        /* 模拟 Windows 桌面上的程序窗口 */
+        .window-frame {
+            width: 980px;
+            background-color: var(--bg-win);
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+        }
+        /* 窗口状态：最大化 / 最小化 / 关闭 */
+        body.win-max .window-frame { width: 100%; height: calc(100vh - 104px); }
+        body.win-max .table-area { flex: 1 1 auto; overflow: auto; }
+        body.win-min .window-frame { height: 38px; }
+        body.win-min .window-frame > *:not(.window-titlebar) { display: none; }
+        body.win-closed .window-frame { display: none; }
+        .closed-hint {
+            display: none;
+            padding: 18px 26px;
+            background: #101728;
+            border: 1px dashed var(--border);
+            border-radius: 2px;
+            color: var(--text-sub);
+            font-size: 13px;
+            text-align: center;
+        }
+        body.win-closed .closed-hint { display: block; }
+        .preview-btn.ghost {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: #7f8ea8;
+        }
+        .preview-btn.ghost:hover { color: #ffffff; border-color: var(--border-hover); }
+        .preview-sep { width: 1px; background: var(--border); margin: 2px 4px; }
+
+        /* 1. 窗口标题栏 (AP500纯净工控，无调色按钮) */
+        .window-titlebar {
+            height: 38px;
+            background-color: #090d17;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 12px;
+        }
+        .titlebar-left {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            font-weight: 700;
+            color: #ffffff;
+        }
+        .titlebar-right {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .btn-settings-head {
+            background: #162035;
+            border: 1px solid var(--border);
+            color: #9cb1d4;
+            padding: 3px 10px;
+            font-size: 12px;
+            border-radius: 2px;
+            cursor: pointer;
+        }
+        .btn-settings-head:hover {
+            background: var(--blue);
+            color: #ffffff;
+            border-color: var(--blue);
+        }
+        .win-ctrl {
+            background: transparent;
+            border: none;
+            width: 34px;
+            height: 26px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .win-ctrl:hover { background: rgba(255, 255, 255, 0.08); }
+        /* AP500BJ 画法：最小化=横杠，最大化=方框，关闭=细红线叉 */
+        .ico-min { width: 11px; height: 2px; background: #9cb1d4; }
+        .ico-max-box {
+            width: 11px;
+            height: 10px;
+            border: 1px solid #9cb1d4;
+            border-top-width: 2px;
+        }
+        .ico-restore {
+            position: relative;
+            width: 14px;
+            height: 13px;
+        }
+        .ico-restore i {
+            position: absolute;
+            width: 9px;
+            height: 8px;
+            border: 1px solid #9cb1d4;
+            border-top-width: 2px;
+        }
+        .ico-restore .r1 { left: 0; top: 5px; }
+        .ico-restore .r2 { right: 0; top: 0; background: #0e1424; }
+        .ico-close {
+            color: #ff3b30;
+            font-size: 17px;
+            font-weight: 300;
+            line-height: 1;
+            font-family: "Segoe UI Symbol", "Segoe UI", sans-serif;
+        }
+        .win-ctrl:hover .ico-min { background: #ffffff; }
+        .win-ctrl:hover .ico-max-box, .win-ctrl:hover .ico-restore { border-color: #ffffff; }
+        .win-ctrl:hover .ico-close { color: #ff6b61; }
+
+        /* 2. 顶部 Tab 栏 (AP500 方块直角) */
+        .tab-bar {
+            background-color: var(--bg-card);
+            border-bottom: 1px solid var(--border);
+            padding: 8px 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .tab-group {
+            display: flex;
+            gap: 4px;
+        }
+        .tab-item {
+            padding: 6px 16px;
+            background-color: #192237;
+            color: var(--text-sub);
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .tab-item.active {
+            background-color: var(--blue);
+            color: #ffffff;
+            border-color: var(--blue);
+        }
+        .btn-rescan {
+            padding: 6px 12px;
+            background: #1a253c;
+            color: #b8cced;
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .btn-rescan:hover {
+            background: #23314f;
+            color: #ffffff;
+        }
+
+        /* 3. 数据表格 */
+        .table-area {
+            padding: 10px 12px;
+            background-color: var(--bg-win);
+            min-height: 260px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+            border: 1px solid var(--border);
+        }
+        th {
+            background-color: #111726;
+            color: #9cb1d4;
+            font-weight: 600;
+            padding: 8px 10px;
+            border-bottom: 2px solid var(--border);
+            border-right: 1px solid var(--border);
+            text-align: left;
+        }
+        td {
+            padding: 7px 10px;
+            border-bottom: 1px solid rgba(36, 50, 77, 0.5);
+            border-right: 1px solid rgba(36, 50, 77, 0.5);
+            color: #e2e8f0;
+        }
+        tbody tr:nth-child(odd) { background-color: var(--bg-card); }
+        tbody tr:nth-child(even) { background-color: #131a2b; }
+        tbody tr:hover { background-color: #1d273f; }
+        tbody tr.row-alert { background-color: var(--red-bg) !important; color: #ffc9cb; }
+
+        .tag {
+            padding: 2px 7px;
+            font-size: 11px;
+            font-weight: 600;
+            border-radius: 2px;
+        }
+        .tag-sync { background: #133465; color: #6db0ff; border: 1px solid #1f6fe0; }
+        .tag-done { background: #0b3625; color: #4ade80; border: 1px solid #059669; }
+        .tag-fail { background: #5a171d; color: #fca5a5; border: 1px solid #dc2626; }
+        .tag-wait { background: #1a2438; color: #8fa0c0; border: 1px solid #2b3a57; }
+        .tag-skip { background: #10393b; color: #6fd6de; border: 1px solid #1f6b70; }
+
+        .btn-tool {
+            background: #1a253e;
+            border: 1px solid var(--border);
+            color: #9cc2f7;
+            padding: 2px 8px;
+            font-size: 11px;
+            cursor: pointer;
+            border-radius: 2px;
+        }
+        .btn-tool:hover {
+            background: var(--blue);
+            color: #fff;
+            border-color: var(--blue);
+        }
+
+        /* 4. 进度仪表条 —— 唯一的曲线元素，进度条带圆角 */
+        .progress-box {
+            margin: 0 12px 10px 12px;
+            background: #12192a;
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            padding: 8px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .progress-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+        }
+        .progress-bar-bg {
+            height: 4px;
+            background-color: #0a0e1a;
+            border: 1px solid #192336;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        .progress-bar-fill {
+            height: 100%;
+            width: 48%;
+            border-radius: 2px;
+            background: linear-gradient(90deg, #1f6fe0, #10b981);
+        }
+
+        /* 5.5 同步日志面板 */
+        .log-panel {
+            margin: 0 12px 10px 12px;
+            background: #0c1220;
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            display: none;
+            flex-direction: column;
+        }
+        .log-panel.open { display: flex; }
+        .log-head {
+            padding: 6px 10px;
+            border-bottom: 1px solid var(--border);
+            font-size: 11.5px;
+            color: #8fa0c0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .log-body {
+            max-height: 172px;
+            overflow: auto;
+            padding: 3px 0;
+        }
+        .log-row {
+            display: flex;
+            align-items: center;
+            font-family: Consolas, Monaco, monospace;
+            font-size: 11.5px;
+            line-height: 20px;
+            padding: 0 10px;
+        }
+        .log-row:hover { background: #131c2e; }
+        .log-time { color: #5c6c87; width: 66px; flex: none; }
+        .log-kind { width: 44px; flex: none; font-weight: 700; }
+        .log-msg { color: #dbe4f3; }
+        .k-start { color: #6db0ff; }
+        .k-send { color: #9cb1d4; }
+        .k-done { color: #4ade80; }
+        .k-fail { color: #fca5a5; }
+        .k-skip { color: #6fd6de; }
+
+        /* 6. 底部栏：简约工控，开关集中 */
+        .bottom-bar {
+            background-color: #090d17;
+            border-top: 1px solid var(--border);
+            padding: 8px 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .btn-log {
+            padding: 6px 12px;
+            background-color: #162036;
+            color: #9cb1d4;
+            border: 1px solid var(--border);
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            border-radius: 2px;
+        }
+        .btn-log:hover {
+            background-color: #1f2c49;
+            color: #ffffff;
+        }
+
+        /* 中间打勾和开关集中放置的紧凑控制带 */
+        .bottom-center-ctrls {
+            display: flex;
+            align-items: center;
+            background: #111727;
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            padding: 3px 12px;
+            gap: 14px;
+        }
+        .chk-unit {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: #c4d3eb;
+            cursor: pointer;
+        }
+        .chk-unit input[type="checkbox"] {
+            accent-color: var(--blue);
+            width: 14px;
+            height: 14px;
+            cursor: pointer;
+        }
+        .split-line {
+            width: 1px;
+            height: 14px;
+            background: var(--border);
+        }
+        .speed-sel {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: #9cb1d4;
+        }
+        .speed-sel select {
+            background: #0a101e;
+            color: #e2e8f0;
+            border: 1px solid #293751;
+            padding: 2px 6px;
+            font-size: 12px;
+            border-radius: 2px;
+            outline: none;
+        }
+
+        .btn-sync {
+            padding: 7px 24px;
+            background-color: var(--blue);
+            color: #ffffff;
+            border: none;
+            border-radius: 2px;
+            font-size: 13px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .btn-sync:hover {
+            background-color: var(--blue-hover);
+        }
+        .btn-sync.stop {
+            background-color: #b43a3a;
+        }
+
+        /* 模态设置弹窗 (简约纯净，开关集中，无冗余) */
+        .modal-mask {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(4, 7, 14, 0.85);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+        }
+        .dialog-card {
+            width: 640px;
+            max-height: 88vh;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 20px 45px rgba(0, 0, 0, 0.8);
+        }
+        .dialog-header {
+            height: 38px;
+            background: #090d17;
+            border-bottom: 1px solid var(--border);
+            padding: 0 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+            font-weight: 700;
+            color: #ffffff;
+        }
+        .dialog-close {
+            background: transparent;
+            border: none;
+            color: var(--text-sub);
+            cursor: pointer;
+            font-size: 15px;
+        }
+        .dialog-close:hover { color: var(--red); }
+
+        .dialog-body {
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            overflow: auto;
+            flex: 1 1 auto;
+            min-height: 0;
+        }
+        .grp-box {
+            background: #101726;
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            padding: 10px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .grp-title {
+            font-size: 12px;
+            font-weight: 700;
+            color: #8fa6cb;
+            border-bottom: 1px solid rgba(36, 50, 77, 0.5);
+            padding-bottom: 5px;
+        }
+        .form-line {
+            display: flex;
+            gap: 10px;
+            align-items: flex-end;
+        }
+        .form-item {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .form-item label {
+            font-size: 11.5px;
+            color: #9eb2d1;
+        }
+        .form-item input {
+            height: 28px;
+            background: var(--bg-input);
+            border: 1px solid #283750;
+            color: #ffffff;
+            padding: 0 8px;
+            font-size: 12px;
+            border-radius: 2px;
+            outline: none;
+        }
+        .form-item input:focus { border-color: var(--blue); }
+        .form-item input::placeholder { color: #4e5c74; }
+        .btn-pick {
+            height: 28px;
+            padding: 0 10px;
+            background: #1a253c;
+            color: #b8cced;
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            font-size: 12px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .btn-pick:hover { background: #23314f; color: #fff; }
+
+        /* 重点：打勾和开关集中放置的一体化卡片 */
+        .switch-board {
+            background: #0d1423;
+            border: 1px solid #26344d;
+            border-radius: 2px;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .board-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .seg-group {
+            display: flex;
+            background: #090d18;
+            border: 1px solid #222f46;
+            border-radius: 2px;
+        }
+        .seg-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-sub);
+            padding: 4px 12px;
+            font-size: 11.5px;
+            cursor: pointer;
+            border-radius: 2px;
+        }
+        .seg-btn.active {
+            background: var(--blue);
+            color: #ffffff;
+        }
+        .param-bar {
+            display: flex;
+            align-items: center;
+            background: #131b2c;
+            border: 1px solid #25334c;
+            padding: 6px 10px;
+            border-radius: 2px;
+            gap: 8px;
+            font-size: 12px;
+        }
+        .param-bar input {
+            width: 60px;
+            height: 24px;
+            background: #090e1a;
+            border: 1px solid #30415f;
+            color: #ffffff;
+            text-align: center;
+            font-size: 12px;
+            font-weight: 700;
+            border-radius: 2px;
+        }
+
+        .tool-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        .tool-table th {
+            background: #111726;
+            color: #9cb1d4;
+            font-weight: 600;
+            padding: 6px 8px;
+            border-bottom: 1px solid var(--border);
+            text-align: left;
+        }
+        .tool-table td {
+            padding: 6px 8px;
+            border-bottom: 1px solid rgba(36, 50, 77, 0.5);
+            color: #e2e8f0;
+        }
+        .btn-add {
+            align-self: flex-start;
+            padding: 4px 10px;
+            background: #1a253c;
+            color: #b8cced;
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .btn-add:hover { background: #23314f; color: #fff; }
+
+        .dialog-footer {
+            height: 44px;
+            background: #090d17;
+            border-top: 1px solid var(--border);
+            padding: 0 12px;
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            gap: 10px;
+        }
+        .btn-dialog {
+            padding: 6px 14px;
+            background: #162036;
+            color: #9cb1d4;
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            font-size: 12.5px;
+            cursor: pointer;
+        }
+        .btn-dialog:hover { background: #1f2c49; color: #fff; }
+        .btn-dialog-save {
+            padding: 6px 20px;
+            background: var(--blue);
+            color: #ffffff;
+            border: none;
+            border-radius: 2px;
+            font-size: 12.5px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .btn-dialog-save:hover { background: var(--blue-hover); }
+        .tip {
+            font-size: 12px;
+            color: var(--text-dim);
+            margin-right: auto;
+        }
+        .tip.ok { color: #4ade80; }
+    </style>
+</head>
+<body>
+
+    <!-- 顶部极简窗口模式切换 -->
+    <div class="preview-toggle">
+        <button class="preview-btn active" id="btnShowMain" onclick="showView('main')">软件主界面</button>
+        <button class="preview-btn" id="btnShowSettings" onclick="showView('settings')">设置弹窗</button>
+        <span class="preview-sep"></span>
+        <button class="preview-btn ghost" id="btnRestore" onclick="restoreWindow()">还原窗口</button>
+        <button class="preview-btn ghost" id="btnReopen" onclick="reopenWindow()">重新打开</button>
+    </div>
+
+    <!-- 软件主窗口 -->
+    <div class="closed-hint" id="closedHint">窗口已关闭 · 点击上方「重新打开」恢复</div>
+    <div class="window-frame" id="winFrame">
+        <!-- 1. 窗口标题栏 (纯净文字，无复杂 logo) -->
+        <div class="window-titlebar">
+            <div class="titlebar-left">
+                <span>数据同步工具</span>
+            </div>
+            <div class="titlebar-right">
+                <button class="btn-settings-head" onclick="showView('settings')">设置</button>
+                <button class="win-ctrl" id="btnMin" title="最小化" onclick="minimizeWindow()"><span class="ico-min"></span></button>
+                <button class="win-ctrl" id="btnMax" title="最大化" onclick="toggleMaximize()"><span class="ico-max-box"></span></button>
+                <button class="win-ctrl" id="btnClose" title="关闭" onclick="closeWindow()"><span class="ico-close">✕</span></button>
+            </div>
+        </div>
+
+        <!-- 2. 分类 Tab 栏 -->
+        <div class="tab-bar">
+            <div class="tab-group">
+                <button class="tab-item active" data-ext="">全部 (12)</button>
+                <button class="tab-item" data-ext=".spe">.spe (7)</button>
+                <button class="tab-item" data-ext=".dat">.dat (3)</button>
+                <button class="tab-item" data-ext=".h5">.h5 (2)</button>
+            </div>
+            <button class="btn-rescan" id="btnRescan">重新扫描</button>
+        </div>
+
+        <!-- 3. 数据表格 -->
+        <div class="table-area">
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width: 36px; text-align: center;"><input type="checkbox" id="chkAll" style="accent-color: var(--blue);"></th>
+                        <th>文件名</th>
+                        <th style="width: 100px;">文件大小</th>
+                        <th style="width: 140px;">创建时间</th>
+                        <th style="width: 140px;">修改时间</th>
+                        <th style="width: 90px; text-align: center;">同步状态</th>
+                        <th style="width: 100px; text-align: center;">工具调用</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td style="text-align: center;"><input type="checkbox" checked></td>
+                        <td style="font-weight: 600;">20261027_104500_870MHz_IQ.spe</td>
+                        <td>420.5 MB</td>
+                        <td>2026-10-27 10:45:00</td>
+                        <td>2026-10-27 10:47:12</td>
+                        <td style="text-align: center;"><span class="tag tag-sync">同步中</span></td>
+                        <td style="text-align: center;"><button class="btn-tool">打开</button></td>
+                    </tr>
+                    <tr>
+                        <td style="text-align: center;"><input type="checkbox" checked></td>
+                        <td>20261027_103000_935MHz_IQ.spe</td>
+                        <td>512.0 MB</td>
+                        <td>2026-10-27 10:30:00</td>
+                        <td>2026-10-27 10:33:15</td>
+                        <td style="text-align: center;"><span class="tag tag-done">已同步</span></td>
+                        <td style="text-align: center;"><button class="btn-tool">打开</button></td>
+                    </tr>
+                    <tr class="row-alert">
+                        <td style="text-align: center;"><input type="checkbox" checked></td>
+                        <td>20261027_101500_AlarmBurst_Raw.dat</td>
+                        <td>128.4 MB</td>
+                        <td>2026-10-27 10:15:00</td>
+                        <td>2026-10-27 10:15:45</td>
+                        <td style="text-align: center;"><span class="tag tag-fail">失败</span></td>
+                        <td style="text-align: center;"><button class="btn-tool" style="background:#5a171d;">打开</button></td>
+                    </tr>
+                    <tr>
+                        <td style="text-align: center;"><input type="checkbox"></td>
+                        <td>20261027_100000_SpectrumSurvey.h5</td>
+                        <td>1.2 GB</td>
+                        <td>2026-10-27 10:00:00</td>
+                        <td>2026-10-27 10:12:00</td>
+                        <td style="text-align: center;"><span class="tag tag-wait">待同步</span></td>
+                        <td style="text-align: center;"><button class="btn-tool">打开</button></td>
+                    </tr>
+                    <tr>
+                        <td style="text-align: center;"><input type="checkbox"></td>
+                        <td>20261026_220000_Backlog.spe</td>
+                        <td>236.8 MB</td>
+                        <td>2026-10-26 22:00:00</td>
+                        <td>2026-10-26 22:31:40</td>
+                        <td style="text-align: center;"><span class="tag tag-skip">已跳过</span></td>
+                        <td style="text-align: center;"><button class="btn-tool">打开</button></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 4. 传输仪表条 -->
+        <div class="progress-box">
+            <div class="progress-labels">
+                <span style="font-weight:700;">同步中 · 剩余 24 秒</span>
+                <span style="color:var(--text-sub); font-family:Consolas, Monaco, monospace;">第 1/4 个 · 420.5 MB · 32.8 MB/s · 已用 13 秒</span>
+            </div>
+            <div class="progress-bar-bg">
+                <div class="progress-bar-fill" id="progFill"></div>
+            </div>
+        </div>
+
+        <!-- 5.5 同步日志面板 -->
+        <div class="log-panel" id="logPanel">
+            <div class="log-head">
+                <span>同步日志</span>
+                <span id="logMeta">最近 6 条</span>
+            </div>
+            <div class="log-body" id="logBody">
+                <div class="log-row">
+                    <span class="log-time">10:45:02</span>
+                    <span class="log-kind k-start">开始</span>
+                    <span class="log-msg">扫描本机目录 待同步 4 个文件 限速 5 MB/s</span>
+                </div>
+                <div class="log-row">
+                    <span class="log-time">10:45:03</span>
+                    <span class="log-kind k-send">传输</span>
+                    <span class="log-msg">20261027_104500_870MHz_IQ.spe 420.5 MB</span>
+                </div>
+                <div class="log-row">
+                    <span class="log-time">10:45:12</span>
+                    <span class="log-kind k-done">完成</span>
+                    <span class="log-msg">20261027_103000_935MHz_IQ.spe 512.0 MB</span>
+                </div>
+                <div class="log-row">
+                    <span class="log-time">10:45:13</span>
+                    <span class="log-kind k-fail">失败</span>
+                    <span class="log-msg">20261027_101500_AlarmBurst_Raw.dat 连接中断</span>
+                </div>
+                <div class="log-row">
+                    <span class="log-time">10:45:14</span>
+                    <span class="log-kind k-skip">跳过</span>
+                    <span class="log-msg">20261026_220000_Backlog.spe 仅同步新增文件</span>
+                </div>
+                <div class="log-row">
+                    <span class="log-time">10:45:15</span>
+                    <span class="log-kind k-start">结束</span>
+                    <span class="log-msg">已同步 2 个 失败 1 个 跳过 1 个 耗时 13 秒</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 5. 底部栏 -->
+        <div class="bottom-bar">
+            <button class="btn-log" id="btnLog">同步日志 ▾</button>
+
+            <!-- 策略与限速：自动同步只在设置弹窗出现，这里不重复 -->
+            <div class="bottom-center-ctrls">
+                <label class="chk-unit">
+                    <input type="checkbox">
+                    <span>仅同步新增文件</span>
+                </label>
+
+                <div class="split-line"></div>
+
+                <div class="speed-sel">
+                    <span>带宽限制</span>
+                    <select id="limitSel">
+                        <option>不限速</option>
+                        <option>1 MB/s</option>
+                        <option selected>5 MB/s</option>
+                        <option>10 MB/s</option>
+                        <option>50 MB/s</option>
+                    </select>
+                </div>
+            </div>
+
+            <button class="btn-sync" id="btnSync">开始同步</button>
+        </div>
+
+        <!-- 6. 设置弹窗 -->
+        <div class="modal-mask" id="settingsDialog" style="display: none;">
+            <div class="dialog-card">
+                <div class="dialog-header">
+                    <span>设置</span>
+                    <button class="dialog-close" onclick="showView('main')">✕</button>
+                </div>
+
+                <div class="dialog-body">
+                    <!-- 网络与目录 -->
+                    <div class="grp-box">
+                        <div class="grp-title">路径与网络</div>
+                        <div class="form-line">
+                            <div class="form-item" style="flex: 2;">
+                                <label>本机同步目录</label>
+                                <input type="text" placeholder="D:/ReplayData">
+                            </div>
+                            <button class="btn-pick" id="btnPickDir">选择目录</button>
+                        </div>
+                        <div class="form-line">
+                            <div class="form-item">
+                                <label>目标电脑 IP</label>
+                                <input type="text" placeholder="192.168.1.100">
+                            </div>
+                            <div class="form-item" style="flex: 0.5;">
+                                <label>SSH 端口</label>
+                                <input type="text" placeholder="22">
+                            </div>
+                        </div>
+                        <div class="form-line">
+                            <div class="form-item">
+                                <label>远端保存目录</label>
+                                <input type="text" placeholder="/home/user/data">
+                            </div>
+                            <div class="form-item">
+                                <label>登录账号</label>
+                                <input type="text" placeholder="登录用户名">
+                            </div>
+                        </div>
+                        <div class="form-line">
+                            <div class="form-item">
+                                <label>登录密码</label>
+                                <input type="password" placeholder="登录密码">
+                            </div>
+                            <div class="form-item" style="flex: 2;">
+                                <label>SSH 私钥文件</label>
+                                <input type="text" placeholder="选择私钥文件">
+                            </div>
+                            <button class="btn-pick" id="btnPickKey">选择文件</button>
+                        </div>
+                    </div>
+
+                    <!-- 集中选项区：无任何括号，干净直接 -->
+                    <div class="grp-box">
+                        <div class="grp-title">同步选项</div>
+                        <div class="switch-board">
+                            <!-- 模式行 -->
+                            <div class="board-row">
+                                <label class="chk-unit" style="font-weight:700; color:#fff;">
+                                    <input type="checkbox" checked>
+                                    <span>自动同步</span>
+                                </label>
+                                <div style="display:flex; align-items:center; gap:8px;">
+                                    <span style="color:#9cb1d4;font-size:11.5px;">同步方式</span>
+                                    <div class="seg-group">
+                                        <button class="seg-btn active" id="btnSeg1" onclick="pickSeg(1)">按间隔重复</button>
+                                        <button class="seg-btn" id="btnSeg2" onclick="pickSeg(2)">每天定时</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- 参数配置行：直接输入数字 -->
+                            <div class="param-bar" id="segParam1">
+                                <span style="color:#9cb1d4;">自动同步间隔</span>
+                                <input type="text" id="iptInterval" value="30">
+                                <span style="color:#8fa0c0;">秒</span>
+                            </div>
+
+                            <div class="param-bar" id="segParam2" style="display: none;">
+                                <span style="color:#9cb1d4;">每天定时时刻</span>
+                                <input type="time" style="width: 90px;">
+                            </div>
+
+                            <!-- 仅同步新增文件只在主界面底栏出现，此处不重复 -->
+                            <div style="display:flex; justify-content:flex-end; align-items:center; padding-top:6px; border-top:1px solid #24324d;">
+                                <label class="chk-unit">
+                                    <input type="checkbox" checked>
+                                    <span>开机自动启动</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 文件打开工具 -->
+                    <div class="grp-box">
+                        <div class="grp-title">文件打开工具</div>
+                        <table class="tool-table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 110px;">文件类型</th>
+                                    <th style="width: 130px;">工具名称</th>
+                                    <th>关联程序路径</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td>.spe</td><td>信号回放</td><td>D:/Tools/SpeViewer.exe</td></tr>
+                                <tr><td>.dat</td><td>数据分析</td><td>D:/Tools/DataAnalyzer.exe</td></tr>
+                            </tbody>
+                        </table>
+                        <button class="btn-add" id="btnAddRule">+ 添加规则</button>
+                    </div>
+                </div>
+
+                <div class="dialog-footer">
+                    <button class="btn-dialog" id="btnTest">测试网络连接</button>
+                    <span class="tip" id="testTip"></span>
+                    <span class="tip" id="saveTip"></span>
+                    <button class="btn-dialog-save" id="btnSave">保存设置</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function showView(view) {
+            const isSettings = (view === 'settings');
+            document.getElementById('settingsDialog').style.display = isSettings ? 'flex' : 'none';
+            document.getElementById('btnShowMain').className = 'preview-btn' + (isSettings ? '' : ' active');
+            document.getElementById('btnShowSettings').className = 'preview-btn' + (isSettings ? ' active' : '');
+        }
+
+        function pickSeg(num) {
+            document.getElementById('btnSeg1').className = 'seg-btn' + (num === 1 ? ' active' : '');
+            document.getElementById('btnSeg2').className = 'seg-btn' + (num === 2 ? ' active' : '');
+            document.getElementById('segParam1').style.display = num === 1 ? 'flex' : 'none';
+            document.getElementById('segParam2').style.display = num === 2 ? 'flex' : 'none';
+        }
+
+        function appendLog(kind, msg, cls) {
+            const body = document.getElementById('logBody');
+            const d = new Date();
+            const t = [d.getHours(), d.getMinutes(), d.getSeconds()]
+                .map(function (n) { return String(n).padStart(2, '0'); }).join(':');
+            const row = document.createElement('div');
+            row.className = 'log-row';
+            const time = document.createElement('span');
+            time.className = 'log-time';
+            time.textContent = t;
+            const k = document.createElement('span');
+            k.className = 'log-kind ' + cls;
+            k.textContent = kind;
+            const m = document.createElement('span');
+            m.className = 'log-msg';
+            m.textContent = msg;
+            row.appendChild(time);
+            row.appendChild(k);
+            row.appendChild(m);
+            body.appendChild(row);
+            body.scrollTop = body.scrollHeight;
+            document.getElementById('logMeta').textContent = '最近 ' + body.children.length + ' 条';
+        }
+
+        document.getElementById('btnLog').onclick = function () {
+            const panel = document.getElementById('logPanel');
+            const open = panel.classList.toggle('open');
+            this.textContent = open ? '同步日志 ▴' : '同步日志 ▾';
+        };
+
+        document.getElementById('btnSync').onclick = function () {
+            const fill = document.getElementById('progFill');
+            if (this.classList.contains('stop')) {
+                this.classList.remove('stop');
+                this.textContent = '开始同步';
+                fill.style.width = '48%';
+                appendLog('停止', '用户取消同步', 'k-skip');
+            } else {
+                this.classList.add('stop');
+                this.textContent = '取消同步';
+                fill.style.width = '78%';
+                appendLog('开始', '手动触发同步 待同步 4 个文件 限速 5 MB/s', 'k-start');
+            }
+        };
+
+        document.getElementById('btnTest').onclick = function () {
+            const t = document.getElementById('testTip');
+            t.className = 'tip ok';
+            t.textContent = '连接成功';
+        };
+
+        document.getElementById('btnSave').onclick = function () {
+            const t = document.getElementById('saveTip');
+            t.className = 'tip ok';
+            t.textContent = '✓ 设置已保存';
+        };
+
+        /* ---- 窗口状态：最小化 / 最大化还原 / 关闭 ---- */
+        function setWindowState(state) {
+            const b = document.body;
+            b.classList.remove('win-max', 'win-min', 'win-closed');
+            if (state) b.classList.add('win-' + state);
+            const maxBtn = document.getElementById('btnMax');
+            if (state === 'max') {
+                maxBtn.title = '还原';
+                maxBtn.innerHTML = '<span class="ico-restore"><i class="r1"></i><i class="r2"></i></span>';
+            } else {
+                maxBtn.title = '最大化';
+                maxBtn.innerHTML = '<span class="ico-max-box"></span>';
+            }
+        }
+        function minimizeWindow() { setWindowState('min'); }
+        function toggleMaximize() {
+            if (document.body.classList.contains('win-max')) setWindowState(null);
+            else setWindowState('max');
+        }
+        function closeWindow() { setWindowState('closed'); }
+        function restoreWindow() { setWindowState(null); }
+        function reopenWindow() { setWindowState(null); }
+
+        /* ---- 分类过滤 ---- */
+        document.querySelectorAll('.tab-item').forEach(function (tab) {
+            tab.onclick = function () {
+                document.querySelectorAll('.tab-item').forEach(function (t) {
+                    t.className = 'tab-item' + (t === tab ? ' active' : '');
+                });
+                const ext = tab.getAttribute('data-ext');
+                document.querySelectorAll('.table-area tbody tr').forEach(function (row) {
+                    const cell = row.children[1];
+                    const name = cell ? cell.textContent.trim() : '';
+                    const dot = name.lastIndexOf('.');
+                    const rowExt = dot > 0 ? name.slice(dot).toLowerCase() : '';
+                    const hit = (!ext || rowExt === ext.toLowerCase());
+                    row.style.display = hit ? '' : 'none';
+                });
+            };
+        });
+
+        /* ---- 全选 ---- */
+        document.getElementById('chkAll').onchange = function () {
+            const on = this.checked;
+            document.querySelectorAll('.table-area tbody tr').forEach(function (row) {
+                if (row.style.display === 'none') return;
+                const box = row.querySelector('input[type="checkbox"]');
+                if (box) box.checked = on;
+            });
+        };
+
+        /* ---- 重新扫描 ---- */
+        document.getElementById('btnRescan').onclick = function () {
+            const btn = this;
+            btn.textContent = '扫描中…';
+            btn.disabled = true;
+            appendLog('扫描', '重新扫描本机同步目录', 'k-send');
+            setTimeout(function () {
+                btn.textContent = '重新扫描';
+                btn.disabled = false;
+                appendLog('完成', '重新扫描结束 找到 4 个文件', 'k-done');
+            }, 1200);
+        };
+
+        /* ---- 文件打开工具：添加规则 ---- */
+        document.getElementById('btnAddRule').onclick = function () {
+            const tbody = document.querySelector('.tool-table tbody');
+            const tr = document.createElement('tr');
+            ['.spe', '新建工具', '点「选择文件」指定程序'].forEach(function (v) {
+                const td = document.createElement('td');
+                td.textContent = v;
+                tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+            appendLog('设置', '新增一条文件打开规则', 'k-start');
+        };
+
+        /* ---- 选择目录 / 选择文件（演示：填入示例路径）---- */
+        document.getElementById('btnPickDir').onclick = function () {
+            const input = this.parentNode.querySelector('input[type="text"]');
+            input.value = 'D:/ReplayData';
+            appendLog('设置', '本机同步目录 已选择', 'k-start');
+        };
+        document.getElementById('btnPickKey').onclick = function () {
+            const input = this.parentNode.querySelector('input[type="text"]');
+            input.value = 'C:/keys/id_rsa';
+            appendLog('设置', 'SSH 私钥文件 已选择', 'k-start');
+        };
+
+        /* ---- 表格里的打开工具 ---- */
+        document.querySelectorAll('.btn-tool').forEach(function (btn) {
+            btn.onclick = function () {
+                const row = this.closest('tr');
+                const name = row && row.children[1] ? row.children[1].textContent.trim() : '';
+                appendLog('打开', name, 'k-send');
+            };
+        });
+
+        /* ---- 带宽限制 ---- */
+        document.getElementById('limitSel').onchange = function () {
+            appendLog('设置', '带宽限制 改为 ' + this.value, 'k-start');
+        };
+    </script>
+</body>
+</html>
