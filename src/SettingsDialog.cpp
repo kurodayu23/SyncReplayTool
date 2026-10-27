@@ -30,6 +30,38 @@
 #include "AutoSyncScheduler.h"
 
 namespace {
+
+// 规则表的表头。定稿图的表头行**有列竖线**，而 QTableWidget 的 gridline
+// 只画在数据区，表头一条竖线都没有 —— 于是表头是三段没有分隔的大字，
+// 跟定稿图对不上。
+//
+// 这里自绘：每段右边缘画一条 #1c2740 的竖线（与数据区的列竖线同色同位），
+// 表头底色由 QSS 给（#111726，比数据行 #151d32 深）。
+class RuleHeaderView : public QHeaderView
+{
+public:
+    explicit RuleHeaderView(QWidget *parent = nullptr)
+        : QHeaderView(Qt::Horizontal, parent)
+    {
+        setSectionsClickable(false);
+        setHighlightSections(false);
+        // 定稿图实测：表头高 29px（表头 + 2 行 = 85px，行高 28）。
+        setFixedHeight(29);
+    }
+
+    // 注意：**这里不自己画表头**。
+    //
+    // Qt 5 的 QHeaderView::paintEvent 会走 `style()->drawControl(CE_Header)`；
+    // app 级 QSS 里一旦出现 `QHeaderView::section` 规则，样式表样式就接管，
+    // 它自己画每个 section 的背景 / 文字 / 边框。
+    // 于是：
+    //   ① 重写 paintSection() 不生效（样式表样式不调它）—— 实测像素扫描确认表头无竖线；
+    //   ② 重写 paintEvent() 也不生效（QHeaderView 自己的 paintEvent 被样式表路径接管）——
+    //      同样实测确认。
+    // 正确做法是**顺着样式表样式这条路走**：竖线写成 section 的 border-right，
+    // 由样式表样式自己画。详见 Theme.h 里那条 QSS 规则的注释。
+};
+
 const char *kTxtHost       = "\xE7\x9B\xAE\xE6\xA0\x87\xE7\x94\xb5\xE8\x84\x91 IP";      // 目标电脑 IP
 const char *kTxtPort       = "SSH \xE7\xAB\xAF\xE5\x8F\xA3";      // SSH 端口
 const char *kTxtKeyFile    = "SSH \xE7\xA7\x81\xE9\x92\xA5\xE6\x96\x87\xE4\xBB\xB6";      // SSH 私钥文件
@@ -46,7 +78,7 @@ const char *kTxtSave       = "\xE4\xBF\x9D\xE5\xAD\x98\xE8\xAE\xBE\xE7\xBD\xAE";
 const char *kTxtDialogTitle= "\xE8\xAE\xBE\xE7\xBD\xAE";  // 设置
 const char *kTxtColSuffix  = "\xE6\x96\x87\xE4\xBB\xB6\xE7\xB1\xBB\xE5\x9E\x8B";      // 文件类型
 const char *kTxtColTool    = "\xE5\xB7\xA5\xE5\x85\xB7\xE5\x90\x8D\xE7\xA7\xB0";      // 工具名称
-const char *kTxtColPath    = "\xE5\x85\xB3\x8C\xE8\x81\x94\xE7\xA8\x8B\xE5\xBA\x8F\xE8\xB7\xAF\xE5\xBE\x84";  // 关联程序路径
+const char *kTxtColPath    = "\xE5\x85\xB3\xE8\x81\x94\xE7\xA8\x8B\xE5\xBA\x8F\xE8\xB7\xAF\xE5\xBE\x84";  // 关联程序路径
 // 带上范围：客户看得出可以填多少。
 // 原来这里只有"自动同步间隔"，而输入框挂了 QIntValidator(10, 86400)
 // —— 客户想填 5 秒会被**静默拒绝**（输入框不反应），以为软件坏了。
@@ -497,6 +529,9 @@ SettingsDialog::SettingsDialog(QWidget *parent)
 
     m_ruleTable = new QTableWidget(0, 3);
     m_ruleTable->setObjectName(QStringLiteral("ruleTable"));
+    // 表头先换掉再设列名：setHorizontalHeaderLabels() 是给**当前表头**写标签，
+    // 顺序反了的话新表头上一个标签都没有（表头会是一片空白）。
+    m_ruleTable->setHorizontalHeader(new RuleHeaderView(m_ruleTable));
     m_ruleTable->setHorizontalHeaderLabels(QStringList()
                                            << QString::fromUtf8(kTxtColSuffix)
                                            << QString::fromUtf8(kTxtColTool)
@@ -513,8 +548,10 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     // 面板因此比定稿图高出 70 多 px、第三组差点被挤出屏幕。
     m_ruleTable->setFixedHeight(96);
     m_ruleTable->horizontalHeader()->setStretchLastSection(true);
-    m_ruleTable->setColumnWidth(0, 95);
-    m_ruleTable->setColumnWidth(1, 140);
+    // 列宽照定稿图实测：文件类型列 110px、工具名称列 130px
+    // （定稿图表头列竖线逻辑位置 28 / 138 / 268 / 612.7，差值即列宽）。
+    m_ruleTable->setColumnWidth(0, 110);
+    m_ruleTable->setColumnWidth(1, 130);
     toolsLay->addWidget(m_ruleTable);
 
     // 「+ 添加规则」放在表格**下面**（定稿图 .btn-add 就是这么排的），
@@ -703,10 +740,12 @@ void SettingsDialog::onSaveClicked()
             effectiveNote = QString::fromUtf8(u8"（自动同步间隔按 %1 秒生效）").arg(effective);
         }
         if (err.isEmpty()) {
-            m_saveTip->setText(QString::fromUtf8(u8"\u2713 \u8BBE\u7F6E\u5DF2\u4FDD\u5B58") // ✓ 设置已保存
+            // √ (U+221A) 而不是 ✓ (U+2713)：后者在 Microsoft YaHei UI 里没有字形，
+            // 精简版 Windows / 容器上会变成豆腐块；√ 在 GB2312 就收录，任何中文字体都有。
+            m_saveTip->setText(QString::fromUtf8(u8"\u221A \u8BBE\u7F6E\u5DF2\u4FDD\u5B58") // √ 设置已保存
                                + effectiveNote);
         } else {
-            m_saveTip->setText(QString::fromUtf8(u8"\u2717 \u8BBE\u7F6E\u672A\u4FDD\u5B58")
+            m_saveTip->setText(QString::fromUtf8(u8"\u00D7 \u8BBE\u7F6E\u672A\u4FDD\u5B58")
                                + QString::fromUtf8(u8"\uFF1A") + err);
         }
         m_saveTip->setVisible(true);
@@ -794,7 +833,7 @@ void SettingsDialog::onAutoStartToggled(bool on)
                             .arg(reason);
         const QString full = msg + QString::fromUtf8(u8"\n位置：%1").arg(where);
         if (m_saveTip) {
-            m_saveTip->setText(QString::fromUtf8(u8"\u2717 ") + msg);   // ✗
+            m_saveTip->setText(QString::fromUtf8(u8"\u00D7 ") + msg);   // ×
             m_saveTip->setVisible(true);
             QTimer::singleShot(6000, m_saveTip, &QLabel::hide);
         }
@@ -838,6 +877,11 @@ void SettingsDialog::addRuleRow()
             it->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         m_ruleTable->setItem(r, c, it);
     }
+    // 表格高度必须**跟着行数走**，否则新行落在可视区之外 ——
+    // 用户点一下看着什么都没发生（2026-10-27 报障的现象）。
+    syncRuleTableHeight();
+    // 再滚到底：新行必须在可见区里，光"存在"不算数。
+    m_ruleTable->scrollToBottom();
     m_ruleTable->setCurrentCell(r, 0);
     m_ruleTable->editItem(m_ruleTable->item(r, 0));
 }
@@ -849,6 +893,8 @@ void SettingsDialog::removeRuleRow(int row)
     m_ruleTable->removeRow(row);
     if (row < m_rowExists.size())
         m_rowExists.removeAt(row);
+    // 少了一行，表格也得矮回去 —— 否则删完下面留一块空白。
+    syncRuleTableHeight();
 }
 
 void SettingsDialog::onRuleCellChanged(int row, int col)
@@ -920,26 +966,37 @@ void SettingsDialog::loadConfig(const TargetConfig &target,
         }
     }
 
-    // 规则表高度随规则数走。
-    //
-    // 原来死锁 96px（表头 + 2 行）：配到第 3 条规则时第 3 行被裁掉，
-    // 右边还冒出一条滚动条 —— 用户以为规则没保存上。
-    // 定稿图是 2 条规则（表头 + 2 行 = 96px），所以 2 条时高度一个像素都不动。
-    {
-        const int rows = m_ruleTable->rowCount();
-        // 表头 29 + 每行 28（定稿图实测：表头 + 2 行 = 85px）。
-        const int hdrH = 29;
-        const int rowH = 28;
-        int want = hdrH + rows * rowH + 1;
-        if (want > 260)
-            want = 260;
-        const int delta = want - m_ruleTable->height();
-        if (delta != 0) {
-            m_ruleTable->setFixedHeight(want);
-            if (m_scrollArea)
-                m_scrollArea->setMinimumHeight(m_scrollArea->minimumHeight() + delta);
-            setFixedHeight(height() + delta);
-        }
+    // 规则表高度随规则数走（实现见 syncRuleTableHeight）。
+    syncRuleTableHeight();
+}
+
+// 规则表高度随规则数走。
+//
+// 原来死锁 96px（表头 + 2 行）：配到第 3 条规则时第 3 行被裁掉，
+// 右边还冒出一条滚动条 —— 用户以为规则没保存上。
+// 定稿图是 2 条规则（表头 + 2 行 = 85px），所以 2 条时高度一个像素都不动。
+//
+// 为什么必须抽成函数：**点「+ 添加规则」之后也要重算**。
+// 原来只有 loadConfig 会算 —— 点完按钮表格高度不变，新行落在可视区之外，
+// 用户点一下看着什么都没发生（2026-10-27 用户报障）。
+void SettingsDialog::syncRuleTableHeight()
+{
+    const int rows = m_ruleTable->rowCount();
+    // 表头 29 + 每行 28（定稿图实测：表头 + 2 行 = 85px）。
+    const int hdrH = 29;
+    const int rowH = 28;
+    // **必须加上上下边框各 1px**：少算这 2px，内容就比视口高 1px，
+    // Qt 判定溢出 ⇒ 表格右侧冒出一条垂直滚动条（定稿图没有）。
+    // 实测踩过：公式写成 +1 时规则表右侧一直挂着一条滚动条。
+    int want = hdrH + rows * rowH + 2 * m_ruleTable->frameWidth();
+    if (want > 260)
+        want = 260;
+    const int delta = want - m_ruleTable->height();
+    if (delta != 0) {
+        m_ruleTable->setFixedHeight(want);
+        if (m_scrollArea)
+            m_scrollArea->setMinimumHeight(m_scrollArea->minimumHeight() + delta);
+        setFixedHeight(height() + delta);
     }
 }
 
@@ -1084,6 +1141,93 @@ void SettingsDialog::applyConfig(TargetConfig *target,
             (*toolRules)[idx].toolArgs.append(m_toolArgsByExe.value(argKey(suf, exe)));
         }
     }
+}
+
+// ------------------------------------------------------------------
+// 自动化探针（--selfcheck-gui）用的接口。声明在 SettingsDialog.h 的 public 区。
+// ------------------------------------------------------------------
+
+int SettingsDialog::ruleRowCountForTest() const
+{
+    return m_ruleTable ? m_ruleTable->rowCount() : -1;
+}
+
+int SettingsDialog::ruleTableHeightForTest() const
+{
+    return m_ruleTable ? m_ruleTable->height() : -1;
+}
+
+bool SettingsDialog::ruleLastRowVisibleForTest() const
+{
+    if (!m_ruleTable || m_ruleTable->rowCount() <= 0)
+        return false;
+    const int rows = m_ruleTable->rowCount();
+    const QRect last = m_ruleTable->visualItemRect(m_ruleTable->item(rows - 1, 0));
+    const QRect vp = m_ruleTable->viewport()->rect();
+    // 必须**完整落在可视区里**：只露半行也算看不见。
+    return vp.contains(last);
+}
+
+void SettingsDialog::clickAddRuleForTest()
+{
+    if (m_addRule)
+        m_addRule->click();
+}
+
+void SettingsDialog::clickSaveForTest()
+{
+    if (m_btnSave)
+        m_btnSave->click();
+}
+
+void SettingsDialog::removeRuleRowForTest(int row)
+{
+    removeRuleRow(row);
+}
+
+void SettingsDialog::setRuleTableHeightForTest(int h)
+{
+    if (m_ruleTable)
+        m_ruleTable->setFixedHeight(h);
+}
+
+void SettingsDialog::setRuleCellForTest(int row, int col, const QString &text)
+{
+    if (!m_ruleTable)
+        return;
+    if (!m_ruleTable->item(row, col))
+        m_ruleTable->setItem(row, col, new QTableWidgetItem);
+    m_ruleTable->item(row, col)->setText(text);
+}
+
+QString SettingsDialog::ruleCellForTest(int row, int col) const
+{
+    if (!m_ruleTable)
+        return QString();
+    QTableWidgetItem *it = m_ruleTable->item(row, col);
+    return it ? it->text() : QString();
+}
+
+void SettingsDialog::setAutoSyncIntervalForTest(const QString &s)
+{
+    if (m_autoSyncInterval)
+        m_autoSyncInterval->setText(s);
+}
+
+QString SettingsDialog::autoSyncIntervalForTest() const
+{
+    return m_autoSyncInterval ? m_autoSyncInterval->text() : QString();
+}
+
+void SettingsDialog::setAutoSyncEnabledForTest(bool on)
+{
+    if (m_autoSyncBox)
+        m_autoSyncBox->setChecked(on);
+}
+
+bool SettingsDialog::autoSyncEnabledForTest() const
+{
+    return m_autoSyncBox ? m_autoSyncBox->isChecked() : false;
 }
 
 void SettingsDialog::showTestResult(const QString &text, bool ok, bool testing)

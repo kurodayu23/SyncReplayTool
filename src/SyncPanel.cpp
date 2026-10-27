@@ -149,8 +149,12 @@ const char *kRefresh     = "\xE9\x87\x8D\xE6\x96\xB0\xE6\x89\xAB\xE6\x8F\x8F";  
 const char *kOnlyNew     = "\xE4\xBB\x85\xE5\x90\x8C\xE6\xAD\xA5\xE6\x96\xB0\xE5\xA2\x9E\xE6\x96\x87\xE4\xBB\xB6";  // 仅同步新增文件
 const char *kStartSync   = "\xE5\xBC\x80\xE5\xA7\x8B\xE5\x90\x8C\xE6\xAD\xA5";  // 开始同步
 const char *kCancelSync  = "\xE5\x8F\x96\xE6\xB6\x88";                        // 取消
-const char *kLogOpen     = "\xE5\x90\x8C\xE6\xAD\xA5\xE6\x97\xA5\xE5\xBF\x97 \xE2\x96\xBE";  // 同步日志 ▾
-const char *kLogClose    = "\xE5\x90\x8C\xE6\xAD\xA5\xE6\x97\xA5\xE5\xBF\x97 \xE2\x96\xB4";  // 同步日志 ▴
+// 箭头用 ▼ / ▲（U+25BC / U+25B2），不用原来的 ▾ / ▴（U+25BE / U+25B4）：
+//   ① 客户定稿图上的「同步日志 ▼」就是**实心**下三角，形状本来就没对齐；
+//   ② ▾▴ 在 Microsoft YaHei UI 里没有字形（靠 Windows 字体链接兜底才画得出来），
+//      精简版 Windows 与容器上会退化成豆腐块；▼▲ 在任何中文字体里都有。
+const char *kLogOpen     = "\xE5\x90\x8C\xE6\xAD\xA5\xE6\x97\xA5\xE5\xBF\x97 \xE2\x96\xBC";  // 同步日志 ▼
+const char *kLogClose    = "\xE5\x90\x8C\xE6\xAD\xA5\xE6\x97\xA5\xE5\xBF\x97 \xE2\x96\xB2";  // 同步日志 ▲
 const char *kLogTitle    = "\xE5\xAE\x9E\xE6\x97\xB6\xE4\xBC\xA0\xE8\xBE\x93\xE6\xB5\x81\xE6\xB0\xB4\xE6\x97\xA5\xE5\xBF\x97";  // 实时传输流水日志
 const char *kCopyLog     = "\xE5\xA4\x8D\xE5\x88\xB6\xE6\x97\xA5\xE5\xBF\x97";  // 复制日志
 const char *kClearLog    = "\xE6\xB8\x85\xE7\xA9\xBA";                      // 清空
@@ -474,6 +478,9 @@ void SyncPanel::buildUi()
     // 但定稿图一直留着这个入口，而且它本来就是产品原有功能 ——
     // 拿原型当唯一依据去砍功能，方向就反了。
     headLay->addWidget(m_refresh);
+    // 定稿图实测：「重新扫描」按钮右缘离卡片右边框还有约 19px 留白。
+    // 我们原来直接贴边，看着像"顶到边上"（用户 2026-10-27 反馈）。
+    headLay->addSpacing(19);
     cardLay->addWidget(head);
 
     QFrame *hline = new QFrame;
@@ -662,7 +669,8 @@ void SyncPanel::buildUi()
             this, &SyncPanel::rebuildBandwidthMenu);
     m_bwLimit->setText(bandwidthDisplayText(ConfigStore::loadBandwidthLimitMBps()));
 
-    m_toggleLog = new QPushButton(T(kLogOpen));
+    // 默认**展开**日志抽屉（用户 2026-10-27 要求），所以按钮初始文案是「收起」。
+    m_toggleLog = new QPushButton(T(kLogClose));
     m_toggleLog->setObjectName(QStringLiteral("btnToggleLog"));
     m_toggleLog->setFixedHeight(28);
     m_toggleLog->setCursor(Qt::PointingHandCursor);
@@ -712,7 +720,10 @@ void SyncPanel::buildUi()
     // ---- 4. 日志抽屉（默认收起，展开 175px，2000 行 FIFO）----
     m_logDrawer = new QWidget;
     m_logDrawer->setObjectName(QStringLiteral("logDrawer"));
-    m_logDrawer->setVisible(false);
+    // 默认**展开**（用户 2026-10-27 要求）：主界面默认展开同步日志后，
+    // 主界面高度与设置弹窗一致（758），两个窗口是同一个尺寸体系。
+    m_logDrawer->setVisible(true);
+    m_logOpen = true;
     m_logDrawer->setFixedHeight(175);
     QVBoxLayout *logLay = new QVBoxLayout(m_logDrawer);
     logLay->setContentsMargins(0, 0, 0, 0);
@@ -1290,9 +1301,11 @@ void SyncPanel::toggleLogDrawer()
     m_logOpen = !m_logOpen;
     m_logDrawer->setVisible(m_logOpen);
     m_toggleLog->setText(m_logOpen ? T(kLogClose) : T(kLogOpen));
-    if (window()) {
-        window()->setFixedHeight(m_logOpen ? 680 : 480);
-    }
+    // 窗口高度**只由 MainWindow 决定**。
+    // 原来这里写死 680/480，而 MainWindow::refitToScreen() 用的是 630/460 ——
+    // 两处打架：点一下日志，窗口先变成 680，再被 refit 改回 630，
+    // 表现就是"点一下窗口高度跳一下"。高度必须只有一个来源。
+    emit logDrawerToggled(m_logOpen);
 }
 
 void SyncPanel::pushLogLine(const QString &line)

@@ -46,6 +46,40 @@ public:
 
     int autoSyncInterval() const;
 
+    // ---- 自动化探针（--selfcheck-gui）专用 ----
+    //
+    // 为什么要有这些：GUI 层的交互**从来没被 --selfcheck 覆盖过**
+    // （--selfcheck 不开窗口，验的是纯函数与参数装配）。
+    // 于是"「+ 添加规则」点了没反应"这种缺陷能一路混进交付包 ——
+    // 而它恰恰是用户第一眼就会点的地方。
+    //
+    // 这些接口让判据能**真的点那个按钮**（走控件自己的 clicked 信号），
+    // 再回读界面状态，而不是照抄一份实现自己算一遍。
+    // 界面上"新行存在"和"新行看得见"是两件事，两个都要能读。
+    int  ruleRowCountForTest() const;
+    int  ruleTableHeightForTest() const;
+    // 最后一行是不是**完整落在可视区里**（只露半行也算看不见）。
+    bool ruleLastRowVisibleForTest() const;
+    void clickAddRuleForTest();
+    // 点**真实的「保存设置」按钮**。
+    //
+    // 为什么不能走 MainWindow::saveSettingsForProbe()：那条路径只做
+    // applyConfig + 落盘，**绕过**了 SettingsDialog::onSaveClicked()，
+    // 而自动同步开关 / 间隔 / 模式 / 定点时刻全部是在 onSaveClicked 里落盘的。
+    // 探针走那条路径报出来的 FAIL，根因在探针自己，不在产品。
+    void clickSaveForTest();
+    void removeRuleRowForTest(int row);
+    // 强行设定规则表高度。**只给阴性对照用**：
+    // 把表格压扁，新行必然落到可视区之外 —— 用来证明
+    // 「新行看得见」这条判据真的在看几何，而不是恒真。
+    void setRuleTableHeightForTest(int h);
+    void setRuleCellForTest(int row, int col, const QString &text);
+    QString ruleCellForTest(int row, int col) const;
+    void setAutoSyncIntervalForTest(const QString &s);
+    QString autoSyncIntervalForTest() const;
+    void setAutoSyncEnabledForTest(bool on);
+    bool autoSyncEnabledForTest() const;
+
     // 自动同步的两种模式（按间隔重复 / 每天定点）。互斥，界面二选一。
     AutoSyncScheduler::Mode autoSyncMode() const;
     // 每天定点的时刻（界面上的时间选择器）。
@@ -80,6 +114,12 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
 
 private:
+    // 规则表高度随行数走。抽成函数是因为**两处**都要它：
+    // 打开弹窗时（loadConfig）与点「+ 添加规则」之后（addRuleRow）。
+    // 原来只有 loadConfig 会算 —— 于是点完按钮新行落在固定高度表格之外，
+    // 用户看着"点了没反应"（2026-10-27 报障）。
+    void syncRuleTableHeight();
+
     QFrame      *m_card = nullptr;
     QFrame      *m_header = nullptr;
     QPushButton *m_btnClose = nullptr;

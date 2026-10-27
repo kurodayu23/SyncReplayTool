@@ -267,6 +267,10 @@ public:
 
 signals:
     void settingsRequested();
+    // 日志抽屉开关。**窗口高度由 MainWindow 决定**（只有它知道窗口该多高），
+    // SyncPanel 只负责报状态 —— 原来这里直接 window()->setFixedHeight(680/480)，
+    // 而 MainWindow::refitToScreen() 用的是 630/460，两处打架。
+    void logDrawerToggled(bool open);
     // 连接测试的异步结果。设置弹窗只负责显示，
     // 真正的连接逻辑在 RsyncRunner 那条已经测通的路径上。
     void testConnectionResult(const QString &text, bool ok, bool testing);

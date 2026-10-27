@@ -33,6 +33,7 @@
 #include "Model.h"
 #include "FileTableModel.h"
 #include "ToolColumnDelegate.h"
+#include "SettingsDialog.h"
 
 // ------------------------------------------------------------------
 // --selfcheck：不开窗口，把归因判据和看门狗预算跑一遍，输出 PASS/FAIL。
@@ -2722,6 +2723,212 @@ int runSelfCheck()
 }
 
 
+// ------------------------------------------------------------------
+// --selfcheck-gui：GUI 交互回归。
+//
+// 为什么必须单独有这一套：--selfcheck **不开窗口**，验的是纯函数与参数装配；
+// 于是所有"点了按钮有没有反应"的缺陷都漏网 —— 「+ 添加规则」点了没反应
+// 就是这么混进交付包的（2026-10-27 用户报障，现象是点了之后表格里看不见新行）。
+//
+// 这一套走的是**真实控件**：真的点那个按钮（QPushButton::click() 与鼠标点击
+// 走同一条 clicked 信号链路），然后回读界面的真实几何状态。
+//
+// 三条纪律：
+//   ① 每条判据都必须能 FAIL。判据里自带**阴性对照**：故意把状态改坏，
+//      判据必须报 FAIL，否则这条判据就是恒真的假保证。
+//   ② 判据只读**界面真实状态**（行数、控件高度、viewport 几何），
+//      不照抄一份实现自己算一遍。
+//   ③ 落盘往返必须回到 ini 再读回来（"内存里对、磁盘上错"是最常见的漏法）。
+int runGuiSelfCheck()
+{
+    QTextStream out(stdout);
+    int pass = 0;
+    int bad = 0;
+    auto check = [&out, &pass, &bad](const char *name, bool ok, const QString &detail) {
+        if (ok) {
+            ++pass;
+            out << "PASS\t" << name << "\n";
+        } else {
+            ++bad;
+            out << "FAIL\t" << name << "\t" << detail << "\n";
+        }
+        out.flush();
+    };
+
+    // 沙箱：判据自己会读写真实配置（保存设置那条链路），必须隔离。
+    QTemporaryDir sandbox;
+    if (!sandbox.isValid()) {
+        out << "FAIL\tsandbox\t临时目录不可用\n";
+        out.flush();
+        return 1;
+    }
+    const QByteArray oldCfgDir = qgetenv("SRT_CONFIG_DIR");
+    qputenv("SRT_CONFIG_DIR", sandbox.path().toLocal8Bit());
+
+    // 灌 2 条规则，模拟"用户已经配过规则"的真实状态。
+    // 工具路径用程序自己的 exe：哪个机器上都一定存在
+    // （loadToolRules 会把 exe 为空的条目丢掉，用假路径会让"往返"判据失真）。
+    {
+        QVector<ToolRule> rules;
+        const QString selfExe = QCoreApplication::applicationFilePath();
+        for (int i = 0; i < 2; ++i) {
+            ToolRule r;
+            r.suffix = (i == 0) ? QStringLiteral("spe") : QStringLiteral("raw");
+            r.toolNames    << QStringLiteral("probe-tool");
+            r.toolExePaths << selfExe;
+            r.toolArgs     << QStringLiteral("--play {file}");
+            rules << r;
+        }
+        ConfigStore::saveToolRules(rules);
+    }
+
+    MainWindow::setSkipSplash(true);
+    MainWindow w;
+    // 不上屏、不抢焦点，但走完整的 Windows 字体与布局（offscreen 平台没字体）。
+    w.setAttribute(Qt::WA_DontShowOnScreen, true);
+    w.show();
+    QApplication::processEvents();
+
+    // ---- 主界面 ----
+    {
+        SyncPanel *panel = w.syncPanelForTest();
+        const bool open = panel && panel->isLogOpenForTest();
+        check("G1-log-default-open", open, QStringLiteral("isLogOpenForTest=0"));
+        // 主界面高度与设置弹窗一致（758）。
+        check("G2-main-height-matches-settings", w.height() == 759,
+              QStringLiteral("height=%1 expected=759").arg(w.height()));
+    }
+
+    // ---- 设置弹窗 ----
+    w.showSettingsForProbe();
+    QApplication::processEvents();
+    SettingsDialog *d = w.settingsForTest();
+    check("G3-settings-dialog", d != nullptr, QStringLiteral("settingsForTest=null"));
+    if (!d) {
+        out << "GUI_CHECK_FAILED\n";
+        out.flush();
+        return 1;
+    }
+    QApplication::processEvents();
+
+    // 已配规则被正确读进表格
+    const int rows0 = d->ruleRowCountForTest();
+    check("G4-rules-loaded", rows0 == 2,
+          QStringLiteral("rows=%1 expected=2").arg(rows0));
+
+    // 点「+ 添加规则」→ 行数 +1
+    const int h0 = d->ruleTableHeightForTest();
+    d->clickAddRuleForTest();
+    QApplication::processEvents();
+    const int rows1 = d->ruleRowCountForTest();
+    check("G5-add-rule-clicked", rows1 == rows0 + 1,
+          QStringLiteral("rows=%1 expected=%2").arg(rows1).arg(rows0 + 1));
+
+    // 加完之后新行**看得见**（这是用户报障的那一条）
+    const int h1 = d->ruleTableHeightForTest();
+    check("G6-new-row-visible", d->ruleLastRowVisibleForTest(),
+          QStringLiteral("rows=%1 tableH=%2 viewportTooSmall").arg(rows1).arg(h1));
+
+    // 表格高度确实跟着长了（一条行高 28px）
+    check("G7-table-grew", h1 >= h0 + 28,
+          QStringLiteral("h0=%1 h1=%2 expected>=%3").arg(h0).arg(h1).arg(h0 + 28));
+
+    // 阴性对照：把表格压到比表头还矮，新行必然看不见 —— 证明 G6 不是恒真。
+    {
+        d->setRuleTableHeightForTest(10);
+        QApplication::processEvents();
+        const bool visSqueezed = d->ruleLastRowVisibleForTest();
+        check("G8-negative-control", !visSqueezed,
+              QString::fromUtf8(u8"\u538B\u6241\u540E\u4ECD\u7136\u62A5\u53EF\u89C1 = \u5224\u636E\u6052\u771F"));
+        d->setRuleTableHeightForTest(h1);
+        QApplication::processEvents();
+        check("G9-restore-after-control", d->ruleLastRowVisibleForTest(),
+              QString::fromUtf8(u8"\u590D\u539F\u540E\u4ECD\u4E0D\u53EF\u89C1"));
+    }
+
+    // 连续点 3 次 → 3 行新行，且最后一行看得见
+    for (int i = 0; i < 2; ++i) {
+        d->clickAddRuleForTest();
+        QApplication::processEvents();
+    }
+    const int rows3 = d->ruleRowCountForTest();
+    check("G10-add-three-times", rows3 == rows0 + 3,
+          QStringLiteral("rows=%1 expected=%2").arg(rows3).arg(rows0 + 3));
+    check("G11-last-row-visible-after-3", d->ruleLastRowVisibleForTest(),
+          QStringLiteral("rows=%1").arg(rows3));
+
+    // 填单元格 → 回读一致
+    d->setRuleCellForTest(rows3 - 1, 0, QStringLiteral(".probe"));
+    d->setRuleCellForTest(rows3 - 1, 1, QStringLiteral("probe-tool2"));
+    d->setRuleCellForTest(rows3 - 1, 2, QCoreApplication::applicationFilePath());
+    check("G12-cell-roundtrip", d->ruleCellForTest(rows3 - 1, 0) == QStringLiteral(".probe"),
+          QStringLiteral("got=%1").arg(d->ruleCellForTest(rows3 - 1, 0)));
+
+    // 自动同步开关 + 间隔
+    d->setAutoSyncEnabledForTest(true);
+    d->setAutoSyncIntervalForTest(QStringLiteral("120"));
+
+    // 保存 → 往返到 ini。
+    //
+    // 必须点**真实的「保存设置」按钮**：落盘逻辑在 SettingsDialog::onSaveClicked()
+    // （自动同步开关 / 间隔 / 模式 / 定点时刻全在那儿），
+    // 走 MainWindow::onSettingsAccepted 会绕过它 —— 那样报出来的 FAIL
+    // 根因在探针自己，不在产品。
+    d->clickSaveForTest();
+    QApplication::processEvents();
+
+    // 期望条数 = 表格里**后缀列非空**的行数。
+    // 后缀为空的行按设计不保存（applyConfig 里 `if (suf.isEmpty() ...) continue;`），
+    // 所以这里不能拿表格总行数当期望值。
+    int expectedRules = 0;
+    for (int r = 0; r < d->ruleRowCountForTest(); ++r) {
+        if (!d->ruleCellForTest(r, 0).trimmed().isEmpty())
+            ++expectedRules;
+    }
+    const QVector<ToolRule> saved = ConfigStore::loadToolRules();
+    check("G13-save-roundtrip-rules", saved.size() == expectedRules,
+          QStringLiteral("saved=%1 expected=%2").arg(saved.size()).arg(expectedRules));
+    check("G14-autosync-enabled", ConfigStore::loadAutoSyncEnabled(),
+          QStringLiteral("loadAutoSyncEnabled=0"));
+    check("G15-autosync-interval", ConfigStore::loadAutoSyncInterval() == 120,
+          QStringLiteral("interval=%1").arg(ConfigStore::loadAutoSyncInterval()));
+    // 保存后弹窗**不关闭**（产品要求：给提示但不自动关），
+    // 而且间隔框里要能看到真正生效的值（被规整过时回填）。
+    check("G16-save-keeps-dialog-open", d->isVisible(),
+          QString::fromUtf8(u8"\u4FDD\u5B58\u540E\u5F39\u7A97\u88AB\u5173\u6389\u4E86"));
+
+    // 删一行 → 行数与高度都回落
+    const int hBefore = d->ruleTableHeightForTest();
+    d->removeRuleRowForTest(rows3 - 1);
+    QApplication::processEvents();
+    check("G16-remove-row", d->ruleRowCountForTest() == rows3 - 1,
+          QStringLiteral("rows=%1").arg(d->ruleRowCountForTest()));
+    check("G17-table-shrank", d->ruleTableHeightForTest() < hBefore,
+          QStringLiteral("h=%1 before=%2").arg(d->ruleTableHeightForTest()).arg(hBefore));
+
+    // 日志抽屉开关往返 + 窗口高度跟随
+    w.syncPanelForTest()->toggleLogDrawer();
+    QApplication::processEvents();
+    check("G18-log-collapsed-height", w.height() == 460,
+          QStringLiteral("height=%1 expected=460").arg(w.height()));
+    w.syncPanelForTest()->toggleLogDrawer();
+    QApplication::processEvents();
+    check("G19-log-expanded-height", w.height() == 759,
+          QStringLiteral("height=%1 expected=759").arg(w.height()));
+
+    // 还原环境变量
+    if (oldCfgDir.isEmpty())
+        qunsetenv("SRT_CONFIG_DIR");
+    else
+        qputenv("SRT_CONFIG_DIR", oldCfgDir);
+
+    out << (bad == 0 ? "GUI_CHECK_ALL_PASS" : "GUI_CHECK_FAILED") << "\n";
+    out << "GUI_SUMMARY\tpass=" << pass << "\tfail=" << bad << "\n";
+    out.flush();
+    return bad == 0 ? 0 : 1;
+}
+
+
 } // namespace
 
 // ------------------------------------------------------------------
@@ -3054,6 +3261,8 @@ int main(int argc, char *argv[])
         QStringLiteral("Capture settings dialog to png and exit (automation only)."), QStringLiteral("path"));
     const QCommandLineOption optSelfCheck(QStringLiteral("selfcheck"),
         QStringLiteral("Run attribution and watchdog self-checks, print results and exit."));
+    const QCommandLineOption optGuiCheck(QStringLiteral("selfcheck-gui"),
+        QStringLiteral("Run GUI interaction self-checks (clicks real widgets), print results and exit."));
     const QCommandLineOption optSecretCheck(QStringLiteral("selfcheck-secrets"),
         QStringLiteral("Run real syncs and verify no plaintext password file is left behind."),
         QStringLiteral("rounds"));
@@ -3062,13 +3271,39 @@ int main(int argc, char *argv[])
     parser.addOption(optShot);
     parser.addOption(optShotSettings);
     parser.addOption(optSelfCheck);
+    parser.addOption(optGuiCheck);
     parser.addOption(optSecretCheck);
+    // 「--help」必须能用：客户机上的运维第一反应就是敲 --help 看用法。
+    //
+    // 原来建了 parser 却**从未调 addHelpOption()**，于是 --help 被当成未知选项
+    // 直接报错退出（"Unknown option 'help'."）—— 交付给客户机的命令行程序
+    // 连用法都打不出来。子代理 B 在麒麟 V10 容器里实测抓到的。
+    parser.addHelpOption();
     parser.process(app);
+
+    // 未知的**位置参数**必须报错，不能静默吞掉。
+    //
+    // QCommandLineParser 只对未知**选项**报错（process() 直接退出），
+    // 位置参数它收进 positionalArguments() 之后就当没看见。
+    // 于是 `SyncReplayTool --selfcheck-gui 多余的东西` 会正常跑完并返回 0 ——
+    // 脚本把参数写错了却"成功"，这种比报错难查得多。
+    // 未知选项的行为本来就是对的，这里补的是位置参数这一半。
+    if (!parser.positionalArguments().isEmpty()) {
+        QTextStream err(stderr);
+        err << "Unknown argument(s): " << parser.positionalArguments().join(' ') << "\n";
+        err.flush();
+        return 2;
+    }
 
     // 自检必须在建 MainWindow 之前返回：它不碰界面，也不需要显示服务器。
     // 这样在没有任何 X/桌面环境的机器上也能跑（CI、容器、麒麟 SSH 会话）。
     if (parser.isSet(optSelfCheck))
         return runSelfCheck();
+
+    if (parser.isSet(optGuiCheck)) {
+        MainWindow::setSkipSplash(true);
+        return runGuiSelfCheck();
+    }
 
     if (parser.isSet(optSecretCheck)) {
         MainWindow::setSkipSplash(true);
@@ -3103,6 +3338,7 @@ int main(int argc, char *argv[])
     // --no-splash / --splash-ms 自己的帮助文本就写着 "(automation only)"，
     // 同样按探针处理。
     const bool probeMode = parser.isSet(optSelfCheck) || parser.isSet(optSecretCheck)
+                        || parser.isSet(optGuiCheck)
                         || parser.isSet(optShot) || parser.isSet(optShotSettings)
                         || parser.isSet(optSkip) || parser.isSet(optSplashMs);
     // QLockFile **必须活到 main() 结束**。

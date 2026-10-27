@@ -74,6 +74,11 @@ public:
     // 真实的产品路径（点工具按钮、双击行）由 guifull 探针直接点 delegate 测。
     void switchPageForTest(int index);
 
+    // 设置弹窗本体。只给 --selfcheck-gui 用：判据要能拿到弹窗里的
+    // 真实控件（规则表、「+ 添加规则」按钮…）去点、去读。
+    // 没有它，GUI 层的交互就只能靠人肉点，判据永远覆盖不到。
+    SettingsDialog *settingsForTest() const { return m_settings; }
+
 protected:
     void closeEvent(QCloseEvent *event) override;
     void changeEvent(QEvent *event) override;
@@ -93,6 +98,7 @@ private slots:
     void tickSplashMorph();
     void tickSplashPulse();
     void onToggleMaximize();
+    void onLogDrawerToggled(bool open);
 
 private:
     void buildSplash();

@@ -577,7 +577,7 @@ void ToolRunner::start(const QString &exePath, const QString &args)
     if (unclosed) {
         // 不阻断执行（用户可能就是要一整段带空格的参数），但必须把话说清楚：
         // 工具会照跑、界面会照显示"执行完成"，用户没有任何机会知道参数被合并了。
-        emit output(QString::fromUtf8(u8"\u26A0 \u53C2\u6570\u6A21\u677F\u91CC\u7684\u5F15\u53F7\u6CA1\u6709\u6210\u5BF9\uFF1A"
+        emit output(QString::fromUtf8(u8"\u203B \u53C2\u6570\u6A21\u677F\u91CC\u7684\u5F15\u53F7\u6CA1\u6709\u6210\u5BF9\uFF1A"
                                        u8"\u5F15\u53F7\u540E\u9762\u7684\u5185\u5BB9\u88AB\u5F53\u6210\u4E86\u4E00\u4E2A\u6574\u4F53\u53C2\u6570\u3002\n"
                                        u8"\u5F15\u53F7\u540E\u9762\u7684\u5185\u5BB9\u88AB\u5F53\u6210\u4E86\u4E00\u4E2A\u6574\u4F53\u53C2\u6570\u3002\u005Cn"));
     }

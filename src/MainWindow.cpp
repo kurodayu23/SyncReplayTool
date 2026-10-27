@@ -42,6 +42,12 @@ const int kWindowWidth = 980;
 // 行高 34px 等特征都是 1.5 倍缩放，所以逻辑高度 = 691 / 1.5 ≈ 460。
 // 480 是更早一版原型抄下来的（HTML 预览实测帧高 441）。
 const int kWindowHeight = 460;
+// 同步日志**默认展开**时的主界面高度（用户 2026-10-27 要求）。
+//
+// 为什么是 758：设置弹窗实测高 758px（640×758 截图），
+// 用户要求"日志默认打开，这样跟设置尺寸相同" ——
+// 于是主界面展开日志后的高度取同一个值，两个窗口是同一套尺寸。
+const int kWindowHeightLogOpen = 759;
 
 int g_splashMs = 2000;
 bool g_skipSplash = false;
@@ -316,6 +322,8 @@ void MainWindow::buildBody()
     lay->addWidget(m_syncPanel);
 
     connect(m_syncPanel, SIGNAL(settingsRequested()), this, SLOT(onOpenSettings()));
+    // 日志抽屉的高度决定权交给 MainWindow（SyncPanel 不再自己设窗口高度）。
+    connect(m_syncPanel, SIGNAL(logDrawerToggled(bool)), this, SLOT(onLogDrawerToggled(bool)));
 }
 
 // ---------------------------------------------------------------- 设置
@@ -334,6 +342,13 @@ void MainWindow::onOpenSettings()
     if (m_probeNoScreen)
         m_settings->setAttribute(Qt::WA_DontShowOnScreen, true);
     m_settings->show();
+}
+
+void MainWindow::onLogDrawerToggled(bool open)
+{
+    // 只改高度，不重新居中：原来的 window()->setFixedHeight() 也不移动窗口，
+    // 居中交给 refitToScreen()（屏幕尺寸变化时才用）。
+    setFixedHeight(open ? kWindowHeightLogOpen : kWindowHeight);
 }
 
 void MainWindow::showSettingsForProbe()
@@ -430,7 +445,8 @@ void MainWindow::refitToScreen()
     if (!scr)
         return;
     const QRect avail = scr->availableGeometry();
-    const int h = (m_syncPanel && m_syncPanel->isLogOpenForTest()) ? 630 : kWindowHeight;
+    const int h = (m_syncPanel && m_syncPanel->isLogOpenForTest())
+                    ? kWindowHeightLogOpen : kWindowHeight;
     setFixedSize(kWindowWidth, h);
     move(avail.center().x() - kWindowWidth / 2,
          avail.center().y() - h / 2);

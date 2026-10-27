@@ -333,7 +333,7 @@ public:
 
     static QString buildDarkQss()
     {
-        return QStringLiteral(R"QSS(
+        QString qss = QStringLiteral(R"QSS(
 QWidget {
     color: #f8fafc;
     %FAMILYDECL%
@@ -429,7 +429,7 @@ QHeaderView::section {
     padding: 7px 8px;
     border: none;
     border-bottom: 1px solid #24324d;
-    border-right: 1px solid #1b2540;
+    border-right: 1px solid #24324d;
 }
 QTableCornerButton::section { background: #111726; border: none; }
 
@@ -683,6 +683,28 @@ QLabel#testLabelFail { font-size: 11.5px; font-weight: 500; color: #fca5a5; }
 QTableView#ruleTable {
     background: #151d32; border: 1px solid #24324d; gridline-color: #1c2740; outline: none; color: #e2e8f0;
 }
+/* 规则表的表头：定稿图实测表头底 #111726（比数据行 #151d32 深），
+   表头行**有列竖线**（逻辑 x = 28 / 138 / 268 / 612.7）。
+   竖线用 section 的 border-right 画 —— 必须由样式表样式自己画：
+   Qt 5 一旦 app 级 QSS 出现 `QHeaderView::section` 规则，
+   表头绘制就被样式表样式接管，重写 paintSection() 或 paintEvent() 都不生效
+   （两版都实测过，表头仍然一条竖线都没有）。 */
+QTableView#ruleTable QHeaderView {
+    background: #111726;
+    border: none;
+}
+QTableView#ruleTable QHeaderView::section {
+    background: #111726;
+    color: #f8fafc;
+    border: none;
+    /* 表头的列竖线用 #24324d（定稿图实测值），**不是**数据区那档 #1c2740：
+       表头底更深（#111726），用 #1c2740 时对比度只有定稿值的 58%，
+       客户说的「分割线要分割明确」在明暗上没到位。 */
+    border-right: 1px solid #24324d;
+    padding: 0 10px;
+    font-size: 12px;
+    font-weight: 700;
+}
 QHeaderView#ruleHeader::section {
     background-color: #111726; color: #9cb1d4;
     font-weight: 600; font-size: 11px; padding: 6px 10px;
@@ -834,6 +856,35 @@ QToolTip {
             .replace(QStringLiteral("%MONODECL%"), monoDecl())
             .replace(QStringLiteral("%CHECK_ICON%"), checkIconPath())
             .replace(QStringLiteral("%COMBO_ARROW%"), comboArrowPath());
+
+        // ---- v2.3 配色抬亮一档（单点覆盖表，可一行回退）----
+        //
+        // 客户 2026-10-27 定稿图里的色值**原样保留在上面的 QSS 模板里**
+        // （随时可对照、可查证），实际生效的是下面这张表覆盖后的值。
+        //
+        // 为什么做成"模板 + 覆盖表"而不是直接改模板：
+        //   ① 客户坚持定稿色值时，把下面 6 行改回模板里的原值即可 —— **一行回退**；
+        //   ② 模板保持定稿图原值 ⇒ 任何时候都能一眼看出"我们偏离了客户图多少"。
+        //
+        // 为什么只抬这几档：用户 2026-10-27 反馈整屏"太深、显得生硬"。
+        // 抬的是**最深的四档**（标题栏 / 窗口底 / 控制板 / 进度槽）＋ 输入框底，
+        // 卡片底 #151d32 不动 —— 动它整片表格区会变亮，跟定稿图差得更远。
+        //
+        // 层次必须保持（从深到浅）：标题栏 < 窗口底 < 组卡 < 卡片底。
+        // 下面这 6 个值逐档算过，抬完之后这条链仍然是这个顺序。
+        struct PaletteOverride { const char *token; const char *value; };
+        static const PaletteOverride kPaletteOverrides[] = {
+            { "#090d17", "#0d1322" },  // 标题栏 / 底栏     （定稿 #090d17）
+            { "#0e1424", "#121a2c" },  // 窗口底            （定稿 #0e1424）
+            { "#0c1220", "#111829" },  // 控制板 / 日志抽屉  （定稿 #0c1220）
+            { "#0a0e1a", "#111829" },  // 进度条槽          （定稿 #0a0e1a）
+            { "#0a0f1d", "#101727" },  // 输入框底          （定稿 #0a0f1d）
+            { "#101726", "#131b2e" },  // 组卡 / 次级面板    （定稿 #101726）
+        };
+        for (int i = 0; i < int(sizeof(kPaletteOverrides) / sizeof(kPaletteOverrides[0])); ++i)
+            qss.replace(QString::fromLatin1(kPaletteOverrides[i].token),
+                        QString::fromLatin1(kPaletteOverrides[i].value));
+        return qss;
     }
 
     // AP500BJ 定稿只有一套外观：这里的"浅色分支"**不再是一套浅色样式表**，
