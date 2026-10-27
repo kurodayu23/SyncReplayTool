@@ -238,8 +238,8 @@ private:
 
 // 数据区的行分隔线。
 //
-// 定稿图实测：数据区**每一行下面一条 #1b263c 细线**，但**没有列竖线**
-// （竖线只有表头那一段有）。所以这里只画横线。
+// 定稿图实测：数据区**每一行下面一条 #1b263c 细线**，并且**每一行都有
+// 列竖线**（#1c2740，位置与表头列边界一致，一整段从上到下画通）。
 //
 // 为什么不用 QTableView 自带的 setShowGrid(true)：
 // Qt 内部先把网格线画在**单元格内容之下**，而同步状态列和工具调用列
@@ -258,13 +258,25 @@ protected:
         if (!model())
             return;
         QPainter p(viewport());
-        p.setPen(Theme::gridRowLine());
         const int rows = model()->rowCount();
+        p.setPen(Theme::gridRowLine());
         for (int r = 0; r < rows; ++r) {
             const int y = rowViewportPosition(r) + rowHeight(r) - 1;
             if (y < 0 || y >= viewport()->height())
                 continue;
             p.drawLine(0, y, viewport()->width() - 1, y);
+        }
+        // 列竖线：定稿图数据区每一行都有，位置就是各列的右边缘。
+        if (rows > 0) {
+            p.setPen(Theme::gridColLine());
+            const int top = rowViewportPosition(0);
+            const int bottom = rowViewportPosition(rows - 1) + rowHeight(rows - 1);
+            for (int c = 0; c < model()->columnCount(); ++c) {
+                const int x = columnViewportPosition(c) + columnWidth(c) - 1;
+                if (x < 0 || x >= viewport()->width())
+                    continue;
+                p.drawLine(x, top, x, bottom);
+            }
         }
     }
 };
@@ -419,7 +431,9 @@ void SyncPanel::buildUi()
     card->setObjectName(QStringLiteral("listCard"));
     QVBoxLayout *cardLay = new QVBoxLayout(card);
     // 表格卡片内不留左右内边距：定稿图的表头竖线贴着卡片左右边框。
-    cardLay->setContentsMargins(0, 0, 0, 10);
+    // 定稿图实测：表格最后一行下面**就是**卡片边框，中间没有留白；
+    // 原来留 10px，卡片比定稿图高 10px，下方空隙被吃掉了。
+    cardLay->setContentsMargins(0, 0, 0, 0);
     cardLay->setSpacing(0);
 
     QFrame *head = new QFrame;
@@ -544,7 +558,8 @@ void SyncPanel::buildUi()
     QFrame *progCard = new QFrame;
     progCard->setObjectName(QStringLiteral("progressCard"));
     QVBoxLayout *progLay = new QVBoxLayout(progCard);
-    progLay->setContentsMargins(14, 12, 14, 12);
+    // 定稿图实测进度卡高 46.67 逻辑 px；上下各留 12 会多出 9px。
+    progLay->setContentsMargins(14, 8, 14, 8);
     progLay->setSpacing(8);
     QHBoxLayout *info = new QHBoxLayout;
     info->setSpacing(8);

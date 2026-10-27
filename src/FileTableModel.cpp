@@ -221,27 +221,26 @@ QVariant FileTableModel::data(const QModelIndex &index, int role) const
         return Theme::textMain();
     }
     case Qt::FontRole: {
-        // 基线必须取应用字体，不能 QFont() 空构造：空构造出来的是
-        // 平台默认字体，pixelSize/weight 全部对不上 QSS 设的那一套。
+        // 字族必须**显式**取界面用的比例字族（Microsoft YaHei UI），
+        // 不能只靠 QApplication::font()：那拿到的是平台默认字族，实测渲染
+        // 出来是 Consolas（等宽），而定稿图里文件名 / 文件大小 / 时间三列
+        // 全是比例字体（字符宽窄不一，".spe" 明显窄于数字）。
+        //
+        // 症状：文件名列的源码明明没设 family，渲染出来却是等宽 ——
+        // 因为 QApplication::font() 给的是平台默认族，不是界面用的字族。
         QFont f = QApplication::font();
-        // 原型：.td-size 等宽 + 次文字色；.td-ctime/.td-mtime 等宽 11px #64748b；
-        //       .file-name-text 等宽 12px 500 主文字色；.td-status **不是**等宽。
-        if (index.column() == ColSize) {
-            const QString mono = Theme::resolvedMono();
-            if (!mono.isEmpty())
-                f.setFamily(mono);
-        } else if (index.column() == ColCreated || index.column() == ColModified) {
-            const QString mono = Theme::resolvedMono();
-            if (!mono.isEmpty())
-                f.setFamily(mono);
-            f.setPixelSize(11);
-            f.setWeight(QFont::Normal);
-        } else if (index.column() == ColName) {
-            // 文件名列用**比例字体**（定稿图实测：字符宽窄不一，
-            // "20261027_104500_870MHz_IQ.spe" 里 .spe 明显窄于数字）。
-            // 文件名不是数字列，等宽只会让它看起来像一列日志。
+        const QString sans = Theme::resolvedFamily();
+        if (!sans.isEmpty())
+            f.setFamily(sans);
+        if (index.column() == ColName) {
             f.setPixelSize(12);
             f.setWeight(QFont::Medium);
+        } else if (index.column() == ColSize) {
+            f.setPixelSize(12);
+            f.setWeight(QFont::Normal);
+        } else if (index.column() == ColCreated || index.column() == ColModified) {
+            f.setPixelSize(11);
+            f.setWeight(QFont::Normal);
         }
         return f;
     }

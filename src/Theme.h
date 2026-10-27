@@ -67,9 +67,10 @@ public:
     static QColor divider()      { return QColor(0x24, 0x32, 0x4d); }  // 分割线
     static QColor canvas()       { return QColor(0x0e, 0x14, 0x24); }  // 窗口底
     static QColor panelBg()      { return QColor(0x15, 0x1d, 0x32); }  // 卡片底
-    // 数据区行分隔线。定稿图实测：每行下面一条 #1b263c 细线
-    //（数据区**没有**列竖线，竖线只有表头那一段有）。
+    // 数据区分隔线。定稿图实测：每行下面一条 #1b263c 横线，
+    // 并且**每一行都有列竖线**（#1c2740，位置与表头列边界一致）。
     static QColor gridRowLine()  { return QColor(0x1b, 0x26, 0x3c); }  // 行分隔线
+    static QColor gridColLine()  { return QColor(0x1c, 0x27, 0x40); }  // 数据区列竖线
 
     // ---- 徽章（同步状态）与操作按钮的语义配色 ----
     //
@@ -593,7 +594,7 @@ QLabel#settingHint  { font-size: 11px; color: #5c6c87; }
 
 /* ---- 设置弹窗的分组结构（定稿图 .grp-box / .grp-title / .switch-board）---- */
 QFrame#settingsGroup {
-    background: #151d32; border: 1px solid #24324d; border-radius: 2px;
+    background: #101726; border: 1px solid #24324d; border-radius: 2px;
 }
 QLabel#groupTitle {
     font-size: 12px; font-weight: 700; color: #c4d3eb;
@@ -605,6 +606,10 @@ QFrame#intervalBox {
 }
 QFrame#switchBoard {
     background: #0c1220; border: 1px solid #24324d; border-radius: 2px;
+}
+/* 定稿图：内嵌控制板里「开机自动启动」上方有一条整行分隔线。 */
+QFrame#boardDivider {
+    background: #24324d; border: none;
 }
 /* 同步方式二选一：连在一起的分段按钮，选中的蓝底白字。 */
 QPushButton#chkAutoSyncModeInterval, QPushButton#chkAutoSyncModeDaily {

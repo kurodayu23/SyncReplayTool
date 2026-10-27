@@ -135,7 +135,9 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     setMaximumHeight(qMax(320, avail.height() - 40));
 
     QVBoxLayout *outerLayout = new QVBoxLayout(this);
-    outerLayout->setContentsMargins(10, 10, 10, 10);
+    // 定稿图实测：标题栏顶到 y=0（弹窗本身只有 1px 外框），
+    // 原来留 10px 会让整块内容往下沉 10px、三组卡片比定稿图窄一圈。
+    outerLayout->setContentsMargins(0, 0, 0, 0);
     outerLayout->setSpacing(0);
 
     m_card = new QFrame(this);
@@ -156,7 +158,7 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     m_header->setFixedHeight(38);
 
     QHBoxLayout *hl = new QHBoxLayout(m_header);
-    hl->setContentsMargins(18, 0, 12, 0);
+    hl->setContentsMargins(12, 0, 12, 0);
     hl->setSpacing(8);
 
     QLabel *titleLabel = mkLabel(kTxtDialogTitle, "dialogTitle");
@@ -188,9 +190,9 @@ SettingsDialog::SettingsDialog(QWidget *parent)
 
     QWidget *body = new QWidget;
     QVBoxLayout *bl = new QVBoxLayout(body);
-    // 定稿图实测：三组卡片几乎贴住标题栏和底栏（上下各约 4px），
-    // 组间距约 8px。原来上下各留 14、组间距 11，面板比定稿图高出 30 多 px。
-    bl->setContentsMargins(18, 4, 18, 4);
+    // 定稿图实测：三组卡片左右各留 15.33px（卡片左边框 x=23/1.5），
+    // 距标题栏 14.7px、距底栏 14.7px，组间距约 11px。
+    bl->setContentsMargins(14, 14, 14, 14);
     bl->setSpacing(8);
     scroll->setWidget(body);
     cardLayout->addWidget(scroll, 1);
@@ -337,7 +339,8 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     board->setObjectName(QStringLiteral("switchBoard"));
     QVBoxLayout *boardLay = new QVBoxLayout(board);
     boardLay->setContentsMargins(12, 10, 12, 10);
-    boardLay->setSpacing(9);
+    // 加了分隔线之后，两个方向的间距各让 2px，总高度不变。
+    boardLay->setSpacing(7);
     optLay->addWidget(board);
 
     // 2.1 第一行：左侧「自动同步」总开关，右侧「同步方式」分段按钮。
@@ -415,10 +418,12 @@ SettingsDialog::SettingsDialog(QWidget *parent)
         u8"保存时输入框会被回填成真正生效的秒数。"));
     m_autoSyncInterval->setAlignment(Qt::AlignCenter);
     QLabel *secLabel = mkLabel(kTxtSec, "settingLabel");
+    // 定稿图里「自动同步间隔 [30] 秒」是**一组**贴左排的，
+    // 输入框紧跟在标签后面；原来中间插了 stretch，把输入框顶到了右边。
     intervalRow->addWidget(intervalLabel);
-    intervalRow->addStretch(1);
     intervalRow->addWidget(m_autoSyncInterval);
     intervalRow->addWidget(secLabel);
+    intervalRow->addStretch(1);
     boardLay->addWidget(intervalBox);
     m_intervalRowBox = intervalBox;
 
@@ -462,6 +467,12 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     m_autoStartBox->setChecked(ConfigStore::loadAutoStartEnabled());
     connect(m_autoStartBox, &QCheckBox::toggled, this, &SettingsDialog::onAutoStartToggled);
     autoStartRow->addWidget(m_autoStartBox);
+    // 定稿图：控制板里「开机自动启动」这一行**上面**有一条整行分隔线，
+    // 把它和上面的间隔设置区分开。没有这条线，两块内容糊在一起。
+    QFrame *boardDivider = new QFrame;
+    boardDivider->setObjectName(QStringLiteral("boardDivider"));
+    boardDivider->setFixedHeight(1);
+    boardLay->addWidget(boardDivider);
     boardLay->addLayout(autoStartRow);
 
     // 模式的初始状态来自配置（老配置没有模式键 → 按间隔重复 = 老版本行为）。
