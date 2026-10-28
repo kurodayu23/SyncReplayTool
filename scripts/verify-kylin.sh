@@ -110,6 +110,7 @@ echo
 echo "--- 2. strace 数 execve 次数（10 秒窗口）---"
 if command -v strace >/dev/null 2>&1; then
     _st=/tmp/srt-execve-$$.log
+    _st2=""   # --old-tar not given -> stays empty (set -u safe)
     PATH="$PKG/bin:$PATH" strace -f -e trace=execve -o "$_st" \
         timeout 10 "$PKG/bin/rsync" --version >/dev/null 2>&1
     _n=$(grep -c 'execve(' "$_st" 2>/dev/null || echo 0)
@@ -141,7 +142,7 @@ if command -v strace >/dev/null 2>&1; then
             fi
         fi
     fi
-    rm -f "$_st" "$_st2" 2>/dev/null
+    rm -f "$_st" ${_st2:+"$_st2"} 2>/dev/null
 else
     echo "    容器里没有 strace，跳过"
 fi
