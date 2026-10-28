@@ -716,6 +716,19 @@ QPushButton#ruleRemove {
 }
 QPushButton#ruleRemove:hover { background: #5a171d; color: #fca5a5; }
 
+/* 规则表每行的「删除」按钮（第 4 列）。
+   定稿图里没有这一列 —— 但没有它，用户点「+ 添加规则」加出来的行
+   永远删不掉（2026-10-28 用户报障「添加规则之后无法进行删除」）。
+   平时是一枚很淡的 ×，悬停才变红：不抢视线，但一眼能找到。 */
+QToolButton#ruleDelBtn {
+    background: transparent; border: 1px solid transparent;
+    border-radius: 10px; color: #8fa0c0; font-size: 14px;
+}
+QToolButton#ruleDelBtn:hover {
+    background: #5a171d; border-color: #7f2a33; color: #fca5a5;
+}
+QToolButton#ruleDelBtn:pressed { background: #3f1015; color: #fecaca; }
+
 /* ---- 系统弹窗与原生对话框 ----
    坑（2026-10-24 用户截图）：全局 `QWidget { color: #f8fafc }` 会把
    QMessageBox 里的文字也刷成近白，而 QMessageBox 自己没有被样式表接管，

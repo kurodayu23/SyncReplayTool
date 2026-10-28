@@ -193,7 +193,7 @@ if [ "$_sc2" = 0 ]; then res 0 "SyncReplayTool --selfcheck 退出码 0"; else re
 # ------------------------------------------------------------ 6. 包内容
 echo
 echo "--- 6. 包内容体检 ---"
-for f in run.sh 自检.sh 安装.sh 数据同步工具.desktop qt.conf 使用步骤与注意事项.md SyncReplayTool; do
+for f in run.sh 自检.sh 安装.sh 安装自启.sh 数据同步工具.desktop qt.conf SyncReplayTool; do
     if [ -e "$PKG/$f" ]; then res 0 "含 $f"; else res 1 "缺 $f"; fi
 done
 for f in rsync ssh scp ssh-keygen ssh-keyscan; do
@@ -214,15 +214,19 @@ if grep -rlq $'\r' "$PKG/run.sh" "$PKG/自检.sh" "$PKG/安装.sh" "$PKG/bin/"* 
 else
     res 0 "脚本都是 LF 换行"
 fi
-if grep -q 'srt-client' "$PKG/使用步骤与注意事项.md" 2>/dev/null; then
-    res 1 "文档里还残留旧目录名 srt-client"
+# ★ 2026-10-25 客户要求「包里不要有注意事项的文档」—— 这里**反过来**判：
+#   包里**不许**有任何文档（含《使用步骤与注意事项.md》）。
+#
+#   原来这里是「手册必须在包里」+「手册里不许有旧目录名 srt-client / libexec」，
+#   与客户要求**正好相反**：手册 2026-10-25 已整体移出包，
+#   那两条判据一条必然 FAIL、一条必然恒真 —— 门禁自己就站不住。
+_doc_all=$(find "$PKG" -type f \( -iname '*.md' -o -iname '*.txt' -o -iname '*.pdf' \
+    -o -iname '*.doc' -o -iname '*.docx' -o -iname '*.rtf' -o -iname '*.odt' \
+    -o -iname '*.htm' -o -iname '*.html' \) 2>/dev/null | head -5)
+if [ -n "$_doc_all" ]; then
+    res 1 "包里有文档（客户要求包里不要注意事项文档）：$_doc_all"
 else
-    res 0 "文档里的目录名与包一致"
-fi
-if grep -q 'libexec' "$PKG/使用步骤与注意事项.md" 2>/dev/null; then
-    res 1 "文档里还在说程序在 libexec/（已删除）"
-else
-    res 0 "文档不再提 libexec/"
+    res 0 "包内无任何文档（含《使用步骤与注意事项.md》）"
 fi
 
 # ------------------------------------------------------------ 7. 安装.sh

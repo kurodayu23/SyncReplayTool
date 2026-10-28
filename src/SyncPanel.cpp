@@ -669,8 +669,10 @@ void SyncPanel::buildUi()
             this, &SyncPanel::rebuildBandwidthMenu);
     m_bwLimit->setText(bandwidthDisplayText(ConfigStore::loadBandwidthLimitMBps()));
 
-    // 默认**展开**日志抽屉（用户 2026-10-27 要求），所以按钮初始文案是「收起」。
-    m_toggleLog = new QPushButton(T(kLogClose));
+    // 默认**收起**日志抽屉（用户 2026-10-28 要求：「算了日志还是默认收起来吧」）。
+    // 10-27 那一轮要求的是默认展开，已经被用户自己撤回。
+    // 所以按钮初始文案是「同步日志 ▼」（点它展开）。
+    m_toggleLog = new QPushButton(T(kLogOpen));
     m_toggleLog->setObjectName(QStringLiteral("btnToggleLog"));
     m_toggleLog->setFixedHeight(28);
     m_toggleLog->setCursor(Qt::PointingHandCursor);
@@ -720,10 +722,10 @@ void SyncPanel::buildUi()
     // ---- 4. 日志抽屉（默认收起，展开 175px，2000 行 FIFO）----
     m_logDrawer = new QWidget;
     m_logDrawer->setObjectName(QStringLiteral("logDrawer"));
-    // 默认**展开**（用户 2026-10-27 要求）：主界面默认展开同步日志后，
-    // 主界面高度与设置弹窗一致（758），两个窗口是同一个尺寸体系。
-    m_logDrawer->setVisible(true);
-    m_logOpen = true;
+    // 默认**收起**（用户 2026-10-28 要求：「算了日志还是默认收起来吧」）。
+    // 主界面因此保持 980×460，与定稿图一致；需要看日志时点标题栏展开。
+    m_logDrawer->setVisible(false);
+    m_logOpen = false;
     m_logDrawer->setFixedHeight(175);
     QVBoxLayout *logLay = new QVBoxLayout(m_logDrawer);
     logLay->setContentsMargins(0, 0, 0, 0);

@@ -6,10 +6,13 @@
 #include <QGridLayout>
 #include <QFrame>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QHeaderView>
 #include <QTableWidgetItem>
+#include <QStyledItemDelegate>
+#include <QFontMetrics>
 #include <QLabel>
 #include <QPushButton>
 #include <QLineEdit>
@@ -21,15 +24,90 @@
 #include <QMouseEvent>
 #include <QKeyEvent>
 #include <QIcon>
+#include <QToolButton>
 #include <QTimer>
 #include <QScreen>
+#include <QWindow>
 #include <QGuiApplication>
 #include <QGraphicsDropShadowEffect>
 #include "Theme.h"
+#include "ScreenFit.h"
 #include "ConfigStore.h"
 #include "AutoSyncScheduler.h"
 
 namespace {
+
+// 规则表的第 4 列：每行的「删除」按钮。
+//
+// 为什么需要这一列：产品里**从来没有**过删除规则的入口 ——
+// removeRuleRow() 只被自动化测试钩子调用过，用户点「+ 添加规则」
+// 加出来的行就再也去不掉（2026-10-28 用户报障：「添加规则之后无法进行删除」）。
+const int kRuleDelCol = 3;
+
+// 「关联程序路径」列的绘制委托。
+//
+// 为什么不能直接用默认绘制：QTableWidget 默认 wordWrap = true，
+// 长路径会在 28px 高的行里换行成两行，**第二行被裁掉** ——
+// 用户看到的是"路径断在半截、还有一截看不见"（2026-10-28 报障「路径太挤了」）。
+//
+// 也不能直接靠 QFontMetrics::elidedText：本工程在 ToolColumnDelegate.cpp 里
+// 实测过，Qt 5.9.6 对"一整串没有断点的超长文本"返回的是**不带省略号的硬截断**
+// （144 字符的工具名在 156px 列里出来是 "LongToolN"，尾巴没有 "…"）。
+//
+// 这里自己裁：**中间省略**，头尾都留 —— 路径最有用的信息是开头几级目录
+// 和最后的 exe 文件名，两头都在才认得出是哪一条规则。
+// 完整路径放进单元格的 tooltip，鼠标悬停即见全称。
+class RulePathDelegate : public QStyledItemDelegate
+{
+public:
+    // 派生类**不会**继承基类的构造函数，所以这里必须自己写一个：
+    // 不写的话 new RulePathDelegate(table) 会被当成拷贝构造，编译报错。
+    explicit RulePathDelegate(QObject *parent = nullptr)
+        : QStyledItemDelegate(parent) {}
+
+    // 按宽度裁文本：头尾各留一部分，中间放一个省略号。
+    static QString elideMiddle(const QString &text, int maxWidth, const QFontMetrics &fm)
+    {
+        if (maxWidth <= 0)
+            return QString();
+        if (fm.width(text) <= maxWidth)
+            return text;
+        const QString ell = QString::fromUtf8("\xE2\x80\xA6");   // U+2026 …
+        const int ellW = fm.width(ell);
+        if (ellW >= maxWidth)
+            return ell;                       // 连省略号都放不下
+        const int budget = maxWidth - ellW;
+        // 头略长于尾：目录层级比文件名更耐看。
+        const int headW = budget / 2 + (budget % 2);
+        const int tailW = budget - headW;
+        int head = 0;
+        while (head < text.length() && fm.width(text.left(head + 1)) <= headW)
+            ++head;
+        int tail = 0;
+        while (tail < text.length() && fm.width(text.right(tail + 1)) <= tailW)
+            ++tail;
+        if (head + tail >= text.length())
+            return text;
+        return text.left(head) + ell + text.right(tail);
+    }
+
+    void initStyleOption(QStyleOptionViewItem *option, const QModelIndex &index) const override
+    {
+        QStyledItemDelegate::initStyleOption(option, index);
+        // 只换**画出来**的文字，模型里的原文一个字都不动
+        // （applyConfig 要拿完整路径落盘，ruleCellForTest 也读原文）。
+        // 颜色/背景仍然由样式表接管（QTableView#ruleTable 的 color: #e2e8f0）——
+        // 所以这里改的是 option->text，而不是自己重画一遍。
+        if (option->text.isEmpty())
+            return;
+        // 单元格左右各留 6px 内边距（默认绘制就是这么留的），再多留 4px 余量，
+        // 免得裁出来的字刚好顶到格线、被样式表二次裁一次。
+        const int w = option->rect.width() - 16;
+        if (w <= 0)
+            return;                           // sizeHint 阶段 rect 无效，原样返回
+        option->text = elideMiddle(option->text, w, QFontMetrics(option->font));
+    }
+};
 
 // 规则表的表头。定稿图的表头行**有列竖线**，而 QTableWidget 的 gridline
 // 只画在数据区，表头一条竖线都没有 —— 于是表头是三段没有分隔的大字，
@@ -88,6 +166,20 @@ const char *kTxtAutoInterval = "自动同步间隔";  // 自动同步间隔
 const char *kTxtSec          = "\xE7\xA7\x92";  // 秒
 // 每天定点的时刻标签。
 const char *kTxtDailyTime    = "每天定时时刻";  // 每天定时时刻
+
+// 设置弹窗的固定尺寸**不在这里写死**：真源是 ScreenFit.h
+// （kSettingsWidth / kSettingsHeight / kSettingsWidthMin / kSettingsHeightMin）。
+//
+// 原来这里另存了一份 640/560，与 ScreenFit.h 里的同一组数字各改各的 ——
+// 迟早分叉（2026-10-28 缺陷 4）。现在只留一份。
+//
+// 顺带把「为什么尺寸要固定」记在这儿，免得以后有人"优化"回去：
+// 弹窗高度原来跟着「规则条数」长（每加一条规则 +28px），加到第 5、6 条时
+// 被顶到 805px，**底栏（保存设置）被挤出屏幕**，用户点不到保存
+//（2026-10-28 用户报障：「添加规则后，尺寸都看不到了」）。
+// 固定之后：多出来的内容在中间**滚动**（QScrollArea + 深色滚动条），
+// 弹窗尺寸永远不变，底栏永远在。
+
 
 QLabel *mkLabel(const char *text, const char *objName)
 {
@@ -156,15 +248,27 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     // （标题栏 38px、弹窗边框 1px 都对得上）⇒ 逻辑宽度 = 960 / 1.5 = 640px。
     // 原来的 570px 是照更早一版原型抄的，字段挤在一起（选择目录/选择文件按钮
     // 直接被输入框顶掉）。HTML 定稿 .dialog-card 也是 640px。
-    setFixedWidth(640);
+    setFixedWidth(ScreenFit::kSettingsWidth);
     // SettingsDialog.h 一直承诺"整体 max-height 80vh"，但构造函数里从来没实现：
     // 只有宽度上限，高度被 sizeHint 顶到 ~690px，而 X11 分配的窗口只有 533px，
     // 无边框 + 透明背景下没有 WM 兜底，超出部分直接被裁 —— 实测"本机文件目录 /
     // 目标电脑 IP / SSH 端口"三个最关键的字段在屏幕上看不见。
     // 中间那块是 QScrollArea，限高之后自然出滚动条，字段一条都不会丢。
-    const QRect avail = QGuiApplication::primaryScreen()->availableGeometry();
-    setMinimumHeight(320);
-    setMaximumHeight(qMax(320, avail.height() - 40));
+    // 按**父窗口所在那块屏**算（多显示器下主窗口在副屏时弹窗跟着走），
+    // 与 ScreenFit::screenForWidget() 是同一份规则。
+    QScreen *scr = ScreenFit::screenForWidget(parentWidget());
+    const QRect avail = scr ? scr->availableGeometry() : QRect(0, 0, 1280, 764);
+    setMinimumHeight(ScreenFit::kSettingsHeightMin);
+    // 尺寸**钉死**，并且**跟着屏幕收敛**。
+    //
+    // 为什么要收敛：笔记本 1366×768、1080p、4K 缩放各不相同 ——
+    // 写死 640×560，在矮屏上会顶出屏幕，在大屏上又显得小气。
+    // 这里统一按「屏幕可用区 - 40px」收敛（availableGeometry 已经排除了任务栏）。
+    // 收敛规则只有一份（ScreenFit.h），主界面和设置弹窗共用。
+    {
+        const QSize sz = ScreenFit::settingsDialog(avail.width(), avail.height());
+        setFixedSize(sz);
+    }
 
     QVBoxLayout *outerLayout = new QVBoxLayout(this);
     // 定稿图实测：标题栏顶到 y=0（弹窗本身只有 1px 外框），
@@ -219,6 +323,20 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     scroll->setWidgetResizable(true);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setFrameShape(QFrame::NoFrame);
+    // 尺寸策略：Minimum（只有 GrowFlag、没有 ShrinkFlag）。
+    //
+    // 为什么：QWidgetItem::minimumSize() 在策略带 ShrinkFlag 时取
+    // minimumSizeHint()，而 QScrollArea 的 minimumSizeHint() 就是
+    // **内容容器的 minimumSizeHint**（内容多高，它就要求多高）——
+    // 于是「加几条规则」就能把弹窗顶高（实测 805px，底栏被挤出屏幕）。
+    // 改成 Minimum 之后，外层布局取的是滚动区的**显式最小高**（下面设成 0），
+    // 弹窗高度不再被内容牵着走：内容超出就在中间滚动。
+    //
+    // 内容容器**必须保留自己的 minimumSizeHint**（= 布局最小高）：
+    // QScrollArea::resizeEvent 会把内容 resize 成 max(视口高, 内容最小高)，
+    // 如果连内容最小高也钉成 0，内容就会被压到视口高度，
+    // 布局放不下 ⇒ 控件互相重叠（实测截图就是这样）。
+    scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
 
     QWidget *body = new QWidget;
     QVBoxLayout *bl = new QVBoxLayout(body);
@@ -527,7 +645,9 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     QFrame *gTools = mkGroupBox(QString::fromUtf8(kTxtTools), &toolsLay);
     bl->addWidget(gTools);
 
-    m_ruleTable = new QTableWidget(0, 3);
+    // 第 4 列是「删除」按钮列（每行一个 ×）。
+    // 原来只有 3 列、也从来没有任何删除入口 —— 用户加了规则就删不掉。
+    m_ruleTable = new QTableWidget(0, 4);
     m_ruleTable->setObjectName(QStringLiteral("ruleTable"));
     // 表头先换掉再设列名：setHorizontalHeaderLabels() 是给**当前表头**写标签，
     // 顺序反了的话新表头上一个标签都没有（表头会是一片空白）。
@@ -535,7 +655,8 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     m_ruleTable->setHorizontalHeaderLabels(QStringList()
                                            << QString::fromUtf8(kTxtColSuffix)
                                            << QString::fromUtf8(kTxtColTool)
-                                           << QString::fromUtf8(kTxtColPath));
+                                           << QString::fromUtf8(kTxtColPath)
+                                           << QString());   // 第 4 列：删除按钮列（表头留空）
     m_ruleTable->horizontalHeader()->setHighlightSections(false);
     m_ruleTable->verticalHeader()->setVisible(false);
     m_ruleTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -547,11 +668,27 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     // + 「+ 添加规则」按钮。规则表原来死锁 160px（能塞 4 行），整组被撑到 244px，
     // 面板因此比定稿图高出 70 多 px、第三组差点被挤出屏幕。
     m_ruleTable->setFixedHeight(96);
-    m_ruleTable->horizontalHeader()->setStretchLastSection(true);
     // 列宽照定稿图实测：文件类型列 110px、工具名称列 130px
-    // （定稿图表头列竖线逻辑位置 28 / 138 / 268 / 612.7，差值即列宽）。
+    //（定稿图表头列竖线逻辑位置 28 / 138 / 268 / 612.7，差值即列宽）；
+    // 「关联程序路径」列吃掉剩余宽度，最后是固定 44px 的删除按钮列。
+    //
+    // 为什么不能继续用 setStretchLastSection(true)：加了第 4 列之后
+    // "最后一列"变成了删除按钮列 —— 路径列被压成固定宽，按钮列反被拉满整行。
+    m_ruleTable->horizontalHeader()->setStretchLastSection(false);
+    m_ruleTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    m_ruleTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Fixed);
     m_ruleTable->setColumnWidth(0, 110);
     m_ruleTable->setColumnWidth(1, 130);
+    m_ruleTable->setColumnWidth(3, 44);
+    // 「关联程序路径」列**单行显示**。
+    //
+    // 默认 wordWrap = true：长路径在 28px 高的行里换行成两行，
+    // 第二行被裁掉一半 —— 用户看到的是「路径断在半截」（2026-10-28 报障
+    // 「路径太挤了」）。单行 + 中间省略（RulePathDelegate）才是干净的做法：
+    // 头尾都在、中间一个省略号，完整路径在 tooltip 里。
+    m_ruleTable->setWordWrap(false);
+    m_rulePathDelegate = new RulePathDelegate(m_ruleTable);
+    m_ruleTable->setItemDelegateForColumn(2, m_rulePathDelegate);
     toolsLay->addWidget(m_ruleTable);
 
     // 「+ 添加规则」放在表格**下面**（定稿图 .btn-add 就是这么排的），
@@ -633,7 +770,12 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     // 限高按**屏幕实际可用高度**算，不按 80vh：80vh 是给麒麟 768p 那种矮屏留的，
     // 在 1080p 上会白白砍掉 100 多 px，面板被迫滚动、三组卡片露不全。
     // 留 40px 余量给窗口边框/任务栏，矮屏上仍然自动退回滚动。
-    const int limitH   = qMax(320, avail.height() - 40);
+    // 限高与 ScreenFit::settingsDialog() 用**同一个余量**（kMargin = 40）。
+    // 原来这里写的是 avail.height()-2，比真实约束大 38px ——
+    // 调试打印出来的 limit 比屏幕实际允许的大，排障时会被这个数带偏
+    //（2026-10-28 缺陷 5）。
+    const int limitH   = qMax(ScreenFit::kSettingsHeightMin,
+                              avail.height() - ScreenFit::kMargin);
     // 分层高度诊断（设 SRT_DEBUG_LAYOUT=1 才打印）：三组卡片各占多高、
     // 内容一共多高、屏幕允许多高 —— 对不上定稿图时按这三个数定位。
     if (!qgetenv("SRT_DEBUG_LAYOUT").isEmpty()) {
@@ -642,13 +784,62 @@ SettingsDialog::SettingsDialog(QWidget *parent)
                contentH, chromeH, limitH, avail.width(), avail.height());
         fflush(stdout);
     }
-    if (contentH > 0 && contentH + chromeH <= limitH) {
-        scroll->setMinimumHeight(contentH);
-        setFixedHeight(contentH + chromeH);
-    }
+    // 面板高度：**固定**，不跟内容走（构造时就已经 setFixedHeight 钉死了）。
+    //
+    // 这里只保留诊断输出，不再按内容重设高度。
+    //
+    // 原来这里是「内容整高显示」：算一遍内容高度，放得下就 setFixedHeight(内容高)。
+    // 两个问题都出在这套逻辑上：
+    //   ① 内容放不下时**没有 else 分支** ⇒ QScrollArea 的 sizeHint 塌成 339
+    //      ⇒ 弹窗被压扁成半屏（2026-10-28 现场截图 640×339）。
+    //   ② 内容高度跟着「规则条数」变 ⇒ 每加一条规则弹窗长 28px，
+    //      加到第 5、6 条时弹窗 805px，底栏被挤出屏幕。
+    //
+    // 现在：高度固定（名义 560，按屏幕收敛），内容多出来就在中间滚动。
+    // 滚动区的最小高**不给**：它一旦被撑大，外层布局就会把弹窗顶高
+    // （ScrollBody 的 minimumSizeHint 已经钉成 0，内容超高时自动出滚动条）。
+    scroll->setMinimumHeight(0);
 
     connect(m_btnSave, SIGNAL(clicked()), this, SLOT(onSaveClicked()));
     connect(test, SIGNAL(clicked()), this, SIGNAL(settingsTestConnectionRequested()));
+}
+
+// 上屏时把面板**钉在屏幕可用区内**。
+//
+// 无边框窗口：Qt 在 show() 时按父窗口居中，而这个面板可能高达 758px
+// （几乎占满 764 的可用高度）—— 一旦父窗口位置偏一点，弹窗就会有一截
+// 落到任务栏上被裁掉。垂直居中，超出就贴上边。
+void SettingsDialog::showEvent(QShowEvent *event)
+{
+    QDialog::showEvent(event);
+
+    // 用**父窗口所在的那块屏**，不一定是主屏。
+    // 多显示器下主窗口拖到副屏时，设置弹窗必须跟着走 ——
+    // 否则弹窗会出现在另一块屏上（用户会以为程序卡住）。
+    // 拔掉外接显示器之后同理。
+    //
+    // 找屏规则与主窗口**共用一份**（ScreenFit::screenForWidget）：
+    // 优先用「窗口当前所在屏」，构造期没有 windowHandle 时按几何中心判断，
+    // 最后才退到主屏。
+    //
+    // 注意：Qt 5.9.6 没有 QGuiApplication::screenAt()（5.10 才有），
+    // 本工程用 Qt 5.9.6 ⇒ 自己遍历 screens() 判断。
+    QScreen *scr = ScreenFit::screenForWidget(parentWidget() ? parentWidget() : this);
+    if (!scr)
+        return;
+    const QRect avail = scr->availableGeometry();
+
+    // 尺寸也按**这块屏**重新收敛一次：构造时算的是主屏，
+    // 窗口被拖到另一块屏（分辨率/缩放不同）之后就过时了。
+    const QSize want = ScreenFit::settingsDialog(avail.width(), avail.height());
+    if (size() != want)
+        setFixedSize(want);
+
+    const QSize sz = size();
+    if (sz.width() <= 0 || sz.height() <= 0)
+        return;
+    // 居中并保证整块落在可用区内（与主窗口同一份规则）。
+    move(ScreenFit::centeredIn(sz, avail).topLeft());
 }
 
 void SettingsDialog::mousePressEvent(QMouseEvent *event)
@@ -877,19 +1068,79 @@ void SettingsDialog::addRuleRow()
             it->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         m_ruleTable->setItem(r, c, it);
     }
+    // 第 4 列：加出来的行同样得能删。
+    attachRuleDeleteButton(r);
     // 表格高度必须**跟着行数走**，否则新行落在可视区之外 ——
     // 用户点一下看着什么都没发生（2026-10-27 报障的现象）。
     syncRuleTableHeight();
     // 再滚到底：新行必须在可见区里，光"存在"不算数。
     m_ruleTable->scrollToBottom();
+    // 弹窗尺寸固定 ⇒ 外层滚动区可能停在中间，新行还在折叠线以下。
+    // 顺手把**外层**也滚到底，让用户一眼看到刚加的那一行。
+    if (m_scrollArea && m_scrollArea->verticalScrollBar()) {
+        QScrollBar *sb = m_scrollArea->verticalScrollBar();
+        sb->setValue(sb->maximum());
+    }
     m_ruleTable->setCurrentCell(r, 0);
     m_ruleTable->editItem(m_ruleTable->item(r, 0));
+}
+
+// 给规则表的第 row 行装上「删除」按钮（第 4 列）。
+//
+// 为什么要有：产品里**从来没有**过删除规则的入口 —— removeRuleRow()
+// 只被自动化测试钩子调用过。用户点「+ 添加规则」加出来的行就再也去不掉
+//（2026-10-28 用户报障：「添加规则之后无法进行删除」）。
+//
+// 按钮放在单元格里的一个小 holder 上（不是直接铺满单元格）：铺满的话
+// hover 的高亮会糊满整格，看着不像一个按钮。
+//
+// ★**行号不写死**：删掉中间一行之后，后面的行会往上挪一位 ——
+// 写死行号的按钮会删掉**别人的**规则。所以点击时现查"这一格里的按钮是谁"。
+void SettingsDialog::attachRuleDeleteButton(int row)
+{
+    if (!m_ruleTable || row < 0 || row >= m_ruleTable->rowCount())
+        return;
+
+    QWidget *holder = new QWidget(m_ruleTable);
+    QHBoxLayout *lay = new QHBoxLayout(holder);
+    lay->setContentsMargins(0, 0, 0, 0);
+    lay->addStretch(1);
+
+    QToolButton *btn = new QToolButton(holder);
+    btn->setObjectName(QStringLiteral("ruleDelBtn"));
+    btn->setText(QString::fromUtf8(u8"\u00D7"));            // ×
+    btn->setToolTip(QString::fromUtf8(u8"删除这条规则"));
+    btn->setCursor(Qt::PointingHandCursor);
+    btn->setFocusPolicy(Qt::NoFocus);
+    btn->setFixedSize(20, 20);
+    lay->addWidget(btn, 0, Qt::AlignVCenter);
+    lay->addStretch(1);
+
+    m_ruleTable->setCellWidget(row, kRuleDelCol, holder);
+
+    connect(btn, &QToolButton::clicked, this, [this, holder]() {
+        if (!m_ruleTable)
+            return;
+        for (int i = 0; i < m_ruleTable->rowCount(); ++i) {
+            if (m_ruleTable->cellWidget(i, kRuleDelCol) == holder) {
+                removeRuleRow(i);
+                return;
+            }
+        }
+    });
 }
 
 void SettingsDialog::removeRuleRow(int row)
 {
     if (row < 0 || row >= m_ruleTable->rowCount())
         return;
+    // 单元格里的删除按钮要**先**摘掉：removeRow 之后那一行的 index 全部失效，
+    // 挂在上面的 widget 由 Qt 回收 —— 不摘干净的话，残留按钮的点击
+    // 会顺着 lambda 里的 holder 去找"当前行号"，删错行。
+    if (QWidget *w = m_ruleTable->cellWidget(row, kRuleDelCol)) {
+        m_ruleTable->removeCellWidget(row, kRuleDelCol);
+        w->deleteLater();
+    }
     m_ruleTable->removeRow(row);
     if (row < m_rowExists.size())
         m_rowExists.removeAt(row);
@@ -901,7 +1152,13 @@ void SettingsDialog::onRuleCellChanged(int row, int col)
 {
     if (row >= 0 && row < m_rowExists.size())
         m_rowExists[row] = true;
-    Q_UNUSED(col);
+    // 「关联程序路径」列是单行 + 中间省略显示的，
+    // 完整路径必须能一眼看到 —— 鼠标悬停显示全称。
+    if (col == 2 && m_ruleTable && row >= 0 && row < m_ruleTable->rowCount()) {
+        QTableWidgetItem *it = m_ruleTable->item(row, 2);
+        if (it)
+            it->setToolTip(it->text());
+    }
 }
 
 void SettingsDialog::loadConfig(const TargetConfig &target,
@@ -963,6 +1220,8 @@ void SettingsDialog::loadConfig(const TargetConfig &target,
             m_ruleTable->setItem(r, 0, a);
             m_ruleTable->setItem(r, 1, b);
             m_ruleTable->setItem(r, 2, c);
+            // 从配置读出来的行同样要有删除按钮。
+            attachRuleDeleteButton(r);
         }
     }
 
@@ -994,9 +1253,14 @@ void SettingsDialog::syncRuleTableHeight()
     const int delta = want - m_ruleTable->height();
     if (delta != 0) {
         m_ruleTable->setFixedHeight(want);
-        if (m_scrollArea)
-            m_scrollArea->setMinimumHeight(m_scrollArea->minimumHeight() + delta);
-        setFixedHeight(height() + delta);
+        // ★ 这里**不能**再改弹窗高度，也不能再撑滚动区的最小高。
+        //
+        // 原来这两行（m_scrollArea->setMinimumHeight(+delta) +
+        // setFixedHeight(height() + delta)）让「加一条规则」就把弹窗顶高 28px ——
+        // 加到第 5、6 条时弹窗 805px，底栏（保存设置）被挤出屏幕，
+        // 用户点不到保存（2026-10-28 用户报障：「添加规则后，尺寸都看不到了」）。
+        //
+        // 现在：弹窗尺寸固定，多出来的内容在中间滚动（ScrollBody + QScrollArea）。
     }
 }
 
@@ -1183,6 +1447,28 @@ void SettingsDialog::clickSaveForTest()
 void SettingsDialog::removeRuleRowForTest(int row)
 {
     removeRuleRow(row);
+}
+
+// 第 row 行有没有「删除」按钮。
+bool SettingsDialog::ruleRowHasDeleteButtonForTest(int row) const
+{
+    if (!m_ruleTable || row < 0 || row >= m_ruleTable->rowCount())
+        return false;
+    QWidget *holder = m_ruleTable->cellWidget(row, kRuleDelCol);
+    return holder && holder->findChild<QToolButton *>() != nullptr;
+}
+
+// 点第 row 行的「删除」按钮（走按钮自己的 clicked 信号，和用户手点同一条路）。
+void SettingsDialog::clickRuleDeleteForTest(int row)
+{
+    if (!m_ruleTable || row < 0 || row >= m_ruleTable->rowCount())
+        return;
+    QWidget *holder = m_ruleTable->cellWidget(row, kRuleDelCol);
+    if (!holder)
+        return;
+    QToolButton *btn = holder->findChild<QToolButton *>();
+    if (btn)
+        btn->click();
 }
 
 void SettingsDialog::setRuleTableHeightForTest(int h)

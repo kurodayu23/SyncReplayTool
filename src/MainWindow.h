@@ -135,4 +135,7 @@ private:
     qreal             m_startDpr = 1.0;
     // 探针截图模式：主窗和设置面板都不上屏、不抢焦点，只把控件渲染进 PNG。
     bool              m_probeNoScreen = false;
+    // 是否已经摆过位置：第一次按屏幕居中，之后保住用户拖出来的位置
+    // （只在越界时往里挪）。见 refitToScreen()。
+    bool              m_placed = false;
 };

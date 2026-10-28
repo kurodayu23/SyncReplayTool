@@ -1,4 +1,5 @@
-﻿#include "MainWindow.h"
+﻿#include <cstdio>
+#include "MainWindow.h"
 
 #include <QFrame>
 #include <QLabel>
@@ -23,6 +24,7 @@
 #include "SyncPanel.h"
 #include "ToolPanel.h"
 #include "SettingsDialog.h"
+#include "ScreenFit.h"
 #include "ConfigStore.h"
 
 namespace {
@@ -31,23 +33,23 @@ QString T(const char *s) { return QString::fromUtf8(s); }
 const char *kAppName     = "\xE6\x95\xB0\xE6\x8D\xAE\xE5\x90\x8C\xE6\xAD\xA5\xE5\xB7\xA5\xE5\x85\xB7";  // 数据同步工具
 const char *kSplashReady = "\xE6\xAD\xA3\xE5\x9C\xA8\xE5\x88\x9D\xE5\xA7\x8B\xE5\x8C\x96\xE5\x90\x8C\xE6\xAD\xA5\xE5\xBC\x95\xE6\x93\x8E...";  // 正在初始化同步引擎...
 
-// 窗口宽度严格对齐 HTML 定稿原型（.window-frame width: 980px）。
+// 主界面的名义尺寸**不在本文件另存一份** —— 真源是 ScreenFit.h
+// （kMainWidth / kMainHeight / kMainHeightLogOpen）。
 //
-// 原来死锁 830px：那是从**更早一版**原型抄下来的数字，后来原型已经改成 980，
-// 交付包却还停在 830 —— 于是同一份设计稿，HTML 预览和真程序对不上，
-// 客户一眼就能看出"不是同一个东西"。表格 7 列加起来 596px 固定，
-// 多出来的 150px 全部给「文件名」列（Stretch），正好是定稿图里那一列的比例。
-const int kWindowWidth = 980;
-// 高度同样按定稿图反推：用户定稿截图 1477×691，量出来标题栏 38px、
-// 行高 34px 等特征都是 1.5 倍缩放，所以逻辑高度 = 691 / 1.5 ≈ 460。
-// 480 是更早一版原型抄下来的（HTML 预览实测帧高 441）。
-const int kWindowHeight = 460;
-// 同步日志**默认展开**时的主界面高度（用户 2026-10-27 要求）。
+// 原来这里另写了一份 980/460/759，与 ScreenFit.h 里的同一组数字各改各的：
+// 改了一边另一边就过时，正是"屏幕自适应"做成两份规则的根源。
+// 2026-10-28 起只留一份（缺陷 4 的同源问题）。
 //
-// 为什么是 758：设置弹窗实测高 758px（640×758 截图），
-// 用户要求"日志默认打开，这样跟设置尺寸相同" ——
-// 于是主界面展开日志后的高度取同一个值，两个窗口是同一套尺寸。
-const int kWindowHeightLogOpen = 759;
+// 保留一下当初的来历：
+//   · 宽度 980 = HTML 定稿原型 .window-frame width: 980px
+//     （更早一版原型是 830，交付包却停在 830 —— 同一份设计稿，
+//      HTML 预览和真程序对不上，客户一眼就能看出"不是同一个东西"）。
+//     表格 7 列加起来 596px 固定，多出来的 150px 全给「文件名」列。
+//   · 高度 460 = 用户定稿截图 1477×691，标题栏 38px、行高 34px
+//     都是 1.5 倍缩放 ⇒ 逻辑高度 = 691 / 1.5 ≈ 460。
+//   · 展开日志 759 = 设置弹窗整高显示实测 758px（640×758），
+//     于是展开态与设置弹窗是同一套尺寸体系。
+
 
 int g_splashMs = 2000;
 bool g_skipSplash = false;
@@ -132,9 +134,11 @@ void MainWindow::applyWindowFrame()
     flags |= Qt::WindowMinimizeButtonHint;
     setWindowFlags(flags);
     setAttribute(Qt::WA_TranslucentBackground, true);
-    setFixedWidth(kWindowWidth);
-    setMinimumWidth(kWindowWidth);
-    setMaximumWidth(kWindowWidth);
+    // 宽度锁在这里，真正的**尺寸**由 refitToScreen() 按窗口所在那块屏统一收敛。
+    // 数值取自 ScreenFit.h（唯一真源），本文件不再另存一份。
+    setFixedWidth(ScreenFit::kMainWidth);
+    setMinimumWidth(ScreenFit::kMainWidth);
+    setMaximumWidth(ScreenFit::kMainWidth);
 }
 
 // ---------------------------------------------------------------- 启动页
@@ -346,9 +350,38 @@ void MainWindow::onOpenSettings()
 
 void MainWindow::onLogDrawerToggled(bool open)
 {
-    // 只改高度，不重新居中：原来的 window()->setFixedHeight() 也不移动窗口，
-    // 居中交给 refitToScreen()（屏幕尺寸变化时才用）。
-    setFixedHeight(open ? kWindowHeightLogOpen : kWindowHeight);
+    // 最大化状态下**不动窗口尺寸**（2026-10-28 缺陷 3）。
+    //
+    // 原来这里无条件 setFixedHeight(...)：setFixedSize 会把 min/max 一起写死，
+    // 而最大化几何由窗口管理器管 —— 结果 isMaximized() 还是 true、
+    // 几何却变成 1280×728，成了"最大化但尺寸不对"的怪状态，谁都修不回来。
+    // 最大化时日志抽屉在布局内部，175px 高够放，不需要动窗口。
+    if (isMaximized())
+        return;
+
+    // 高度按**窗口当前所在那块屏**的可用高收敛。
+    //
+    // 原来用 primaryScreen()：主窗口拖到更矮的副屏仍按主屏算高度，
+    // 展开日志直接掉出屏幕（2026-10-28 缺陷 2）。
+    // 现在与设置弹窗共用 ScreenFit::screenForWidget() —— 同一块屏、同一套数。
+    QScreen *scr = ScreenFit::screenForWidget(this);
+    if (!scr)
+        return;
+    const QRect avail = scr->availableGeometry();
+
+    // 收敛规则只有一份（ScreenFit.h），主界面和设置弹窗共用。
+    const QSize sz = ScreenFit::mainWindow(avail.width(), avail.height(), open);
+
+    // ★**位置也要跟着收敛**（2026-10-28 缺陷 1）：
+    // 只 setFixedHeight 不挪位置，窗口加高后**底边会掉出屏幕**。
+    // 实测（1280×764 可用区）：460 → 759 后底边到 909，超出 146px，
+    // 175px 高的日志抽屉只剩 29px 可见 —— 用户点了"展开日志"，
+    // 看到的是几乎空的抽屉。窗口拖到屏幕下半屏时超出更多（实测 264px）。
+    //
+    // 规则：保住原来的顶边/左边，越界才往里挪（ScreenFit::fitInside）。
+    const QRect target = ScreenFit::fitInside(sz, geometry(), avail);
+    setFixedSize(sz);
+    move(target.topLeft());
 }
 
 void MainWindow::showSettingsForProbe()
@@ -438,18 +471,27 @@ void MainWindow::flushConfigNotices()
 void MainWindow::refitToScreen()
 {
     // 最大化状态下不重设尺寸：setFixedSize 会把死锁重新装回去，
-    // 最大化窗口当场被压回 830x480。
+    // 最大化窗口当场被压回固定尺寸。
     if (isMaximized())
         return;
-    QScreen *scr = QGuiApplication::primaryScreen();
+    // 按**窗口当前所在那块屏**算，不一定是主屏（2026-10-28 缺陷 2）。
+    // 与设置弹窗同一份规则（ScreenFit::screenForWidget）。
+    QScreen *scr = ScreenFit::screenForWidget(this);
     if (!scr)
         return;
     const QRect avail = scr->availableGeometry();
-    const int h = (m_syncPanel && m_syncPanel->isLogOpenForTest())
-                    ? kWindowHeightLogOpen : kWindowHeight;
-    setFixedSize(kWindowWidth, h);
-    move(avail.center().x() - kWindowWidth / 2,
-         avail.center().y() - h / 2);
+    // **自适应屏幕**：笔记本 1366×768、1080p、4K 缩放各不相同。
+    // 写死 980×460 在窄屏上会被裁掉，展开日志的 759 在 768p 上更是放不下。
+    // 收敛规则只有一份（ScreenFit.h），主界面和设置弹窗共用。
+    const bool logOpen = (m_syncPanel && m_syncPanel->isLogOpenForTest());
+    const QSize sz = ScreenFit::mainWindow(avail.width(), avail.height(), logOpen);
+    // 第一次上屏：居中。之后：保住用户拖出来的位置，只在越界时往里挪 ——
+    // 换屏 / DPR 变化时把窗口拽回屏幕正中会打断正在进行的拖拽。
+    const QRect target = m_placed ? ScreenFit::fitInside(sz, geometry(), avail)
+                                   : ScreenFit::centeredIn(sz, avail);
+    setFixedSize(sz);
+    move(target.topLeft());
+    m_placed = true;
 }
 
 void MainWindow::changeEvent(QEvent *event)
@@ -460,6 +502,11 @@ void MainWindow::changeEvent(QEvent *event)
         const qreal now = devicePixelRatioF();
         if (!qFuzzyCompare(now, m_startDpr)) {
             m_startDpr = now;
+            refitToScreen();
+        } else if (event->type() == QEvent::ScreenChangeInternal) {
+            // 换屏了（拖到另一块显示器 / 拔掉外接屏）：按**新那块屏**的可用区
+            // 重新收敛一次。位置保留，只在越界时往里挪（refitToScreen 内部处理）——
+            // 不在这里把窗口拽回屏幕正中：那会打断正在进行的拖拽。
             refitToScreen();
         }
     }

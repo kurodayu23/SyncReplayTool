@@ -47,6 +47,7 @@ HEADERS += \
     src/ToolPanel.h \
     src/AutoSyncScheduler.h \
     src/MainWindow.h \
+    src/ScreenFit.h \
     src/Theme.h
 
 win32:LIBS += -lcrypt32

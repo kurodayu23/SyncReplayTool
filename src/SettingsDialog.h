@@ -16,6 +16,7 @@ class QTableWidget;
 class QFrame;
 class QScrollArea;
 class QWidget;
+class QStyledItemDelegate;
 
 // 「传输与工具设置」弹窗。
 //
@@ -69,6 +70,9 @@ public:
     // 探针走那条路径报出来的 FAIL，根因在探针自己，不在产品。
     void clickSaveForTest();
     void removeRuleRowForTest(int row);
+    // 第 row 行有没有「删除」按钮 / 点它。用来证明"用户真的能删"。
+    bool ruleRowHasDeleteButtonForTest(int row) const;
+    void clickRuleDeleteForTest(int row);
     // 强行设定规则表高度。**只给阴性对照用**：
     // 把表格压扁，新行必然落到可视区之外 —— 用来证明
     // 「新行看得见」这条判据真的在看几何，而不是恒真。
@@ -109,6 +113,8 @@ public slots:
     void onAutoStartToggled(bool on);
 
 protected:
+    // 上屏时把面板钉在屏幕可用区内（见 .cpp 里的说明）。
+    void showEvent(QShowEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
@@ -119,6 +125,9 @@ private:
     // 原来只有 loadConfig 会算 —— 于是点完按钮新行落在固定高度表格之外，
     // 用户看着"点了没反应"（2026-10-27 报障）。
     void syncRuleTableHeight();
+    // 给规则表的第 row 行装上「删除」按钮（第 4 列）。
+    // 产品里从来没有过删除入口 —— 用户加了规则就删不掉（2026-10-28 报障）。
+    void attachRuleDeleteButton(int row);
 
     QFrame      *m_card = nullptr;
     QFrame      *m_header = nullptr;
@@ -131,6 +140,8 @@ private:
     QLabel      *m_testLabel = nullptr;
     QLabel      *m_saveTip = nullptr;
     QTableWidget *m_ruleTable = nullptr;
+    // 「关联程序路径」列的绘制委托（单行 + 中间省略，见 .cpp 里的说明）。
+    QStyledItemDelegate *m_rulePathDelegate = nullptr;
 
     QLineEdit *m_sourceDir = nullptr;
     QLineEdit *m_host = nullptr;

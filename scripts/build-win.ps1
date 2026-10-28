@@ -129,6 +129,41 @@ try {
     if (Test-Path $deployDir) {
         Copy-Item $targetExe (Join-Path $deployDir 'SyncReplayTool.exe') -Force
     }
+
+    # ---- Qt 插件目录：让**每一个**构建输出目录都能直接运行 ----
+    #
+    # 2026-10-28 用户现场弹窗实测：
+    #   「This application failed to start because it could not find or load
+    #     the Qt platform plugin "windows" in ""」
+    # 影子构建目录里只有 exe，没有 platforms\qwindows.dll ——
+    # 插件只在 QtCreator 的活动套件目录和 deploy 目录里。
+    # 从影子构建目录直接双击 exe 必然弹这个框，
+    # 而且它是**模态**错误框：命令行调用会直接挂死（实测进程挂着不动）。
+    #
+    # 所以：把插件目录一起同步到构建输出目录，插件源优先取
+    # QtCreator 活动套件目录（那里是 windeployqt 铺好的），取不到就退到
+    # Qt 安装目录下的 plugins。
+    $pluginDirs = @('platforms', 'imageformats', 'iconengines')
+    $pluginSrc = $null
+    foreach ($cand in @("$BuildRoot\build-Release\release", $deployDir)) {
+        if (Test-Path (Join-Path $cand 'platforms\qwindows.dll')) { $pluginSrc = $cand; break }
+    }
+    if (-not $pluginSrc) {
+        $qtPlugins = Join-Path $QtRoot 'plugins'
+        if (Test-Path (Join-Path $qtPlugins 'platforms\qwindows.dll')) { $pluginSrc = $qtPlugins }
+    }
+    if ($pluginSrc) {
+        $outDir = Join-Path $BuildRoot 'release'
+        foreach ($pd in $pluginDirs) {
+            $s = Join-Path $pluginSrc $pd
+            if (Test-Path $s) {
+                Copy-Item $s (Join-Path $outDir $pd) -Recurse -Force
+            }
+        }
+        Write-Output "OK: plugins synced from $pluginSrc"
+    } else {
+        Write-Warning '没找到 qwindows.dll —— 这个构建目录不能直接运行（缺 Qt 平台插件）。'
+    }
 }
 finally {
     Pop-Location

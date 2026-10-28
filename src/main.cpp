@@ -22,8 +22,12 @@
 #include <QLockFile>
 #include <QMessageBox>
 #include <QGuiApplication>
+#include <QScreen>
+#include <QScrollArea>
+#include <QScrollBar>
 #include "MainWindow.h"
 #include "SyncPanel.h"
+#include "ScreenFit.h"
 #include "SettingsDialog.h"
 #include "RsyncRunner.h"
 #include "ConfigStore.h"
@@ -2718,6 +2722,86 @@ int runSelfCheck()
     out << "INFO\tcrypto-backend\tavailable=" << (SecretStore::cryptoBackendAvailable() ? 1 : 0)
         << "\tbackend=" << SecretStore::backendName() << "\n";
 
+
+    // ----------------------------------------------------------------
+    // 屏幕矩阵：尺寸收敛规则必须在**各种屏幕**上都对。
+    //
+    // 为什么值得单独一条判据：收敛规则是纯算术，写错了在这台机器上看不出来
+    // （这台是 1280×764，恰好落在最好看的那一档）。
+    // 客户那边可能是 1366×768 的笔记本、1024×768 的老本、4K 缩到 200%，
+    // 或者 853×480 的 150% 笔记本 —— 规则必须自己站得住。
+    //
+    // 判据三条：
+    //   ① 主界面/弹窗都**不超出**屏幕可用区（超出 = 被裁 = 用户够不着按钮）；
+    //   ② 都**不低于**各自的下界（低于 = 表格列挤没 / 输入框放不下）；
+    //   ③ 大屏上尺寸**不缩水**（1280×764 及以上，主界面必须是完整的 980×460）。
+    // ----------------------------------------------------------------
+    {
+        struct ScreenCase { const char *name; int w; int h; };
+        static const ScreenCase kScreens[] = {
+            { "1366x768-laptop",  1366,  728 },   // 笔记本 768p
+            { "1920x1080-fhd",    1920, 1040 },   // 1080p
+            { "1024x768-old",     1024,  728 },   // 老笔记本 / 麒麟虚拟机
+            { "800x600-tiny",      800,  560 },   // 极小屏
+            { "1280x800-4k200",  1280,  760 },   // 2560x1600 @200%
+            { "853x480-150pc",    853,  440 },   // 1920x1080 @150%（矮）
+        };
+        int matrixBad = 0;
+        QString matrixDetail;
+        for (int i = 0; i < int(sizeof(kScreens) / sizeof(kScreens[0])); ++i) {
+            const ScreenCase &sc = kScreens[i];
+            const QSize mainShut = ScreenFit::mainWindow(sc.w, sc.h, false);
+            const QSize mainOpen = ScreenFit::mainWindow(sc.w, sc.h, true);
+            const QSize dlg      = ScreenFit::settingsDialog(sc.w, sc.h);
+            const bool fits =
+                mainShut.width() <= sc.w && mainShut.height() <= sc.h &&
+                mainOpen.width() <= sc.w && mainOpen.height() <= sc.h &&
+                dlg.width()      <= sc.w && dlg.height()      <= sc.h;
+            // ★**位置**也必须收敛（2026-10-28 缺陷 1/6）：
+            // 只比尺寸的话，"窗口底边跑出屏幕"这种缺陷根本抓不到 ——
+            // 实测 1280×764 可用区：收起 460 → 展开 759 后底边到 909，
+            // 超出 146px，175px 高的日志抽屉只剩 29px 可见（用户点了展开日志，
+            // 看到的是几乎空的抽屉）。窗口拖到屏幕下半屏时超出更多（264px）。
+            //
+            // 这里模拟**最恶劣的位置**（窗口被拖到屏幕下半屏）再展开日志，
+            // 断言窗口仍然整块落在可用区内。
+            const QRect scrRect(0, 0, sc.w, sc.h);
+            const QRect worstPos(0, sc.h - 100, 100, 100);
+            const QRect fitOpen = ScreenFit::fitInside(mainOpen, worstPos, scrRect);
+            const QRect fitShut = ScreenFit::fitInside(mainShut, worstPos, scrRect);
+            const bool inside =
+                fitOpen.top()  >= scrRect.top()  && fitOpen.bottom()  <= scrRect.bottom() &&
+                fitOpen.left() >= scrRect.left() && fitOpen.right()   <= scrRect.right() &&
+                fitShut.top()  >= scrRect.top()  && fitShut.bottom()  <= scrRect.bottom() &&
+                fitShut.left() >= scrRect.left() && fitShut.right()   <= scrRect.right();
+            const bool aboveMin =
+                mainShut.width() >= ScreenFit::kMainWidthMin &&
+                mainShut.height() >= ScreenFit::kMainHeightMin &&
+                dlg.width()      >= ScreenFit::kSettingsWidthMin &&
+                dlg.height()     >= ScreenFit::kSettingsHeightMin;
+            const bool noShrink = (sc.w >= 1280 && sc.h >= 764)
+                                  ? (mainShut.width() == ScreenFit::kMainWidth &&
+                                     mainShut.height() == ScreenFit::kMainHeight)
+                                  : true;
+            const bool ok = fits && aboveMin && noShrink && inside;
+            if (!ok) {
+                ++matrixBad;
+                ++bad;
+            }
+            out << (ok ? "PASS\t" : "FAIL\t") << "screen-matrix-" << sc.name
+                << "\tfit=" << fits << " aboveMin=" << aboveMin
+                << " noShrink=" << noShrink << " inside=" << inside
+                << " main=" << mainShut.width() << "x" << mainShut.height()
+                << " open=" << mainOpen.width() << "x" << mainOpen.height()
+                << " dlg=" << dlg.width() << "x" << dlg.height()
+                << "\tscreen=" << sc.w << "x" << sc.h << "\n";
+        }
+        out.flush();
+        if (matrixBad && matrixDetail.isEmpty())
+            matrixDetail = QStringLiteral("%1 screens failed").arg(matrixBad);
+        Q_UNUSED(matrixDetail);
+    }
+
     out << (bad == 0 ? "SELFCHECK_ALL_PASS" : "SELFCHECK_FAILED") << "\n";
     return bad == 0 ? 0 : 1;
 }
@@ -2789,14 +2873,26 @@ int runGuiSelfCheck()
     w.show();
     QApplication::processEvents();
 
+    // 主界面的期望高度：**直接问产品自己的收敛规则**（ScreenFit.h），
+    // 不在判据里另抄一份 —— 抄一份的话，产品改了规则判据不会跟着变，
+    // 判据就成了"自己验自己"。1366×768 这类笔记本的可用高是 728，460 放得下。
+    // 声明在块外，G18/G19/G22/G24 都要用。
+    const QRect scrAvail = QGuiApplication::primaryScreen()->availableGeometry();
+    const int hShut = ScreenFit::mainWindow(scrAvail.width(), scrAvail.height(), false).height();
+    const int hOpen = ScreenFit::mainWindow(scrAvail.width(), scrAvail.height(), true).height();
+
     // ---- 主界面 ----
     {
         SyncPanel *panel = w.syncPanelForTest();
         const bool open = panel && panel->isLogOpenForTest();
-        check("G1-log-default-open", open, QStringLiteral("isLogOpenForTest=0"));
-        // 主界面高度与设置弹窗一致（758）。
-        check("G2-main-height-matches-settings", w.height() == 759,
-              QStringLiteral("height=%1 expected=759").arg(w.height()));
+        // 日志抽屉默认**收起**（用户 2026-10-28：「算了日志还是默认收起来吧」）。
+        // 默认展开是 10-27 那一轮的要求，已经被用户自己撤回。
+        check("G1-log-default-collapsed", !open,
+              QString::fromUtf8(u8"isLogOpenForTest=1\uFF08\u9ED8\u8BA4\u5E94\u5F53\u662F\u6536\u8D77\u7684\uFF09"));
+        // 收起时主界面高度 = 460（定稿图 980×460），但要**按屏幕可用高收敛**：
+        // 1366×768 这类笔记本的可用高是 728，460 放得下；更矮的屏幕才收敛。
+        check("G2-main-height-collapsed", w.height() == hShut,
+              QStringLiteral("height=%1 expected=%2").arg(w.height()).arg(hShut));
     }
 
     // ---- 设置弹窗 ----
@@ -2818,6 +2914,7 @@ int runGuiSelfCheck()
 
     // 点「+ 添加规则」→ 行数 +1
     const int h0 = d->ruleTableHeightForTest();
+    const int dH0 = d->height();
     d->clickAddRuleForTest();
     QApplication::processEvents();
     const int rows1 = d->ruleRowCountForTest();
@@ -2832,6 +2929,11 @@ int runGuiSelfCheck()
     // 表格高度确实跟着长了（一条行高 28px）
     check("G7-table-grew", h1 >= h0 + 28,
           QStringLiteral("h0=%1 h1=%2 expected>=%3").arg(h0).arg(h1).arg(h0 + 28));
+
+    // ★ 加规则**不许**把弹窗顶高（2026-10-28 用户报障：
+    // 「添加规则后，尺寸都看不到了」）。弹窗尺寸固定，多出来的内容在中间滚动。
+    check("G21-settings-height-stable-after-add", d->height() == dH0,
+          QStringLiteral("before=%1 after=%2").arg(dH0).arg(d->height()));
 
     // 阴性对照：把表格压到比表头还矮，新行必然看不见 —— 证明 G6 不是恒真。
     {
@@ -2906,15 +3008,174 @@ int runGuiSelfCheck()
     check("G17-table-shrank", d->ruleTableHeightForTest() < hBefore,
           QStringLiteral("h=%1 before=%2").arg(d->ruleTableHeightForTest()).arg(hBefore));
 
-    // 日志抽屉开关往返 + 窗口高度跟随
-    w.syncPanelForTest()->toggleLogDrawer();
-    QApplication::processEvents();
-    check("G18-log-collapsed-height", w.height() == 460,
-          QStringLiteral("height=%1 expected=460").arg(w.height()));
-    w.syncPanelForTest()->toggleLogDrawer();
-    QApplication::processEvents();
-    check("G19-log-expanded-height", w.height() == 759,
-          QStringLiteral("height=%1 expected=759").arg(w.height()));
+    // 日志抽屉开关往返 + 窗口高度跟随。
+    //
+    // 判据按**当前状态**写，不按"第几次切换"写：
+    // 跑到这里之前，配置提示可能已经自动展开过一次日志抽屉
+    // （SyncPanel::appendNotice() 里「if (!m_logOpen) toggleLogDrawer()」——
+    // 那是产品行为：用户该看见这条提示）。原来把次数写死，就差一次，报假 FAIL。
+    //
+    // 高度按**屏幕可用高**收敛（展开态 759px 在 1366×768 的笔记本上放不下，硬设会被裁）。
+    // hShut / hOpen 在上面已经按 ScreenFit 的同一份规则算好了，这里不再另抄。
+    {
+        w.syncPanelForTest()->toggleLogDrawer();
+        QApplication::processEvents();
+        const bool nowOpen = w.syncPanelForTest()->isLogOpenForTest();
+        const int expectH = nowOpen ? hOpen : hShut;
+        check("G18-log-height-follows-state", w.height() == expectH,
+              QStringLiteral("height=%1 expected=%2 open=%3").arg(w.height()).arg(expectH).arg((int)nowOpen));
+
+        w.syncPanelForTest()->toggleLogDrawer();
+        QApplication::processEvents();
+        const bool backOpen = w.syncPanelForTest()->isLogOpenForTest();
+        const int expectH2 = backOpen ? hOpen : hShut;
+        check("G19-log-height-follows-state-back", w.height() == expectH2,
+              QStringLiteral("height=%1 expected=%2 open=%3").arg(w.height()).arg(expectH2).arg((int)backOpen));
+    }
+
+    // 设置弹窗高度**固定**：min(560, 屏幕限高)。
+    //
+    // 2026-10-28 用户现场：弹窗 640×339（内容放不下时塌成半屏），
+    // 以及加规则后弹窗被顶到 805px（底栏被挤出屏幕）——两个都是尺寸失控。
+    // 现在高度在构造时就钉死，内容多出来在中间滚动。
+    {
+        const QRect avail = QGuiApplication::primaryScreen()->availableGeometry();
+        const int limitH = qMax(320, avail.height() - 40);
+        const int expectH = qMin(560, limitH);
+        const int h = d->height();
+        check("G20-settings-height-fixed", h == expectH,
+              QStringLiteral("height=%1 expected=%2 limit=%3").arg(h).arg(expectH).arg(limitH));
+    }
+
+    // ---- 日志展开后，窗口必须**整块留在屏幕里**（2026-10-28 缺陷 1/6）----
+    //
+    // 旧判据只比高度，抓不到"底边跑出屏幕"：1280×764 可用区下
+    // 460→759 后底边到 909，超出 146px，175px 高的日志抽屉只剩 29px 可见 ——
+    // 用户点了"展开日志"，看到的是几乎空的抽屉。
+    {
+        const QRect avail = scrAvail;
+        // 统一用"全局坐标"取矩形：设置弹窗有父窗口，geometry() 是父坐标。
+        auto globalRect = [](QWidget *widget) {
+            return QRect(widget->mapToGlobal(QPoint(0, 0)), widget->size());
+        };
+        auto insideAvail = [&avail](const QRect &g) {
+            return g.top() >= avail.top() && g.bottom() <= avail.bottom()
+                && g.left() >= avail.left() && g.right() <= avail.right();
+        };
+
+        // (1) 阴性对照：复现旧行为「只 setFixedHeight、不校正位置」，
+        //     同一套判定必须报"不在屏内" —— 否则这条判据就是恒真的假保证。
+        {
+            const int yBad = avail.bottom() - 60;
+            w.setFixedHeight(hShut);
+            w.move(avail.x() + 40, yBad);
+            QApplication::processEvents();
+            w.setFixedHeight(2000);          // 旧行为：高度随便设
+            w.move(avail.x() + 40, yBad);     // 旧行为：位置不动
+            QApplication::processEvents();
+            const QRect g = globalRect(&w);
+            check("G22-neg-old-behavior-detected", !insideAvail(g),
+                  QStringLiteral("old-behavior geometry still counted as inside: %1,%2 %3x%4")
+                      .arg(g.x()).arg(g.y()).arg(g.width()).arg(g.height()));
+        }
+
+        // (2) 复原成"收起 + 被拖到屏幕下半屏"，再走**产品路径**点开日志。
+        if (w.syncPanelForTest()->isLogOpenForTest()) {
+            w.syncPanelForTest()->toggleLogDrawer();
+            QApplication::processEvents();
+        }
+        w.setFixedHeight(hShut);
+        w.move(avail.x() + 40, avail.bottom() - 60);
+        QApplication::processEvents();
+        w.syncPanelForTest()->toggleLogDrawer();   // ← 产品自己的处理在这里跑
+        QApplication::processEvents();
+
+        const QRect g = globalRect(&w);
+        check("G22-log-open-window-inside-screen", insideAvail(g),
+              QStringLiteral("geom=%1,%2 %3x%4 avail=%5,%6 %7x%8")
+                  .arg(g.x()).arg(g.y()).arg(g.width()).arg(g.height())
+                  .arg(avail.x()).arg(avail.y()).arg(avail.width()).arg(avail.height()));
+        check("G23-log-open-height-follows-screen", w.height() == hOpen,
+              QStringLiteral("height=%1 expected=%2").arg(w.height()).arg(hOpen));
+    }
+
+    // ---- 最大化状态下切日志，不能把窗口改成"最大化但尺寸不对"（缺陷 3）----
+    //
+    // 旧实现无条件 setFixedHeight(...)：最大化窗口的 min/max 被写死，
+    // 结果 isMaximized() 还是 true、几何却变成 1280×728 —— 谁都修不回来。
+    {
+        // 与产品「最大化」按钮同一条路：先解开宽高死锁。
+        w.setMinimumSize(0, 0);
+        w.setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+        w.setWindowState(w.windowState() | Qt::WindowMaximized);
+        QApplication::processEvents();
+        // 模拟真实最大化后的几何（有的平台上最大化不改几何）。
+        w.setFixedHeight(scrAvail.height());
+        QApplication::processEvents();
+        const bool maxBefore = w.isMaximized();
+        const int hMaxBefore = w.height();
+        w.syncPanelForTest()->toggleLogDrawer();
+        QApplication::processEvents();
+        const bool maxAfter = w.isMaximized();
+        const int hMaxAfter = w.height();
+        check("G24-maximized-kept-on-log-toggle",
+              maxBefore && maxAfter && hMaxBefore == hMaxAfter,
+              QStringLiteral("maxBefore=%1 maxAfter=%2 hBefore=%3 hAfter=%4")
+                  .arg((int)maxBefore).arg((int)maxAfter).arg(hMaxBefore).arg(hMaxAfter));
+        // 还原：退出最大化，把固定尺寸装回去。
+        w.showNormal();
+        QApplication::processEvents();
+        const bool nowOpen = w.syncPanelForTest()->isLogOpenForTest();
+        w.setFixedSize(ScreenFit::mainWindow(scrAvail.width(), scrAvail.height(), nowOpen));
+        QApplication::processEvents();
+    }
+
+    // ---- 设置弹窗也必须整块落在屏幕内（多屏 / 拔屏后重新收敛）----
+    {
+        const QRect g(d->mapToGlobal(QPoint(0, 0)), d->size());
+        const bool inside = g.top() >= scrAvail.top() && g.bottom() <= scrAvail.bottom()
+                         && g.left() >= scrAvail.left() && g.right() <= scrAvail.right();
+        check("G25-settings-inside-screen", inside,
+              QStringLiteral("geom=%1,%2 %3x%4 avail=%5,%6 %7x%8")
+                  .arg(g.x()).arg(g.y()).arg(g.width()).arg(g.height())
+                  .arg(scrAvail.x()).arg(scrAvail.y()).arg(scrAvail.width()).arg(scrAvail.height()));
+    }
+
+    // ---- 规则表每行都得有「删除」按钮，而且点了真能删掉这一行 ----
+    //
+    // 产品里从来没有过删除入口：removeRuleRow() 只被自动化测试钩子调用过，
+    // 用户点「+ 添加规则」加出来的行永远删不掉（2026-10-28 用户报障
+    // 「添加规则之后无法进行删除」）。
+    {
+        const int rowsBefore = d->ruleRowCountForTest();
+        QString suffixBefore;
+        for (int r = 0; r < rowsBefore; ++r)
+            suffixBefore += d->ruleCellForTest(r, 0) + QStringLiteral("|");
+
+        // 加一行（模拟用户点「+ 添加规则」）
+        d->clickAddRuleForTest();
+        QApplication::processEvents();
+        const int rowsAdded = d->ruleRowCountForTest();
+        const bool hasBtn = d->ruleRowHasDeleteButtonForTest(rowsAdded - 1);
+        check("G26-add-rule-then-delete-available",
+              rowsAdded == rowsBefore + 1 && hasBtn,
+              QStringLiteral("rows=%1 expected=%2 hasBtn=%3")
+                  .arg(rowsAdded).arg(rowsBefore + 1).arg((int)hasBtn));
+
+        // 点**新加那一行**的删除按钮 → 行数 -1，而且剩下的是原来那些行。
+        d->clickRuleDeleteForTest(rowsAdded - 1);
+        QApplication::processEvents();
+        const int rowsAfter = d->ruleRowCountForTest();
+        check("G27-delete-button-removes-row", rowsAfter == rowsBefore,
+              QStringLiteral("rows=%1 expected=%2").arg(rowsAfter).arg(rowsBefore));
+
+        QString suffixAfter;
+        for (int r = 0; r < rowsAfter; ++r)
+            suffixAfter += d->ruleCellForTest(r, 0) + QStringLiteral("|");
+        check("G28-delete-removed-the-right-row", suffixAfter == suffixBefore,
+              QStringLiteral("before=[%1] after=[%2]")
+                  .arg(suffixBefore).arg(suffixAfter));
+    }
 
     // 还原环境变量
     if (oldCfgDir.isEmpty())
@@ -3395,6 +3656,20 @@ int main(int argc, char *argv[])
                 }
             }
             if (dialog) {
+                // SRT_SHOT_SCROLL=1：把设置弹窗滚到最下面再截。
+                //
+                // 规则表在第三组「文件打开工具」，位于折叠线以下 ——
+                // 不滚就永远截不到那一组（更截不到每行的「删除」按钮列）。
+                // 只影响截图探针，正常启动完全不看这个变量。
+                if (!qgetenv("SRT_SHOT_SCROLL").isEmpty()) {
+                    const QList<QScrollArea *> areas = dialog->findChildren<QScrollArea *>();
+                    for (int i = 0; i < areas.size(); ++i) {
+                        QScrollBar *sb = areas.at(i)->verticalScrollBar();
+                        if (sb)
+                            sb->setValue(sb->maximum());
+                    }
+                    QApplication::processEvents();
+                }
                 QImage img(dialog->width(), dialog->height(), QImage::Format_ARGB32_Premultiplied);
                 img.fill(Qt::transparent);
                 QPainter p(&img);
