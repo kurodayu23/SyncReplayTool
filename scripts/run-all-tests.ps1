@@ -45,6 +45,29 @@ $logs = Join-Path $WorkRoot 'logs'
 $stage = Join-Path $WorkRoot 'stage'
 New-Item -ItemType Directory -Force -Path $logs, $stage | Out-Null
 
+# ---------------------------------------------------------------- 配置隔离
+#
+# 这一整轮测试跑的都是产品的**探针模式**（--selfcheck / --selfcheck-gui /
+# --screenshot / --selfcheck-secrets），而探针模式会把本机目录、目标地址这些
+# 写进**用户自己的** %APPDATA%\AP\SyncReplayTool.ini：
+#   · --selfcheck-secrets 写 host/port/remoteRoot/localRoot
+#   · --screenshot 写 localRoot（截图探针把样例目录塞进去）
+# 跑完一轮测试，用户自己的连接信息就被覆盖成 127.0.0.1:2222 和一个
+# 已经不存在的临时目录 —— 界面随即显示「本机目录不存在」。
+# （2026-11-02 实测踩到，已把用户那台机器的配置还原。）
+#
+# 隔离用产品自带的 SRT_CONFIG_DIR 开关（ConfigStore::configDirOverride）。
+# 注意不能用 APPDATA 环境变量：QSettings 走 SHGetFolderPath，读注册表不看环境变量
+# （ConfigStore.cpp 里写了同样的说明）。
+$cfgDir = Join-Path $stage 'selfcheck-config'
+New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+$cfgIni = Join-Path $cfgDir 'SyncReplayTool.ini'
+if (-not (Test-Path $cfgIni)) {
+    $cfgLines = @('[app]','rememberSettings=true','','[sync]','autoSyncEnabled=false','onlyNewFiles=false','autoSyncIntervalSec=30','bandwidthLimitMBps=0','','[syncRules]','size=1','1\suffix=spe','1\remoteSubDir=','','[target]','host=','port=22','user=','remoteRoot=','localRoot=','autoAcceptHostKey=true')
+    $cfgLines | Out-File -FilePath $cfgIni -Encoding UTF8
+}
+$env:SRT_CONFIG_DIR = $cfgDir
+
 $results = New-Object System.Collections.ArrayList
 function Record($name, $status, $detail) {
     [void]$results.Add([pscustomobject]@{ 段 = $name; 结果 = $status; 说明 = $detail })
@@ -161,30 +184,12 @@ if (-not $dockerOk) {
     $env:SRT_SC_USER = $E2eUser
     $env:SRT_SC_PASS = $E2ePass
     $env:SRT_SC_REMOTE = "/home/$E2eUser/srt-in"
-    # 配置隔离：不隔离的话，这一轮自检会把测试用的 host/port/remoteRoot/localRoot
-    # **写进用户自己的 %APPDATA%\AP\SyncReplayTool.ini**，
-    # 等于把用户的连接信息覆盖成 127.0.0.1:2222 和一个已经不存在的临时目录
-    # （2026-11-02 实测踩到：跑完一轮测试，界面里的本机目录就变成废路径）。
-    #
-    # SRT_CONFIG_DIR 是产品自带的开关（ConfigStore::configDirOverride），
-    # 设了它，配置读写全部落到那个目录。
-    # 注意不能用 APPDATA 环境变量隔离：QSettings 走 SHGetFolderPath，
-    # 读注册表不看环境变量（ConfigStore.cpp 里写了同样的说明）。
-    $cfgDir = Join-Path $stage 'selfcheck-config'
-    New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
-    $cfgIni = Join-Path $cfgDir 'SyncReplayTool.ini'
-    if (-not (Test-Path $cfgIni)) {
-        $cfgLines = @('[app]','rememberSettings=true','','[sync]','autoSyncEnabled=false','onlyNewFiles=false','autoSyncIntervalSec=30','bandwidthLimitMBps=0','','[syncRules]','size=1','1\suffix=spe','1\remoteSubDir=','','[target]','host=','port=22','user=','remoteRoot=','localRoot=','autoAcceptHostKey=true')
-        $cfgLines | Out-File -FilePath $cfgIni -Encoding UTF8
-    }
-    $env:SRT_CONFIG_DIR = $cfgDir
     cmd /c "`"$Exe`" --selfcheck-secrets 2 > `"$logs\selfcheck-secrets.txt`" 2>&1"
     $rc = $LASTEXITCODE
     $tail = (Get-Content (Join-Path $logs 'selfcheck-secrets.txt') -Tail 3) -join ' | '
     if ($rc -eq 0 -and $tail -match 'SECRETS_ALL_CLEAN') { Record '真机同步' 'PASS' '2 轮真实传输成功且无明文口令残留' }
     else { Record '真机同步' 'FAIL' $tail }
     Remove-Item Env:SRT_SC_HOST, Env:SRT_SC_PORT, Env:SRT_SC_USER, Env:SRT_SC_PASS, Env:SRT_SC_REMOTE -ErrorAction SilentlyContinue
-    Remove-Item Env:SRT_CONFIG_DIR -ErrorAction SilentlyContinue
 }
 
 # ---------------------------------------------------------------- 5. 麒麟包容器验证
@@ -243,4 +248,7 @@ $md += "日志目录：$logs"
 $md | Out-File $summaryPath -Encoding UTF8
 Write-Host "`n汇总：$summaryPath" -ForegroundColor Cyan
 $results | Format-Table -AutoSize
+# 隔离用的环境变量在整轮跑完之前一直保留（各段都在同一个隔离配置里跑），
+# 到这里才撤掉，免得中途某段没继承到。
+Remove-Item Env:SRT_CONFIG_DIR -ErrorAction SilentlyContinue
 if ($bad -gt 0) { exit 1 } else { exit 0 }
