@@ -3874,7 +3874,15 @@ static int runSecretCheck(QApplication &app, int rounds)
         t->start();
     });
     poll->start();
-    return app.exec();
+    const int rc = app.exec();
+    // 自检的探针目录用完就删。
+    //
+    // 为什么必须删：每跑一次自检就在 %TEMP% 里留一个 srt-sc-src-<pid>，
+    // 目录里还放着那个 14 字节的 probe.spe。客户那边跑一次 自检.sh 就是
+    // 一个目录，跑几百轮就是几百个；本机实测已经积到 354 个（10-27 到 11-02）。
+    // 这些目录不会被任何清理逻辑回收（清理逻辑只认 srt_pass_*/srt_askpass_*）。
+    QDir(sc.srcDir).removeRecursively();
+    return rc;
 }
 
 int main(int argc, char *argv[])
