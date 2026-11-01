@@ -3783,11 +3783,23 @@ static int runSecretCheck(QApplication &app, int rounds)
 
     sc.self = QString::number(QCoreApplication::applicationPid());
     sc.srcDir = QDir::tempPath() + QStringLiteral("/srt-sc-src-") + sc.self;
-    QDir().mkpath(sc.srcDir);
+    const bool mkOk = QDir().mkpath(sc.srcDir);
     QFile f(sc.srcDir + QLatin1String("/probe.spe"));
-    f.open(QIODevice::WriteOnly);
-    f.write("srt-selfcheck", 14);
-    f.close();
+    const bool probeOk = f.open(QIODevice::WriteOnly);
+    if (probeOk) {
+        f.write("srt-selfcheck", 14);
+        f.close();
+    }
+    // 这行必须打出来：后面「没扫到文件」的失败只有一条原因链 ——
+    // 探针文件没落地 -> 扫不到文件 -> 口令链路一次都没跑。
+    // 不把「目录 / mkpath 结果 / 探针写入结果」三个值打出来，
+    // 现场只能看到一句「没扫到文件」，既不知道目录建没建成，
+    // 也看不出探针文件写没写成功（2026-11-02 为此耗了半天）。
+    sc.out << "INFO\tselfcheck-src\tdir=" << sc.srcDir
+           << "\tmkpath=" << (mkOk ? 1 : 0)
+           << "\tprobeWritten=" << (probeOk ? 1 : 0)
+           << "\ttempPath=" << QDir::tempPath()
+           << "\n";
 
     MainWindow w;
     w.resize(980, 460);
@@ -3818,9 +3830,28 @@ static int runSecretCheck(QApplication &app, int rounds)
     QObject::connect(poll, &QTimer::timeout, [&, poll]() {
         if (sc.panel->fileCountForTest() <= 0) {
             ++sc.waitedTicks;
-            if (sc.waitedTicks <= 600)
+            if (sc.waitedTicks <= 600) {
+                // 每秒重扫一次。
+                //
+                // 为什么必须重扫：扫描请求会被 SyncPanel::startScanAsync() 的
+                // 重入保护挡掉 —— 「已经在扫就别再拉一个」。而自检这条路上，
+                // 主窗口构造时已经按**配置里的本机目录**扫过一次，
+                // 自检紧接着又要扫**自己的临时目录**；两次撞上时，
+                // 第二次会被静默丢掉，于是自检盯着 0 个文件等满 60 秒，
+                // 最后报一条「没扫到文件」—— 而真实原因只是那次扫描没跑成。
+                //
+                // 同一个二进制连续两次跑，一次扫到 1 个文件、一次扫到 0 个，
+                // 就是这个竞态（实测 2026-11-02：换个目录跑就必现）。
+                if (sc.waitedTicks % 10 == 0)
+                    sc.panel->scanFilesForTest();
                 return;                       // 最多等 60 秒扫描完成
+            }
+            // 失败时把面板日志一起打出来：光说"没扫到文件"没法定位
+            // （扫的是哪个目录？被什么规则过滤了？目录是不是压根不存在？）。
             sc.out << "FAIL\tno-files-scanned\t自检空转：没扫到文件，口令链路不会执行" << "\n";
+            const QStringList tail = sc.panel->logTailForTest(12);
+            for (int i = 0; i < tail.size(); ++i)
+                sc.out << "INFO\tpanel-log\t" << tail.at(i) << "\n";
             sc.out << "SECRETS_LEAKED" << "\n";
             poll->stop();
             QCoreApplication::exit(1);

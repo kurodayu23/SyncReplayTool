@@ -161,12 +161,30 @@ if (-not $dockerOk) {
     $env:SRT_SC_USER = $E2eUser
     $env:SRT_SC_PASS = $E2ePass
     $env:SRT_SC_REMOTE = "/home/$E2eUser/srt-in"
+    # 配置隔离：不隔离的话，这一轮自检会把测试用的 host/port/remoteRoot/localRoot
+    # **写进用户自己的 %APPDATA%\AP\SyncReplayTool.ini**，
+    # 等于把用户的连接信息覆盖成 127.0.0.1:2222 和一个已经不存在的临时目录
+    # （2026-11-02 实测踩到：跑完一轮测试，界面里的本机目录就变成废路径）。
+    #
+    # SRT_CONFIG_DIR 是产品自带的开关（ConfigStore::configDirOverride），
+    # 设了它，配置读写全部落到那个目录。
+    # 注意不能用 APPDATA 环境变量隔离：QSettings 走 SHGetFolderPath，
+    # 读注册表不看环境变量（ConfigStore.cpp 里写了同样的说明）。
+    $cfgDir = Join-Path $stage 'selfcheck-config'
+    New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+    $cfgIni = Join-Path $cfgDir 'SyncReplayTool.ini'
+    if (-not (Test-Path $cfgIni)) {
+        $cfgLines = @('[app]','rememberSettings=true','','[sync]','autoSyncEnabled=false','onlyNewFiles=false','autoSyncIntervalSec=30','bandwidthLimitMBps=0','','[syncRules]','size=1','1\suffix=spe','1\remoteSubDir=','','[target]','host=','port=22','user=','remoteRoot=','localRoot=','autoAcceptHostKey=true')
+        $cfgLines | Out-File -FilePath $cfgIni -Encoding UTF8
+    }
+    $env:SRT_CONFIG_DIR = $cfgDir
     cmd /c "`"$Exe`" --selfcheck-secrets 2 > `"$logs\selfcheck-secrets.txt`" 2>&1"
     $rc = $LASTEXITCODE
     $tail = (Get-Content (Join-Path $logs 'selfcheck-secrets.txt') -Tail 3) -join ' | '
     if ($rc -eq 0 -and $tail -match 'SECRETS_ALL_CLEAN') { Record '真机同步' 'PASS' '2 轮真实传输成功且无明文口令残留' }
     else { Record '真机同步' 'FAIL' $tail }
     Remove-Item Env:SRT_SC_HOST, Env:SRT_SC_PORT, Env:SRT_SC_USER, Env:SRT_SC_PASS, Env:SRT_SC_REMOTE -ErrorAction SilentlyContinue
+    Remove-Item Env:SRT_CONFIG_DIR -ErrorAction SilentlyContinue
 }
 
 # ---------------------------------------------------------------- 5. 麒麟包容器验证

@@ -74,6 +74,18 @@ zz_probe.txt
 *.rej
 *.bak
 
+# ---- 测试台的工作产物（不进仓库）----
+# 端到端 argv 抓取的 app 目录：平铺的 exe + DLL + 记录器（上百个文件），
+# 是每次跑都重新生成的现场，不该进仓库。
+# 默认建在仓库外（ai-workspace\SyncReplayTool\argv-app），
+# 但用 SRT_ARGV_APPDIR 覆盖时可能落在仓库里，这里一并挡住。
+scripts/tests/argv_capture/app/
+scripts/tests/**/app/
+argv-app/
+# 抓取台架的运行产物（每次跑都重新生成）
+scripts/tests/argv_capture/argv-dump.txt
+scripts/tests/argv_capture/secrets-report.txt
+
 # ---- Python 字节码缓存 ----
 __pycache__/
 *.pyc
