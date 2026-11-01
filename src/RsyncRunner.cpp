@@ -1770,6 +1770,106 @@ QString RsyncRunner::sshOption(const TargetConfig &target) const
     return sshArgs(target, true).join(QLatin1Char(' '));
 }
 
+// rsync 的 -e 取值（2026-11-02 抽出来）。
+//
+// 抽它的理由不是"代码好看"，是**判据要能验到生产那条路**：
+// 原来 "ssh " 这个前缀是在 launchNext 里拼的，只暴露 sshOption() 的判据
+// 拿到的是不带程序名的选项串 —— 验的就不是真正发出去的东西了。
+// 现在生产与判据调的是同一个函数。
+QString RsyncRunner::buildSshCmd(const TargetConfig &target) const
+{
+#ifdef _WIN32
+    return QStringLiteral("ssh %1").arg(sshOption(target));
+#else
+    QString display = QProcessEnvironment::systemEnvironment()
+                          .value(QStringLiteral("DISPLAY"));
+    // 带空格的 DISPLAY 会把 rsync 的 -e 拆成两段（rsync 按空格切 argv），
+    // 这种值直接退回 ":0"：它只是个"有没有图形界面"的开关，不是要真去连 X。
+    if (display.isEmpty() || display.contains(QLatin1Char(' ')))
+        display = QStringLiteral(":0");
+    // env 用**绝对路径**：rsync execvp 找的是子进程自己的 PATH，
+    // 而 PATH 是产品拼过的，不一定还含 /usr/bin。
+    //
+    // 找不到 env（或者它的路径带空格）时**回落到原来的裸 "ssh"**：
+    // 那是修复前的行为 —— ssh>=8.4 照常工作，ssh<8.4 回到修复前的失败。
+    // 绝不能因为这个修复让**私钥模式**（根本不碰口令）在别的机器上一起挂掉。
+    const QString envBin = QStandardPaths::findExecutable(QStringLiteral("env"));
+    return (envBin.isEmpty() || envBin.contains(QLatin1Char(' ')))
+               ? QStringLiteral("ssh %1").arg(sshOption(target))
+               : QStringLiteral("%1 DISPLAY=%2 ssh %3")
+                     .arg(envBin, display, sshOption(target));
+#endif
+}
+
+// rsync 命令行的装配（2026-11-02）。
+//
+// 抽成纯函数是为了让**判据和生产走同一份实现**：
+// 原来这段直接写在 launchNext() 里，自检只看得到"配置层"，
+// 把这里拼参数的代码删掉，自检照样全绿 —— 端口、私钥、重复判定策略
+// 这三样东西的真正落点全在这里，漏了就是静默丢数据。
+QStringList RsyncRunner::buildRsyncArgs(const RsyncArgSpec &spec)
+{
+    QStringList args;
+    args << QStringLiteral("-a")
+         << QStringLiteral("--no-o")     // 目标机未必有权限改属主，避免整组失败
+         << QStringLiteral("--no-g")
+         << QStringLiteral("--partial")
+         // 半截文件不能留在目标真名上。
+         //
+         // 裸 --partial 的行为是：中断时把已收到的那几 MB 直接写成目标路径下的
+         // 真名文件，靠 mtime 停在 1970-01-01 提示"这是半个"。
+         // 配合勾上的「仅同步新增文件」（--ignore-existing），这个半截文件从此每次同步都被
+         // "远端已存在"跳过 —— 用户看到界面报"已完成"，实际远端残缺且永不自愈。
+         //
+         // --partial-dir 把半截文件改放到目标目录下的旁路目录 .srt-partial/，
+         // 真名永远不会被创建。下一次同步（不管 --ignore-existing 勾没勾）
+         // 都会当真名不存在，正常重传；半截文件还在则被续传复用，传完自动清理。
+         //
+         // 相对路径是相对**目标目录**解析的，正是要的行为。
+         // 依赖：rsync ≥ 3.0；本工具两端的 rsync 都远高于这个版本。
+         << QStringLiteral("--partial-dir=.srt-partial")
+         // 「是否重复判定」这一层，按界面上的「仅同步新增文件」勾选框二选一。
+         //
+         // 勾上 = --ignore-existing：远端已有的路径一律不碰，只传新增文件。
+         //        这也正好是大目录唯一跑得动的档位 —— 不用逐个校验远端文件。
+         // 不勾 = --checksum：按内容校验和逐个比对，同大小同 mtime 但内容变了
+         //        也会重传。代价是每次同步都要把远端已存在文件整个读一遍。
+         //
+         // 两者互斥，不能同时加也不能都不加：--ignore-existing 根本不看内容，
+         // 同时给会让 --checksum 形同虚设；而都不给就退回 rsync 默认的
+         // 「大小 + mtime」，本工具的文件粒度就是秒，踩中就是静默丢数据。
+         //
+         // 负向验证记录在各自那一支的注释里。
+         << (spec.onlyNew ? QStringLiteral("--ignore-existing") : QStringLiteral("--checksum"))
+         << QStringLiteral("--protect-args")   // 远端路径不过远端 shell，避免 glob 写错目录
+         // --from0：--files-from 的分隔符从换行改成 NUL。
+         // Windows 的 NTFS 只禁掉 \ / : * ? " < > | 和 NUL，换行和回车都是合法文件名字符。
+         // 用换行分隔时，一个带换行的文件名会被拆成两条，
+         // rsync 对这两条都 link_stat 失败，整组退出码 23，这些文件永远传不过去，
+         // 界面上却只显示"部分文件传输失败"。
+         << QStringLiteral("--from0")
+         << QStringLiteral("--files-from=") + spec.listName
+         << QStringLiteral("--out-format=%n")
+         << QStringLiteral("--info=progress2")
+         << QStringLiteral("-z");
+
+    // 带宽限制（rsync --bwlimit）。单位 KB/s，1 MB/s = 1024 KB/s。
+    //
+    // 不限速时**不加**这个参数 —— 不是加 --bwlimit=0：
+    // 0 在不同 rsync 版本上语义不一致，而命令行里出现一个"限速=0"
+    // 会让运维以为限速开着。干脆不出现。
+    //
+    // 值取自本轮快照（spec.bwlimitMBps）：一次同步里所有组用同一个限速，
+    // 传输途中改档位统一到下一轮生效（见 bandwidthLimitNotice）。
+    const int bwKBps = bwlimitKBpsFor(spec.bwlimitMBps);
+    if (bwKBps > 0)
+        args << QStringLiteral("--bwlimit=%1").arg(bwKBps);
+
+    args << QStringLiteral("-e") << spec.sshCmd
+         << QStringLiteral("./") << spec.remoteBase;
+    return args;
+}
+
 // 连接探测：跑一条 ssh 空命令，能回显就说明网络 + 账号 + 密码都对。
 //
 // 选 `echo` 而不是 `exit`：两者的认证流程一样，但 echo 会真的走一遍远端 shell，
@@ -2939,87 +3039,22 @@ void RsyncRunner::launchNext()
     // 「rsync 起的那个 ssh 的环境」的地方（rsync 从父进程继承来的 DISPLAY 会被清掉，
     // 但命令自己带上的会保留）。取值口径与 applyAskpassEnv 一致：
     // 环境里已有的原样保留，没有就用 ":0"。
-#ifdef _WIN32
-    const QString sshCmd = QStringLiteral("ssh %1").arg(sshOption(m_target));
-#else
-    QString display = QProcessEnvironment::systemEnvironment()
-                          .value(QStringLiteral("DISPLAY"));
-    // 带空格的 DISPLAY 会把 rsync 的 -e 拆成两段（rsync 按空格切 argv），
-    // 这种值直接退回 ":0"：它只是个"有没有图形界面"的开关，不是要真去连 X。
-    if (display.isEmpty() || display.contains(QLatin1Char(' ')))
-        display = QStringLiteral(":0");
-    // env 用**绝对路径**：rsync execvp 找的是子进程自己的 PATH，
-    // 而 PATH 是产品拼过的，不一定还含 /usr/bin。
-    //
-    // 找不到 env（或者它的路径带空格）时**回落到原来的裸 "ssh"**：
-    // 那是修复前的行为 —— ssh>=8.4 照常工作，ssh<8.4 回到修复前的失败。
-    // 绝不能因为这个修复让**私钥模式**（根本不碰口令）在别的机器上一起挂掉。
-    const QString envBin = QStandardPaths::findExecutable(QStringLiteral("env"));
-    const QString sshCmd =
-        (envBin.isEmpty() || envBin.contains(QLatin1Char(' ')))
-            ? QStringLiteral("ssh %1").arg(sshOption(m_target))
-            : QStringLiteral("%1 DISPLAY=%2 ssh %3")
-                  .arg(envBin, display, sshOption(m_target));
-#endif
+    // -e 的值。与判据共用同一个函数（buildSshCmd），理由见那儿的注释。
+    const QString sshCmd = buildSshCmd(m_target);
 
-    QStringList args;
-    args << QStringLiteral("-a")
-         << QStringLiteral("--no-o")     // 目标机未必有权限改属主，避免整组失败
-         << QStringLiteral("--no-g")
-         << QStringLiteral("--partial")
-         // 半截文件不能留在目标真名上。
-         //
-         // 裸 --partial 的行为是：中断时把已收到的那几 MB 直接写成目标路径下的
-         // 真名文件，靠 mtime 停在 1970-01-01 提示"这是半个"。
-         // 配合勾上的「仅同步新增文件」（--ignore-existing），这个半截文件从此每次同步都被
-         // "远端已存在"跳过 —— 用户看到界面报"已完成"，实际远端残缺且永不自愈。
-         //
-         // --partial-dir 把半截文件改放到目标目录下的旁路目录 .srt-partial/，
-         // 真名永远不会被创建。下一次同步（不管 --ignore-existing 勾没勾）
-         // 都会当真名不存在，正常重传；半截文件还在则被续传复用，传完自动清理。
-         //
-         // 相对路径是相对**目标目录**解析的，正是要的行为。
-         // 依赖：rsync ≥ 3.0；本工具两端的 rsync 都远高于这个版本。
-         << QStringLiteral("--partial-dir=.srt-partial")
-         // 「是否重复判定」这一层，按界面上的「仅同步新增文件」勾选框二选一。
-         //
-         // 勾上 = --ignore-existing：远端已有的路径一律不碰，只传新增文件。
-         //        这也正好是大目录唯一跑得动的档位 —— 不用逐个校验远端文件。
-         // 不勾 = --checksum：按内容校验和逐个比对，同大小同 mtime 但内容变了
-         //        也会重传。代价是每次同步都要把远端已存在文件整个读一遍。
-         //
-         // 两者互斥，不能同时加也不能都不加：--ignore-existing 根本不看内容，
-         // 同时给会让 --checksum 形同虚设；而都不给就退回 rsync 默认的
-         // 「大小 + mtime」，本工具的文件粒度就是秒，踩中就是静默丢数据。
-         //
-         // 负向验证记录在各自那一支的注释里。
-         << (m_onlyNew ? QStringLiteral("--ignore-existing") : QStringLiteral("--checksum"))
-         << QStringLiteral("--protect-args")   // 远端路径不过远端 shell，避免 glob 写错目录
-         // --from0：--files-from 的分隔符从换行改成 NUL。
-         // Windows 的 NTFS 只禁掉 \ / : * ? " < > | 和 NUL，换行和回车都是合法文件名字符。
-         // 用换行分隔时，一个带换行的文件名会被拆成两条，
-         // rsync 对这两条都 link_stat 失败，整组退出码 23，这些文件永远传不过去，
-         // 界面上却只显示"部分文件传输失败"。
-         << QStringLiteral("--from0")
-         << QStringLiteral("--files-from=") + listName
-         << QStringLiteral("--out-format=%n")
-         << QStringLiteral("--info=progress2")
-         << QStringLiteral("-z");
-
-    // 带宽限制（rsync --bwlimit）。单位 KB/s，1 MB/s = 1024 KB/s。
+    // 装配 rsync 命令行。
     //
-    // 不限速时**不加**这个参数 —— 不是加 --bwlimit=0：
-    // 0 在不同 rsync 版本上语义不一致，而命令行里出现一个"限速=0"
-    // 会让运维以为限速开着。干脆不出现。
-    //
-    // 值取自本轮快照（m_bwlimitMBps）：一次同步里所有组用同一个限速，
-    // 传输途中改档位统一到下一轮生效（见 bandwidthLimitNotice）。
-    const int bwKBps = bwlimitKBpsFor(m_bwlimitMBps);
-    if (bwKBps > 0)
-        args << QStringLiteral("--bwlimit=%1").arg(bwKBps);
-
-    args << QStringLiteral("-e") << sshCmd
-         << QStringLiteral("./") << g.remoteBase;
+    // **判据与生产共用同一个函数**（buildRsyncArgs）：参数怎么拼、为什么这么拼，
+    // 注释都搬进那个函数里了。抽出来是为了让自检能验到**生产装配层** ——
+    // 把那几行拼 --ignore-existing / --checksum / -p / -i 的代码删掉，
+    // 原来的 --selfcheck 照样全绿。
+    RsyncArgSpec argSpec;
+    argSpec.onlyNew     = m_onlyNew;
+    argSpec.bwlimitMBps = m_bwlimitMBps;
+    argSpec.sshCmd      = sshCmd;
+    argSpec.listName    = listName;
+    argSpec.remoteBase  = g.remoteBase;
+    const QStringList args = buildRsyncArgs(argSpec);
 
     emit logText(QString::fromUtf8(u8"\u2192 %1  (%2 \u4E2A\u6587\u4EF6)")
                      .arg(g.remoteBase).arg(g.files.size()));

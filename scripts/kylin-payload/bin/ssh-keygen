@@ -1,0 +1,98 @@
+#!/bin/sh
+# 随包的 ssh-keygen 启动器：自带版优先，跑不起来就用系统那一份。
+#
+# 【旧版缺陷】只有"自带版"一条路：exec "$HERE/libexec/ssh-keygen"。
+# 随包那份要求 glibc >= 2.26（实测 version 'GLIBC_2.26' not found），
+# 麒麟 V10 是 2.23 —— 一调用就硬失败。
+#
+# 现在补上与 bin/rsync / bin/ssh 同样的两段式：自带版 → 系统版。
+# 回落时**必须绕开 PATH 里的自己**，否则 exec 出去的还是本 wrapper 自己。
+
+# 用 ${0%/*} 取目录，**不调用 dirname**。
+#
+# 为什么：dirname 是外部命令，PATH 里没有 coreutils 时它会失败，
+# 于是 HERE 变成 "/"、找不到"自己"在哪，
+# 回落时就把**脚本自己**当成系统的 ssh exec 出去 —— 无限 exec 循环，
+# 界面永远停在"同步中"、日志一行都不出（实测 8 秒 239 次 execve）。
+# ${0%/*} 是 shell 内建，PATH 再空也能用。
+_srt_dir=${0%/*}
+[ "$_srt_dir" = "$0" ] && _srt_dir=.
+HERE=$(cd -P "$_srt_dir/.." && pwd -P)
+BINDIR="$HERE/bin"
+SSHv2="$HERE/lib/sshv2:$HERE/lib:${LD_LIBRARY_PATH:-}"
+
+_path_without_self() {
+    _pw_self=$(cd -P "$BINDIR" 2>/dev/null && pwd -P)
+    _pw_out=""
+    _pw_sep=""
+    _pw_ifs=$IFS
+    IFS=:
+    set -f
+    for _pw_d in $PATH; do
+        [ -n "$_pw_d" ] || continue
+        _pw_real=$(cd -P "$_pw_d" 2>/dev/null && pwd -P)
+        [ -n "$_pw_real" ] || _pw_real="$_pw_d"
+        [ "$_pw_real" = "$_pw_self" ] && continue
+        _pw_out="$_pw_out$_pw_sep$_pw_d"
+        _pw_sep=:
+    done
+    set +f
+    IFS=$_pw_ifs
+    printf '%s' "$_pw_out"
+}
+
+_find_system() {
+    _fs_name=$1
+    _fs_p=$(_path_without_self)
+    if [ -n "$_fs_p" ]; then
+        _fs_hit=$(PATH="$_fs_p" command -v "$_fs_name" 2>/dev/null)
+        if [ -n "$_fs_hit" ]; then
+            printf '%s' "$_fs_hit"
+            return 0
+        fi
+    fi
+    # 自指守卫：找到的**不能是本脚本自己**。
+    # 兜住"目录算错"这种情形（HERE 算成 "/" 时 PATH 里找不到自己，
+    # 循环就退化成 exec 自己 → 无限 exec 循环）。
+    _fs_self="$BINDIR/$_fs_name"
+    for _fs_d in /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
+        if [ -x "$_fs_d/$_fs_name" ] && [ ! -d "$_fs_d/$_fs_name" ] \
+           && [ "$_fs_d/$_fs_name" != "$_fs_self" ]; then
+            printf '%s' "$_fs_d/$_fs_name"
+            return 0
+        fi
+    done
+    return 1
+}
+
+_bundled_usable() {
+    _bu_tmp="${TMPDIR:-/tmp}/.srt-probe.$$"
+    "$@" >/dev/null 2>"$_bu_tmp"
+    _bu_rc=$?
+    _bu_err=$(cat "$_bu_tmp" 2>/dev/null)
+    rm -f "$_bu_tmp" 2>/dev/null
+    case "$_bu_err" in
+        *"error while loading shared libraries"*|*"cannot open shared object"*|\
+        *"GLIBC_"*|*"symbol lookup error"*|*"not found"*)
+            return 1 ;;
+    esac
+    [ "$_bu_rc" = 127 ] && return 1
+    return 0
+}
+
+# 1) 自带版优先（万一这台机器 glibc 够高，自带的那份能用）
+if [ -x "$HERE/libexec/ssh-keygen" ] && _bundled_usable "$HERE/libexec/ssh-keygen" -?; then
+    LD_LIBRARY_PATH="$SSHv2"
+    export LD_LIBRARY_PATH
+    exec "$HERE/libexec/ssh-keygen" "$@"
+fi
+
+# 2) 回落到系统那一份：绝对路径，绝不会回到自己
+SYS_KEYGEN=$(_find_system ssh-keygen)
+if [ -n "$SYS_KEYGEN" ]; then
+    exec "$SYS_KEYGEN" "$@"
+fi
+
+echo "ssh-keygen: 本包自带的和系统自带的 ssh-keygen 在这台机器上都跑不起来。" >&2
+echo "     请让系统管理员安装：sudo apt install openssh-client" >&2
+exit 127

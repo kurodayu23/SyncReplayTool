@@ -54,7 +54,11 @@ param(
     [string]$OutDir      = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\pkgtest',
     [string]$RuntimeDir  = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\deploy',
     [string[]]$FallbackRuntimeDirs = @('C:\Windows\System32'),
-    [string]$PayloadDir  = 'D:\AP\AP7000\ai-workspace\kylin-pkg\payload',
+    # 运行时脚本（run.sh / 自检.sh / 安装.sh / 安装自启.sh / .desktop / qt.conf / bin/*）
+    # 从**仓库里**取（2026-11-02 起）：这份 payload 原先只活在 ai-workspace，
+    # 而 ai-workspace 是会被定期清空的临时区 —— 清一次就再也打不出包了。
+    # 仓库里的副本是唯一事实来源。
+    [string]$PayloadDir  = 'D:\AP\AP7000\SyncReplayTool\scripts\kylin-payload',
     [string]$KylinBaseTar = 'D:\AP\AP7000\ai-workspace\kylin-pkg\.stage\base.tar.gz',
     [string]$KylinBinary  = '',
     [string]$WorkRoot     = 'D:\AP\AP7000\ai-workspace\pkg-preflight',

@@ -204,6 +204,44 @@ public:
     QString askpassDirForTest() const
     { return askpassDir(); }
 
+    // ---- rsync 命令行的「生产装配层」（2026-11-02 新增）----
+    //
+    // 为什么要把这一层单独拉出来：
+    //
+    // 需求 2（只同步源文件或修改文件）、需求 4（ip/端口/账号/私钥）、
+    // 需求 6（等指定路径保持不动）这三项，原来的自检**只覆盖到配置层**
+    // —— 也就是说，"配置里存了 port=2222"这件事验过了，
+    // 但"rsync 的命令行里到底有没有 -p 2222"没人验。
+    // 后果很具体：把 launchNext() 里那几行拼参数的代码删掉
+    // （--ignore-existing / --checksum / -p / -i），
+    // **--selfcheck 依然全绿**，而产品会把文件传到错误的端口、
+    // 或者用错重复判定策略 —— 静默丢数据。
+    //
+    // 所以这里把「装配 rsync 命令行」抽成一个**纯函数**：
+    // 生产路径（launchNext）和自检判据调的是**同一个函数**，
+    // 判据照抄一份等于测判据自己这件事就被绕开了。
+    struct RsyncArgSpec
+    {
+        bool    onlyNew     = false;  // 「仅同步新增文件」
+        int     bwlimitMBps = 0;      // 0 = 不限速
+        QString sshCmd;               // rsync -e 的值（由 sshOption 生成）
+        QString listName;             // --files-from 的清单文件名
+        QString remoteBase;           // 远端目标目录
+    };
+    static QStringList buildRsyncArgs(const RsyncArgSpec &spec);
+
+    // ssh 选项串的公开入口（非静态：sshArgs 依赖对象状态）。
+    // 判据用它把「用户填的端口/私钥」变成「真正发给 ssh 的选项」，
+    // 再喂给 buildRsyncArgs —— 这样验的是完整链路，不是手抄的字符串。
+    QString sshOptionForTest(const TargetConfig &target) const
+    { return sshOption(target); }
+
+    // 与 launchNext 完全相同的 -e 取值（按平台拼）。
+    // 单独暴露是因为「ssh %1」这个前缀是在 launchNext 里加的，
+    // 判据若只调 sshOption() 就拿不到它 —— 那样验的就不是生产那条路了。
+    QString buildSshCmdForTest(const TargetConfig &target) const
+    { return buildSshCmd(target); }
+
     // 只探测"网络通不通 + 账号对不对"，不传任何文件、不建任何远端目录。
     // 设置弹窗的「测试网络连接」用它。**同步阻塞**，调用方必须放到后台线程。
     //
@@ -333,6 +371,10 @@ private:
     // 组尾对账：把"其实失败了、却被 xfr# 结算过"的文件从计数里扣回来。
     void reconcileGroupCount();
     QString sshOption(const TargetConfig &target) const;
+    // 与 launchNext 里那段 #ifdef 完全一致（Windows: "ssh <opts>"；
+    // Linux: "<env> DISPLAY=<d> ssh <opts>"）。抽出来是为了让判据能拿到
+    // **真正发给 rsync 的 -e 值**，而不是自己重拼一遍。
+    QString buildSshCmd(const TargetConfig &target) const;
     QStringList sshArgs(const TargetConfig &target, bool quotePath) const;
     QString remoteSpec(const TargetConfig &target, const QString &subDir) const;
     QString remoteDir(const TargetConfig &target, const QString &subDir) const;

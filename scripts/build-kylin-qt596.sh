@@ -125,3 +125,23 @@ BIN="$OUT/release/SyncReplayTool"
 echo "##### 6. 产物"
 file "$BIN"
 ls -l "$BIN"
+
+echo "##### 7. NEEDED 断言：ELF 里绝不能出现 libcrypto"
+# 为什么这道闸门必须存在（.pro 里有详细版）：
+#   SecretStore 是 dlopen 挑库的，主程序**不链接**任何 OpenSSL。
+#   一旦 NEEDED 里出现 libcrypto.so.1.0.0 之类，客户机上没这个文件就直接起不来；
+#   而"会不会被焊进去"完全取决于链接器默认带不带 --as-needed
+#   （Ubuntu 带，麒麟 / CentOS / 部分交叉工具链不一定带）。
+#   早先 .pro 注释里写的断言位置是 "linux-build.sh" —— 那文件根本不存在，
+#   闸门等于没有。这里补上（2026-11-02）。
+if command -v readelf >/dev/null 2>&1; then
+    echo "  NEEDED 清单:"
+    readelf -d "$BIN" | grep NEEDED | sed 's/^/    /'
+    if readelf -d "$BIN" | grep -q 'NEEDED.*libcrypto'; then
+        echo "!!! 致命: ELF 的 NEEDED 里出现了 libcrypto —— 客户机上大概率起不来"
+        exit 1
+    fi
+    echo "  [OK] NEEDED 里没有 libcrypto"
+else
+    echo "  [跳过] 容器里没有 readelf，这道断言没跑"
+fi

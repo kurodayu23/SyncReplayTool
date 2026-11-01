@@ -28,6 +28,7 @@
 #include "MainWindow.h"
 #include "SyncPanel.h"
 #include "ScreenFit.h"
+#include "FileScanner.h"
 #include "SettingsDialog.h"
 #include "RsyncRunner.h"
 #include "ConfigStore.h"
@@ -95,6 +96,22 @@ const LayerCase kLayerCases[] = {
     { "not-ssh-service", 1,
       "kex_exchange_identification: Connection closed by remote host\r\n"
       "ssh: connect to host 192.168.0.1 port 22: Connection refused" },
+
+    // 传输**中途**目标机下线 / 网络断开（不是连不上，是传着传着断了）。
+    //
+    // 实测原文（2026-10-30，2GB 传了 3 秒后 docker stop 接收端；
+    // 接收端 = 银河麒麟 V11 + OpenSSH 9.x，发送端 = 包内 msys rsync 3.5.1）。
+    //
+    // 期望网络层：客户看到的三句话里没有一句提到账号和目录，
+    // 而"Broken pipe / Connection reset"这两个词又很容易被当成 rsync 内部错误。
+    // 归到网络层给出的建议（确认对端开机、链路是否断）才是对的；
+    // 若落到"未能归因"，客户会去查密码和目录权限，方向全错。
+    { "transfer-aborted-target-down", 1,
+      "Connection to 127.0.0.1 closed by remote host.\r\n"
+      "client_loop: send disconnect: Broken pipe\r\n"
+      "\r\n"
+      "rsync: [sender] write error: Connection reset by peer (104)\r\n"
+      "rsync error: error in socket IO (code 10) at io.c(967) [sender=3.5.1]" },
 
     // F-1：远端同名非空目录挡住了源文件。rsync 这条报错不带 [sender] 前缀，
     // 措辞也跟表里别的接收端规则都不同 —— 原来归因落到兜底分支、打成「未能归因」。
@@ -2565,7 +2582,9 @@ int runSelfCheck()
         const QVector<int> opts = ConfigStore::bandwidthLimitOptionsMBps();
         const bool hasZero  = opts.contains(0);
         const bool hasAll   = opts.contains(1) && opts.contains(5) && opts.contains(10)
-                               && opts.contains(20) && opts.contains(50) && opts.contains(100);
+                               && opts.contains(20) && opts.contains(50);
+        // 100 档已按用户要求删掉（2026-10-28）：这条反向断言防止它被加回来。
+        const bool noHundred = !opts.contains(100);
         const int custom = 12;
         const bool okCustomKept = (ConfigStore::clampBandwidthMBps(custom) == custom)
                                   && !opts.contains(custom);
@@ -2576,12 +2595,13 @@ int runSelfCheck()
                               == ConfigStore::bandwidthCustomMinMBps())
                              && (ConfigStore::clampBandwidthMBps(ConfigStore::bandwidthCustomMaxMBps())
                                  == ConfigStore::bandwidthCustomMaxMBps());
-        const bool ok = hasZero && hasAll && okCustomKept && okBad && okZero && okRange;
+        const bool ok = hasZero && hasAll && noHundred && okCustomKept && okBad && okZero && okRange;
         if (!ok)
             ++bad;
         out << (ok ? "PASS\t" : "FAIL\t") << "bandwidth-range"
             << "\tzero=" << (hasZero ? 1 : 0)
             << " presets=" << (hasAll ? 1 : 0)
+            << " no100=" << (noHundred ? 1 : 0)
             << " custom12Kept=" << (okCustomKept ? 1 : 0)
             << " badFallsBack=" << (okBad ? 1 : 0)
             << " bounds=" << (okRange ? 1 : 0)
@@ -2800,6 +2820,267 @@ int runSelfCheck()
         if (matrixBad && matrixDetail.isEmpty())
             matrixDetail = QStringLiteral("%1 screens failed").arg(matrixBad);
         Q_UNUSED(matrixDetail);
+    }
+
+    // ----------------------------------------------------------------
+    // 后缀不符合同步规则的文件必须被计数（2026-10-30 修）。
+    //
+    // 为什么值得一条判据：这个计数驱动界面上那句「另有 N 个文件的后缀不在同步
+    // 规则里，不会出现在清单中、也不会被传输」。它一旦归零，客户看到「全部 (4)」
+    // 会以为目录里就 4 个文件，而实际还有 8 个 .iq/.dat 永远不会被传 —— 静默漏数据。
+    // 而这个计数的唯一失败模式就是"恒为 0"，那和没写这段代码在界面上长得一模一样。
+    //
+    // 造：4 个 .spe + 8 个其它后缀（含无后缀、多后缀、隐藏文件），只按 spe 扫。
+    // 判据：扫回 4 个、skippedBySuffixCount() 恰好 8。
+    // ----------------------------------------------------------------
+    {
+        const QString dir = QDir::tempPath() + QStringLiteral("/srt-sc-suffix-")
+                            + QString::number(QCoreApplication::applicationPid());
+        QDir().mkpath(dir);
+        const char *wanted[] = { "a.spe", "b.spe", "e.SPE", "i..spe" };
+        const char *others[] = { "c.iq", "d.dat", "g.tar.gz", "j.spe.bak",
+                                 "noext", ".hidden", "h.h5", "k.raw" };
+        for (const char *n : wanted) {
+            QFile f(dir + QLatin1Char('/') + QString::fromLatin1(n));
+            if (f.open(QIODevice::WriteOnly)) f.write("x");
+        }
+        for (const char *n : others) {
+            QFile f(dir + QLatin1Char('/') + QString::fromLatin1(n));
+            if (f.open(QIODevice::WriteOnly)) f.write("x");
+        }
+        const QVector<FileItem> got = FileScanner::scan(dir, QStringList() << QStringLiteral("spe"));
+        const int skippedBySuffix = FileScanner::skippedBySuffixCount();
+        const bool ok = (got.size() == 4) && (skippedBySuffix == 8);
+        if (!ok)
+            ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "suffix-skip-count"
+            << "\tmatched=" << got.size() << " expect=4"
+            << "\tskippedBySuffix=" << skippedBySuffix << " expect=8\n";
+        out.flush();
+        QDir(dir).removeRecursively();
+    }
+
+    // ----------------------------------------------------------------
+    // 子目录里重名时，文件名列必须能区分（2026-10-31 修）。
+    //
+    // 客户按日期分目录是常见做法（20261030/data.spe、20261031/data.spe），
+    // 原来两行都只显示 data.spe，只能靠大小或悬停提示去猜是哪一份。
+    // 现在 >1 个同名时显示相对路径，不冲突时保持简洁。
+    //
+    // 判据同时锁两头：冲突行必须带子目录且互不相同，不冲突行必须还是裸文件名 ——
+    // 只锁一头的话，把显示改成"永远显示相对路径"也能过，
+    // 而那样会让绝大多数只有一层目录的客户看起来啰嗦。
+    // ----------------------------------------------------------------
+    {
+        FileTableModel model;
+        QVector<FileItem> fs;
+        FileItem a; a.relativePath = QStringLiteral("20261030/data.spe"); a.size = 100;
+        FileItem b; b.relativePath = QStringLiteral("20261031/data.spe"); b.size = 200;
+        FileItem c; c.relativePath = QStringLiteral("20261030/other.spe"); c.size = 300;
+        fs << a << b << c;
+        model.setFiles(fs, QHash<QString, ToolRule>(), QString());
+        const QString n0 = model.data(model.index(0, FileTableModel::ColName),
+                                      Qt::DisplayRole).toString();
+        const QString n1 = model.data(model.index(1, FileTableModel::ColName),
+                                      Qt::DisplayRole).toString();
+        const QString n2 = model.data(model.index(2, FileTableModel::ColName),
+                                      Qt::DisplayRole).toString();
+        const bool ok = n0.contains(QLatin1Char('/')) && n1.contains(QLatin1Char('/'))
+                        && n0 != n1
+                        && n2 == QStringLiteral("other.spe");
+        if (!ok)
+            ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "dup-name-shown-with-subdir"
+            << "\tdup=[" << n0 << "|" << n1 << "]"
+            << "\tunique=[" << n2 << "]\n";
+        out.flush();
+    }
+
+    // ----------------------------------------------------------------
+    // 自启项里存的值必须指向**当前这个 exe**（2026-10-31 修）。
+    //
+    // 原来 isAutoStartActive() 只看"注册表里有没有这个值"，于是包被挪走/
+    // 升级到新目录后，界面还显示"开机自启：已开启"，而开机根本不会启动 ——
+    // 客户以为自动同步天天在跑，实际一次都没跑过。
+    // 这里只测比对函数本身，不碰注册表（自检不该改客户机器）。
+    // ----------------------------------------------------------------
+    {
+        const QString exe = QStringLiteral("D:/AP/tool/SyncReplayTool.exe");
+        // 历史版本写过反斜杠、也写过带引号的形式，都必须认成同一个路径。
+        const bool same      = ConfigStore::autoStartValueMatches(exe, exe);
+        const bool backslash = ConfigStore::autoStartValueMatches(
+                                   QStringLiteral("D:\\AP\\tool\\SyncReplayTool.exe"), exe);
+        const bool quoted    = ConfigStore::autoStartValueMatches(
+                                   QStringLiteral("\"D:/AP/tool/SyncReplayTool.exe\""), exe);
+        const bool ci        = ConfigStore::autoStartValueMatches(
+                                   QStringLiteral("d:/ap/tool/syncreplaytool.exe"), exe);
+        // 反向锁：换了目录必须判成"不指向当前 exe"，否则自愈永远不会触发。
+        const bool moved     = ConfigStore::autoStartValueMatches(
+                                   QStringLiteral("D:/AP/old/SyncReplayTool.exe"), exe);
+        const bool empty     = ConfigStore::autoStartValueMatches(QString(), exe);
+        const bool ok = same && backslash && quoted && ci && !moved && !empty;
+        if (!ok)
+            ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "autostart-value-matches"
+            << "\tsame=" << same << " backslash=" << backslash
+            << " quoted=" << quoted << " ci=" << ci
+            << " moved=" << moved << "(expect 0) empty=" << empty << "(expect 0)" << "\n";
+        out.flush();
+    }
+
+    // ----------------------------------------------------------------
+    // rsync 命令行的**生产装配层**（2026-11-02 新增）。
+    //
+    // 为什么补这一段：需求 1（rsync/scp 协议）、需求 2（只同步源文件或修改文件）、
+    // 需求 4（ip/端口/账号/私钥）这三条，原来的自检**只覆盖到配置层** ——
+    // "配置里存了 port=2222"这件事验过了，可"rsync 命令行里到底有没有 -p 2222"
+    // 没人验。后果很具体：把 launchNext() 里拼参数的那几行删掉
+    // （--ignore-existing / --checksum / -p / -i），
+    // **--selfcheck 依然全绿**，而产品会把文件传到错误的端口、
+    // 或者用错重复判定策略 —— 静默丢数据。
+    //
+    // 这里验的是**同一个函数**（RsyncRunner::buildRsyncArgs）：
+    // 生产路径和判据走的是同一份实现，不是照抄一份字符串再自己比。
+    // ----------------------------------------------------------------
+    {
+        // 检查器：给定装配好的 argv，返回不合格项（空 = 全过）。
+        //
+        // 抽成独立函数是为了能做**阴性对照**：拿一份故意改坏的 argv 喂进去，
+        // 检查器必须报出不合格 —— 否则这条判据就是恒真的假保证
+        // （仓库里已经吃过好几次这种亏，见 rsync-name-escape 那条的注释）。
+        auto argProblems = [](const QStringList &args, bool expectOnlyNew,
+                              int expectPort, bool expectKey, int expectBwMBps,
+                              const QString &expectList, const QString &expectRemote) -> QStringList {
+            QStringList probs;
+            const bool hasIgnore  = args.contains(QStringLiteral("--ignore-existing"));
+            const bool hasChecksum = args.contains(QStringLiteral("--checksum"));
+            if (expectOnlyNew) {
+                if (!hasIgnore)  probs << QStringLiteral("missing --ignore-existing");
+                if (hasChecksum) probs << QStringLiteral("unexpected --checksum");
+            } else {
+                if (!hasChecksum) probs << QStringLiteral("missing --checksum");
+                if (hasIgnore)   probs << QStringLiteral("unexpected --ignore-existing");
+            }
+            if (!args.contains(QStringLiteral("--partial-dir=.srt-partial")))
+                probs << QStringLiteral("missing --partial-dir");
+            if (!args.contains(QStringLiteral("--from0")))
+                probs << QStringLiteral("missing --from0");
+            if (!args.contains(QStringLiteral("--files-from=") + expectList))
+                probs << QStringLiteral("missing --files-from");
+            if (!args.contains(QStringLiteral("--out-format=%n")))
+                probs << QStringLiteral("missing --out-format");
+            if (!args.contains(QStringLiteral("--info=progress2")))
+                probs << QStringLiteral("missing --info=progress2");
+
+            // -e 的值就是 ssh 选项串（Linux 下前面还可能带 env DISPLAY=:0）。
+            const int eIdx = args.indexOf(QStringLiteral("-e"));
+            const QString ssh = (eIdx >= 0 && eIdx + 1 < args.size()) ? args.at(eIdx + 1) : QString();
+            const QStringList tok = ssh.split(QLatin1Char(' '), QString::SkipEmptyParts);
+            if (eIdx < 0)
+                probs << QStringLiteral("missing -e");
+            if (!tok.contains(QStringLiteral("ssh")))
+                probs << QStringLiteral("-e is not ssh");
+            const int pIdx = tok.indexOf(QStringLiteral("-p"));
+            if (pIdx < 0 || pIdx + 1 >= tok.size()
+                || tok.at(pIdx + 1) != QString::number(expectPort))
+                probs << QStringLiteral("missing -p <port>");
+            if (tok.contains(QStringLiteral("-i")) != expectKey)
+                probs << QStringLiteral("-i presence mismatch");
+
+            // 带宽：不限速时命令行里**不该出现** --bwlimit（出现 --bwlimit=0 也算错）。
+            QString bwArg;
+            for (const QString &a : args) {
+                if (a.startsWith(QStringLiteral("--bwlimit"))) {
+                    bwArg = a;
+                    break;
+                }
+            }
+            if (expectBwMBps <= 0) {
+                if (!bwArg.isEmpty())
+                    probs << QStringLiteral("unexpected --bwlimit");
+            } else {
+                const QString want = QStringLiteral("--bwlimit=%1")
+                                         .arg(RsyncRunner::bwlimitKBpsFor(expectBwMBps));
+                if (bwArg != want)
+                    probs << QStringLiteral("wrong --bwlimit");
+            }
+
+            // 末尾两个：./ 和远端目录。
+            if (args.size() < 2) {
+                probs << QStringLiteral("args too short");
+            } else {
+                if (args.at(args.size() - 2) != QStringLiteral("./"))
+                    probs << QStringLiteral("missing ./ prefix");
+                if (args.last() != expectRemote)
+                    probs << QStringLiteral("wrong remote target");
+            }
+            return probs;
+        };
+
+        // 只用它拼 ssh 选项串，不会启动任何进程。
+        RsyncRunner runner;
+
+        // 场景 1：口令登录 + 端口 2222 + 「仅同步新增文件」+ 限速 5 MB/s
+        TargetConfig t1;
+        t1.host       = QStringLiteral("192.168.0.50");
+        t1.port       = 2222;
+        t1.user       = QStringLiteral("srtuser");
+        t1.remoteRoot = QStringLiteral("/home/srtuser/in");
+        t1.keyPath.clear();                    // 口令模式
+        RsyncRunner::RsyncArgSpec s1;
+        s1.onlyNew     = true;
+        s1.bwlimitMBps = 5;
+        s1.sshCmd      = runner.buildSshCmdForTest(t1);
+        s1.listName    = QStringLiteral(".srt-filelist-1234.txt");
+        s1.remoteBase  = QStringLiteral("/home/srtuser/in");
+        const QStringList a1 = RsyncRunner::buildRsyncArgs(s1);
+        const QStringList p1 = argProblems(a1, true, 2222, false, 5, s1.listName, s1.remoteBase);
+
+        // 场景 2：私钥 + 默认端口 22 + 校验和模式 + 不限速
+        TargetConfig t2 = t1;
+        t2.port    = 22;
+        t2.keyPath = QStringLiteral("C:/keys/id_rsa");
+        RsyncRunner::RsyncArgSpec s2;
+        s2.onlyNew     = false;
+        s2.bwlimitMBps = 0;
+        s2.sshCmd      = runner.buildSshCmdForTest(t2);
+        s2.listName    = s1.listName;
+        s2.remoteBase  = s1.remoteBase;
+        const QStringList a2 = RsyncRunner::buildRsyncArgs(s2);
+        const QStringList p2 = argProblems(a2, false, 22, true, 0, s2.listName, s2.remoteBase);
+
+        // 阴性对照 1：把 --ignore-existing 删掉 —— 检查器必须报出来。
+        QStringList broken1 = a1;
+        broken1.removeAll(QStringLiteral("--ignore-existing"));
+        const QStringList np1 = argProblems(broken1, true, 2222, false, 5, s1.listName, s1.remoteBase);
+
+        // 阴性对照 2：把端口偷偷改回 22 —— 必须报端口不符。
+        QStringList broken2 = a1;
+        {
+            const int eIdx = broken2.indexOf(QStringLiteral("-e"));
+            if (eIdx >= 0 && eIdx + 1 < broken2.size()) {
+                QString ssh = broken2.at(eIdx + 1);
+                ssh.replace(QStringLiteral("-p 2222"), QStringLiteral("-p 22"));
+                broken2[eIdx + 1] = ssh;
+            }
+        }
+        const QStringList np2 = argProblems(broken2, true, 2222, false, 5, s1.listName, s1.remoteBase);
+
+        // 阴性对照 3：给「不限速」的场景偷偷加一个 --bwlimit=0 —— 必须报。
+        QStringList broken3 = a2;
+        broken3.insert(broken3.size() - 2, QStringLiteral("--bwlimit=0"));
+        const QStringList np3 = argProblems(broken3, false, 22, true, 0, s2.listName, s2.remoteBase);
+
+        const bool negOk = !np1.isEmpty() && !np2.isEmpty() && !np3.isEmpty();
+        const bool ok = p1.isEmpty() && p2.isEmpty() && negOk;
+        if (!ok)
+            ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "rsync-args-assembly"
+            << "\tmode1=[" << p1.join(",") << "] mode2=[" << p2.join(",") << "]"
+            << "\tnegCtrl=" << (negOk ? 1 : 0)
+            << "\tneg1=[" << np1.join(",") << "] neg2=[" << np2.join(",") << "] neg3=[" << np3.join(",") << "]"
+            << "\n";
+        out.flush();
     }
 
     out << (bad == 0 ? "SELFCHECK_ALL_PASS" : "SELFCHECK_FAILED") << "\n";
@@ -3118,10 +3399,21 @@ int runGuiSelfCheck()
         QApplication::processEvents();
         const bool maxAfter = w.isMaximized();
         const int hMaxAfter = w.height();
-        check("G24-maximized-kept-on-log-toggle",
-              maxBefore && maxAfter && hMaxBefore == hMaxAfter,
-              QStringLiteral("maxBefore=%1 maxAfter=%2 hBefore=%3 hAfter=%4")
-                  .arg((int)maxBefore).arg((int)maxAfter).arg(hMaxBefore).arg(hMaxAfter));
+        // 没有窗口管理器的平台（offscreen / minimal）上 setWindowState(WindowMaximized)
+        // 根本不生效：isMaximized() 恒为 false，判据必然假红。
+        // 实测（2026-10-31，麒麟 V10 容器 + QT_QPA_PLATFORM=offscreen）：
+        //   maxBefore=0 maxAfter=0 → 产品走的是"非最大化"分支，恢复默认高度 460，
+        //   逻辑完全正确，红的只是判据本身。
+        // 所以先看这一轮到底有没有真的最大化过；没成功就跳过，不判失败。
+        if (!maxBefore) {
+            out << "SKIP\tG24-maximized-kept-on-log-toggle\t"
+                   "platform-has-no-window-manager\n";
+        } else {
+            check("G24-maximized-kept-on-log-toggle",
+                  maxAfter && hMaxBefore == hMaxAfter,
+                  QStringLiteral("maxBefore=%1 maxAfter=%2 hBefore=%3 hAfter=%4")
+                      .arg((int)maxBefore).arg((int)maxAfter).arg(hMaxBefore).arg(hMaxAfter));
+        }
         // 还原：退出最大化，把固定尺寸装回去。
         w.showNormal();
         QApplication::processEvents();
@@ -3175,6 +3467,92 @@ int runGuiSelfCheck()
         check("G28-delete-removed-the-right-row", suffixAfter == suffixBefore,
               QStringLiteral("before=[%1] after=[%2]")
                   .arg(suffixBefore).arg(suffixAfter));
+    }
+
+    // ---- G29：后缀不符合同步规则时必须提醒（2026-10-30 修）----
+    //
+    // 修之前：目录里 12 个文件、规则只配 spe，界面「全部 (4)」，其余 8 个
+    // （.iq/.dat/.gz/无后缀/隐藏）一个字都不提 —— 客户以为目录里就这些，
+    // 而那些数据永远不会被传。这是静默漏数据，产品原则不允许。
+    //
+    // 这条判据把"FileScanner 计数 → SyncPanel 日志"整条链钉住：
+    // 只要计数归零或那句提示被删掉，它立刻红。
+    {
+        const QString dir = QDir::tempPath() + QStringLiteral("/srt-g29-")
+                            + QString::number(QCoreApplication::applicationPid());
+        QDir().mkpath(dir);
+        const char *speFiles[] = { "a.spe", "b.spe" };
+        const char *otherFiles[] = { "c.iq", "d.dat", "noext" };
+        for (const char *n : speFiles) {
+            QFile f(dir + QLatin1Char('/') + QString::fromLatin1(n));
+            if (f.open(QIODevice::WriteOnly)) f.write("x");
+        }
+        for (const char *n : otherFiles) {
+            QFile f(dir + QLatin1Char('/') + QString::fromLatin1(n));
+            if (f.open(QIODevice::WriteOnly)) f.write("x");
+        }
+        SyncPanel *panel = w.syncPanelForTest();
+        bool ok = false;
+        QString detail;
+        if (panel) {
+            panel->setLocalRootForTest(dir);
+            panel->setRulesForTest(QStringList() << QStringLiteral("spe"));
+            panel->scanFilesForTest();
+            // 扫描在线程池里跑，轮询等它落地（最多 5 秒）
+            for (int i = 0; i < 100; ++i) {
+                QApplication::processEvents();
+                QThread::msleep(50);
+                if (panel->logTailForTest(400).join(QLatin1Char('\n'))
+                        .contains(QString::fromUtf8(u8"不在同步规则里")))
+                    break;
+            }
+            const QString logText =
+                panel->logTailForTest(400).join(QLatin1Char('\n'));
+            ok = logText.contains(QString::fromUtf8(u8"不在同步规则里"));
+            detail = QStringLiteral("files=%1 noticeFound=%2")
+                         .arg(panel->fileCountForTest()).arg((int)ok);
+        } else {
+            detail = QStringLiteral("no-panel");
+        }
+        check("G29-suffix-skip-notice", ok, detail);
+        QDir(dir).removeRecursively();
+    }
+
+    // ---- G30：本机目录不存在时状态栏必须说明（2026-10-31 修）----
+    //
+    // 修之前：localRoot 指向不存在的路径（数据盘没挂上 / 移动硬盘拔了 /
+    // 共享断开），扫描只往日志抽屉写一条 WARN，而日志抽屉**默认收起**，
+    // 状态栏留在「就绪」、列表为空 —— 和"这个目录里确实没有文件"一模一样。
+    // 客户会以为今天没采到数据。
+    {
+        SyncPanel *panel = w.syncPanelForTest();
+        bool ok = false;
+        QString detail;
+        if (panel) {
+            panel->setLocalRootForTest(QStringLiteral("Z:/srt-no-such-dir-g30"));
+            panel->scanFilesForTest();
+            for (int i = 0; i < 40; ++i) {
+                QApplication::processEvents();
+                QThread::msleep(50);
+            }
+            const QString st = panel->statusTextForTest();
+            ok = st.contains(QString::fromUtf8(u8"不存在"))
+                 || st.contains(QString::fromUtf8(u8"不是文件夹"))
+                 || st.contains(QString::fromUtf8(u8"无读取权限"));
+            // 同一缺陷的另一条分支：目录栏空着（首次使用 / 被清空）时
+            // 也只能写日志，界面照旧停在「就绪」。
+            panel->setLocalRootForTest(QString());
+            panel->scanFilesForTest();
+            QApplication::processEvents();
+            const QString stEmpty = panel->statusTextForTest();
+            const bool okEmpty = stEmpty.contains(QString::fromUtf8(u8"未设置"));
+            ok = ok && okEmpty;
+            detail = QStringLiteral("status=[%1] empty=[%2]")
+                         .arg(st, stEmpty);
+        } else {
+            detail = QStringLiteral("no-panel");
+        }
+        check("G30-root-missing-status", ok, detail);
     }
 
     // 还原环境变量
@@ -3541,6 +3919,21 @@ int main(int argc, char *argv[])
     // 连用法都打不出来。子代理 B 在麒麟 V10 容器里实测抓到的。
     parser.addHelpOption();
     parser.process(app);
+
+    // 自启项自愈：用户勾了「开机自启」，但包被挪到别的目录、或升级到新目录之后，
+    // 注册表里那条还指着旧路径 —— 开机根本不会启动，而设置界面依旧显示"已开启"。
+    // 启动时校正一次，客户换目录后不用再去设置里重新勾。
+    //
+    // 只在正常 GUI 启动时做：几个 --selfcheck* / --screenshot* 是自动化模式，
+    // 跑测试不该动客户机器的注册表。
+    const bool automationOnly = parser.isSet(optSelfCheck) || parser.isSet(optGuiCheck)
+                                || parser.isSet(optSecretCheck) || parser.isSet(optShot)
+                                || parser.isSet(optShotSettings);
+    if (!automationOnly && ConfigStore::loadAutoStartEnabled()
+        && !ConfigStore::isAutoStartActive()) {
+        QString autoStartErr;
+        ConfigStore::applyAutoStart(true, &autoStartErr);
+    }
 
     // 未知的**位置参数**必须报错，不能静默吞掉。
     //

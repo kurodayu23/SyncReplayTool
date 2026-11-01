@@ -1,0 +1,110 @@
+#!/bin/sh
+# 随包的 rsync 启动器：自带版优先，跑不起来就用系统那一份。
+#
+# 【为什么必须有回落】
+# 随包的那份 rsync 是 Ubuntu 22.04 的构建，要求 glibc >= 2.38；
+# 麒麟 V10 只有 glibc 2.23，它连启动都做不到（实测 GLIBC_2.38 not found）。
+#
+# 【为什么回落必须绕开 PATH 里的自己】—— 这条是致命的
+# run.sh 把 $HERE/bin 放到 PATH 最前面，程序起子进程用的是**裸命令名**
+# （RsyncRunner 里还会再前置一次 appDir/bin）。于是：
+#     command -v rsync  ->  找到的是本 wrapper 自己
+#     exec rsync        ->  又解析回本 wrapper 自己
+# 就是一个**无限 exec 循环**。实测（麒麟 V10）：5 秒内 400+ 次 execve，
+# 界面永远停在"同步中"，日志一行都不出。
+#
+# 修法：回落时先把 PATH 里的自己剔掉，找到之后用**绝对路径** exec，
+#       不再走第二次 PATH 解析。
+
+# 用 ${0%/*} 取目录，**不调用 dirname**。
+#
+# 为什么：dirname 是外部命令，PATH 里没有 coreutils 时它会失败，
+# 于是 HERE 变成 "/"、找不到"自己"在哪，
+# 回落时就把**脚本自己**当成系统的 ssh exec 出去 —— 无限 exec 循环，
+# 界面永远停在"同步中"、日志一行都不出（实测 8 秒 239 次 execve）。
+# ${0%/*} 是 shell 内建，PATH 再空也能用。
+_srt_dir=${0%/*}
+[ "$_srt_dir" = "$0" ] && _srt_dir=.
+HERE=$(cd -P "$_srt_dir/.." && pwd -P)
+BINDIR="$HERE/bin"
+SSHv2="$HERE/lib/sshv2:$HERE/lib:${LD_LIBRARY_PATH:-}"
+
+# 返回"剔掉了本 wrapper 所在目录"的 PATH。
+_path_without_self() {
+    _pw_self=$(cd -P "$BINDIR" 2>/dev/null && pwd -P)
+    _pw_out=""
+    _pw_sep=""
+    _pw_ifs=$IFS
+    IFS=:
+    set -f
+    for _pw_d in $PATH; do
+        [ -n "$_pw_d" ] || continue
+        # 解析成真实路径再比，避免 "$HERE/bin" 与 "/某软链/bin" 认不出是同一个
+        _pw_real=$(cd -P "$_pw_d" 2>/dev/null && pwd -P)
+        [ -n "$_pw_real" ] || _pw_real="$_pw_d"
+        [ "$_pw_real" = "$_pw_self" ] && continue
+        _pw_out="$_pw_out$_pw_sep$_pw_d"
+        _pw_sep=:
+    done
+    set +f
+    IFS=$_pw_ifs
+    printf '%s' "$_pw_out"
+}
+
+# 找系统那一份的**绝对路径**；找不到返回非 0。
+_find_system() {
+    _fs_name=$1
+    _fs_p=$(_path_without_self)
+    if [ -n "$_fs_p" ]; then
+        _fs_hit=$(PATH="$_fs_p" command -v "$_fs_name" 2>/dev/null)
+        if [ -n "$_fs_hit" ]; then
+            printf '%s' "$_fs_hit"
+            return 0
+        fi
+    fi
+    # 自指守卫：找到的**不能是本脚本自己**。
+    # 兜住"目录算错"这种情形（HERE 算成 "/" 时 PATH 里找不到自己，
+    # 循环就退化成 exec 自己 → 无限 exec 循环）。
+    _fs_self="$BINDIR/$_fs_name"
+    for _fs_d in /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
+        if [ -x "$_fs_d/$_fs_name" ] && [ ! -d "$_fs_d/$_fs_name" ] \
+           && [ "$_fs_d/$_fs_name" != "$_fs_self" ]; then
+            printf '%s' "$_fs_d/$_fs_name"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# 自带版能不能跑：跑一下探测命令，看 stderr 里有没有动态链接器的报错。
+_bundled_usable() {
+    _bu_tmp="${TMPDIR:-/tmp}/.srt-probe.$$"
+    "$@" >/dev/null 2>"$_bu_tmp"
+    _bu_rc=$?
+    _bu_err=$(cat "$_bu_tmp" 2>/dev/null)
+    rm -f "$_bu_tmp" 2>/dev/null
+    case "$_bu_err" in
+        *"error while loading shared libraries"*|*"cannot open shared object"*|\
+        *"GLIBC_"*|*"symbol lookup error"*|*"not found"*)
+            return 1 ;;
+    esac
+    [ "$_bu_rc" = 127 ] && return 1
+    return 0
+}
+
+# 1) 自带版优先（万一这台机器 glibc 够高，自带的那份能用）
+if [ -x "$HERE/libexec/rsync" ] && _bundled_usable "$HERE/libexec/rsync" --version; then
+    LD_LIBRARY_PATH="$SSHv2"
+    export LD_LIBRARY_PATH
+    exec "$HERE/libexec/rsync" "$@"
+fi
+
+# 2) 回落到系统那一份：绝对路径，绝不会回到自己
+SYS_RSYNC=$(_find_system rsync)
+if [ -n "$SYS_RSYNC" ]; then
+    exec "$SYS_RSYNC" "$@"
+fi
+
+echo "rsync: 本包自带的 rsync 和系统 rsync 在这台机器上都跑不起来。" >&2
+echo "       请让系统管理员安装：sudo apt install rsync" >&2
+exit 127

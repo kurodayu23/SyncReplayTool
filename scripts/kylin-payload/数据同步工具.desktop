@@ -1,0 +1,46 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=数据同步工具
+Name[en]=Data Sync Tool
+Comment=把本地数据同步到另一台电脑的指定路径
+Comment[en]=Sync local data to a remote machine
+Comment[zh_CN]=把本地数据同步到另一台电脑的指定路径
+Exec=sh "%k/run.sh"
+Path=%k
+Icon=system-file-share
+Terminal=false
+Categories=Network;FileTransfer;Utility;
+
+# =====================================================================
+# 开机自动启动用的那一份，**不是**上面这个。
+#
+# 开机自启文件装在 ~/.config/autostart/syncreplaytool.desktop
+# （XDG autostart 规范，桌面环境登录时自动拉起）。
+#
+# 和上面那份的**唯一区别**：Exec / Path 必须是**包的绝对路径**，
+# 不能用 %k —— 自启文件在 ~/.config/autostart/ 下，%k 会指向那个目录，
+# 那里没有 run.sh，登录后程序起不来（而且没有报错，只是"没启动"）。
+#
+# 所以这份内容由 `sh 安装.sh --autostart` 在安装时按实际安装目录生成，
+# 内容如下（<安装目录> 换成包的真实路径）：
+#
+#   [Desktop Entry]
+#   Type=Application
+#   Version=1.0
+#   Name=数据同步工具
+#   Comment=把本地数据同步到另一台电脑的指定路径
+#   Exec=sh "<安装目录>/run.sh"
+#   Path=<安装目录>
+#   Icon=system-file-share
+#   Terminal=false
+#   X-GNOME-Autostart-enabled=true
+#   Categories=Network;FileTransfer;Utility;
+#
+# 要点：
+#   · Exec 指向 **sh run.sh**，不是裸二进制。裸二进制缺 LD_LIBRARY_PATH /
+#     QT_PLUGIN_PATH，Qt 找不到平台插件会直接 abort(134)，一个字都不输出。
+#   · 默认**不装**。要客户显式执行 `sh 安装.sh --autostart` 才写。
+#   · 自启只负责"把程序打开"，不擅自打开自动同步；
+#     要每天定时同步，另在软件「设置」里选「每天定时」并保存。
+# =====================================================================
