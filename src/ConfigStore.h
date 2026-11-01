@@ -146,6 +146,19 @@ public:
     // 自启项的命令行（带引号的绝对路径；Linux 上优先用同目录的 run.sh）。
     static QString                 autoStartCommand();
 
+    // 自启项里存的值是不是**指向当前这个 exe**。
+    //
+    // 为什么需要它：isAutoStartActive() 原来只判断"注册表里有没有这个值"，
+    // 于是包被挪到别的目录、或者升级到新目录之后，注册表还指着旧路径，
+    // 界面依旧显示"开机自启：已开启"，而开机根本不会启动 ——
+    // 客户以为自动同步天天在跑，实际一次都没跑过，而且没有任何提示。
+    // 实测（2026-10-31）：本机注册表里就留着一条指向"交付包-正式版-20261025"的旧值。
+    //
+    // 比对前要统一分隔符（历史版本写过反斜杠，Qt 的 applicationFilePath() 给正斜杠）
+    // 并去掉外层引号，否则同一个路径会被判成不同。
+    static bool                    autoStartValueMatches(const QString &stored,
+                                                         const QString &expected);
+
     // 自启项落在哪里（给错误信息用，例如
     // 「HKCU\Software\Microsoft\Windows\CurrentVersion\Run\SyncReplayTool」）。
     static QString                 autoStartLocation();

@@ -1,4 +1,4 @@
-#include "FileTableModel.h"
+﻿#include "FileTableModel.h"
 
 #include <QApplication>
 #include <QLocale>
@@ -121,6 +121,12 @@ QVariant FileTableModel::data(const QModelIndex &index, int role) const
         case ColCheck:
             return QVariant();
         case ColName:
+            // 子目录里有同名文件时，只显示 basename 会让客户分不清是哪一份。
+            // 客户按日期分目录很常见（20261030/data.spe、20261031/data.spe），
+            // 实测（2026-10-31）：两行都显示 data.spe，只能靠大小或悬停提示去猜。
+            // 只在**确实重名**时才显示相对路径，其它情况保持原来的简洁观感。
+            if (m_nameCount.value(f.name()) > 1)
+                return f.relativePath;
             return f.name();
         case ColSize: {
             // 原型是 "24.5 MB" 这种一位小数。qint64 在 32 位上装不下 TB，
@@ -337,6 +343,7 @@ void FileTableModel::setFiles(const QVector<FileItem> &files,
     m_toolRules = toolRules;
     m_localRoot = localRoot;
     m_rowByPath.clear();
+    m_nameCount.clear();
     m_states.clear();
     m_notes.clear();
     m_checked.clear();
@@ -345,6 +352,9 @@ void FileTableModel::setFiles(const QVector<FileItem> &files,
     m_checked.resize(files.size());
     for (int i = 0; i < files.size(); ++i) {
         m_rowByPath.insert(files.at(i).relativePath, i);
+        // 记下每个 basename 出现几次：>1 说明子目录里有重名，
+        // 文件名列改显示相对路径，见 data() 里 ColName 的说明。
+        ++m_nameCount[files.at(i).name()];
         m_states[i] = StateWait;
         m_checked[i] = true;      // 默认全勾，和原型表头复选框的 checked 一致
     }

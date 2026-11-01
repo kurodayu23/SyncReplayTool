@@ -108,6 +108,9 @@ private:
     QVector<FileItem> m_files;
     QHash<QString, ToolRule> m_toolRules;
     QHash<QString, int> m_rowByPath;      // 相对路径 -> 行号
+    // basename -> 出现次数。>1 说明子目录里有同名文件，文件名列要显示相对路径
+    // （客户按日期分目录时很常见）。每次 setFiles 重算。
+    QHash<QString, int> m_nameCount;
     QVector<FileState> m_states;
     QVector<QString>  m_notes;
     QVector<bool>     m_checked;

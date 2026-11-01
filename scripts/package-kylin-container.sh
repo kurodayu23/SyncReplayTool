@@ -126,6 +126,16 @@ rm -f  "$PKG/plugins/platforms/libqlinuxfb.so" \
        "$PKG/plugins/platforms/libqvnc.so" \
        "$PKG/plugins/platforms/libqeglfs.so" \
        "$PKG/plugins/platformthemes/libqgtk3.so"
+# generic/ 是 evdev 输入插件（嵌入式触摸屏/物理按键），桌面 X11 下输入走
+# libqxcb，这 5 个 .so 永远不会被加载；libqminimal* 只在完全没有显示服务时才用得上
+# （自检用的是 libqoffscreen，那个要留）。
+#
+# 留着它们唯一看得见的后果是：麒麟安全中心首次运行会**多弹 7 次授权**
+# —— kysec 按文件逐个问，实测包含它们是 34 个待授权文件、裁掉后 27 个。
+# 客户第一次用就要多点 7 次「始终允许」，没有别的收益。
+rm -rf "$PKG/plugins/generic"
+rm -f  "$PKG/plugins/platforms/libqminimal.so" \
+       "$PKG/plugins/platforms/libqminimalegl.so"
 find "$PKG/plugins" -mindepth 1 -type d -empty -delete 2>/dev/null || true
 
 # ---- 裁掉 Qt 死重库（麒麟 V10 实机测出来的）----

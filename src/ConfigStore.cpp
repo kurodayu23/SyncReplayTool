@@ -491,11 +491,14 @@ QVector<int> ConfigStore::bandwidthLimitOptionsMBps()
     // 0 必须排在第一个：界面铺菜单项时按这个顺序，
     // 第一项就是「不限速」，也是默认值。
     //
-    // 档位覆盖现场常见的网口：1/5/10/20/50/100 MB/s
-    //（百兆 ≈ 12.5、千兆 ≈ 125、万兆 ≈ 1250）。
-    // 20 和 100 是后补的：原来 10 和 50 之间跨得太远，现场没有中间档可选。
+    // 档位覆盖现场常见的网口：1/5/10/20/50 MB/s
+    //（百兆 ≈ 12.5、千兆 ≈ 125）。20 是后补的：原来 10 和 50 之间跨得太远，
+    // 现场没有中间档可选。
+    //
+    // 100 档按用户要求（2026-10-28）删掉了：千兆网口实际跑不到 100 MB/s，
+    // 留着只是个看得见、用不上的选项。真要用请走「自定义…」，上限仍是 1024。
     QVector<int> opts;
-    opts << 0 << 1 << 5 << 10 << 20 << 50 << 100;
+    opts << 0 << 1 << 5 << 10 << 20 << 50;
     return opts;
 }
 
@@ -783,6 +786,28 @@ QString ConfigStore::autoStartLocation()
 #endif
 }
 
+// 自启项里存的值是不是指向当前这个 exe。
+//
+// 只判断"值存在"是不够的：包被挪到别的目录、或升级到新目录之后，
+// 注册表还指着旧路径，界面依旧显示"开机自启：已开启"，而开机根本不会启动 ——
+// 客户以为自动同步天天在跑，实际一次都没跑过，且没有任何提示。
+bool ConfigStore::autoStartValueMatches(const QString &stored, const QString &expected)
+{
+    // 统一分隔符 + 去掉外层引号再比：历史版本写过反斜杠，
+    // Qt 的 applicationFilePath() 给的是正斜杠，直接比会把同一个路径判成不同。
+    const auto norm = [](QString s) {
+        s = s.trimmed();
+        s.replace(QLatin1Char('\\'), QLatin1Char('/'));
+        if (s.size() >= 2 && s.startsWith(QLatin1Char('"')) && s.endsWith(QLatin1Char('"')))
+            s = s.mid(1, s.size() - 2);
+        return s;
+    };
+    const QString a = norm(stored);
+    if (a.isEmpty() || expected.isEmpty())
+        return false;
+    return a.compare(norm(expected), Qt::CaseInsensitive) == 0;
+}
+
 bool ConfigStore::isAutoStartActive()
 {
 #ifdef _WIN32
@@ -796,11 +821,31 @@ bool ConfigStore::isAutoStartActive()
     if (RegQueryValueExW(hKey, kWinRunValue, NULL, &type,
                          reinterpret_cast<LPBYTE>(buf), &cb) == ERROR_SUCCESS) {
         found = (type == REG_SZ || type == REG_EXPAND_SZ);
+        if (found) {
+            // 光有这个值不算数：包被挪走/升级到新目录后，注册表还指着旧路径，
+            // 开机根本不会启动。这里必须比内容，否则界面会一直说"已开启"。
+            const QString stored = QString::fromWCharArray(buf);
+            found = autoStartValueMatches(stored, autoStartCommand());
+        }
     }
     RegCloseKey(hKey);
     return found;
 #else
-    return QFile::exists(autostartFilePath());
+    // Linux 侧同理：只看 .desktop 存不存在也不够。包被挪走/升级到新目录后，
+    // 文件里的 Exec= 还指着旧 run.sh，界面依旧显示"开机自启：已开启"，
+    // 而桌面上根本不会拉起它。必须读 Exec= 那一行跟当前命令比对。
+    const QString path = autostartFilePath();
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return false;
+    const QString text = QString::fromUtf8(f.readAll());
+    f.close();
+    const QStringList ls = text.split(QLatin1Char('\n'));
+    for (const QString &line : ls) {
+        if (line.startsWith(QLatin1String("Exec=")))
+            return autoStartValueMatches(line.mid(5), autoStartCommand());
+    }
+    return false;
 #endif
 }
 

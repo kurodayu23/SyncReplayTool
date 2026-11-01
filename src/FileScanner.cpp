@@ -66,6 +66,20 @@ QAtomicInt g_skippedLongPaths(0);
 // （自动同步一轮一轮跑，每轮都刷一遍同样的清单会把日志刷爆）。
 QAtomicInt g_scanGeneration(0);
 
+// 本次扫描**因后缀不符合同步规则**被跳过的文件数。
+//
+// 为什么必须单独计数（2026-10-30 实测）：
+//   目录里 12 个文件（.spe/.iq/.dat/.gz/无后缀/隐藏），规则只配了 spe，
+//   界面「全部 (N)」只显示 4 个，**其余 8 个一个字都没提**。
+//   客户看到"全部 4 个文件"会以为目录里就这些 —— 而他的 .dat/.iq 永远不会被传。
+//   这条静默和本文件其它几处（尾点后缀、规则尾空格、链接目录）是同一类，
+//   而产品自己的原则是「跳过必须留痕」。
+//
+// 为什么不逐条 addSkipNote：后缀不符的可能是成千上万个（只是没配规则而已），
+// 逐条写会把日志刷爆、也会把真正需要逐条看的"路径过长/链接"挤掉。
+// 所以只留计数，由界面汇总成一句话。
+QAtomicInt g_skippedBySuffix(0);
+
 // 清单最多留这么多条，超出的只留计数 —— 免得链接/junction 特别多的目录把日志刷爆。
 const int kMaxSkipNotes = 50;
 
@@ -349,6 +363,7 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
     g_skippedLinks.storeRelease(0);
     g_skippedLinkDirs.storeRelease(0);
     g_unreadableDirs.storeRelease(0);
+    g_skippedBySuffix.storeRelease(0);
     // 跳过清单每次扫描重新算（"跳过必须留痕"，见上面的说明）。
     resetSkipNotes();
     g_scanGeneration.fetchAndAddOrdered(1);
@@ -581,8 +596,11 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
             while (raw.endsWith(QLatin1Char('.')) && raw.length() > 1)
                 raw.chop(1);
             const QString suffix = QFileInfo(raw).suffix().toLower().trimmed();
-            if (!wanted.isEmpty() && !wanted.contains(suffix))
+            if (!wanted.isEmpty() && !wanted.contains(suffix)) {
+                // 不符合规则 = 这个文件永远不会被同步。必须计数（见 g_skippedBySuffix 注释）。
+                g_skippedBySuffix.fetchAndAddOrdered(1);
                 continue;
+            }
 
             FileItem item;
             QString rel = fi.absoluteFilePath();
@@ -878,6 +896,11 @@ int FileScanner::skippedCount()
 int FileScanner::skippedLongPathCount()
 {
     return g_skippedLongPaths.loadAcquire();
+}
+
+int FileScanner::skippedBySuffixCount()
+{
+    return g_skippedBySuffix.loadAcquire();
 }
 
 int FileScanner::scanGeneration()

@@ -47,6 +47,28 @@
 
 namespace {
 
+// 本轮扫描的**跳过清单**（路径过长 / 层级过深 / 链接 / 读不了 / 越过数据根）。
+//
+// 为什么必须传：原来界面只有一句「扫描触顶：目录条目超过扫描上限」，
+// 而 FileScanner 里有 6 种情况会置 truncated —— 其中"路径过长"和"层级过深"
+// 跟"条目超过上限"完全是两回事（实测：只有 5 个文件的目录，因为一棵深层子树
+// 超了 MAX_PATH 被跳过，界面却报"条目超过扫描上限"）。用户照着这句去删文件，
+// 永远查不到真正原因（该缩短路径）。
+//
+// 用文件级静态而不是加参数：deliverScanResult 是 Q_INVOKABLE 跨线程投递，
+// 改签名要动 SyncPanel.h 与 invokeMethod 的参数表，风险大于收益；
+// 而 g_scanTruncated 已经用这个模式跑了很久（见下方注释），
+// 写入（后台线程 run() 末尾）→ 投递 → 读取（UI 线程 deliverScanResult）
+// 顺序由 QueuedConnection 保证，不存在别的写入者。
+QStringList g_scanSkipNotes;
+
+// 本次扫描因**后缀不符合同步规则**被跳过的文件数。
+//
+// 和 g_scanSkipNotes 同一时刻写入、同一时刻读取（理由相同）。
+// 单独拿出来是因为它的提示语不同：那些文件不是"扫不动"，而是"没配规则"，
+// 处置动作是去设置里加规则，而不是改路径权限。
+int g_scanSkippedBySuffix = 0;
+
 // 后台扫描。FileScanner::scan 是**静态方法**，既没有对象也没有信号，
 // 十万级目录在主线程上递归十几秒，那段时间整个窗口没响应。
 // 所以这里自己包一个 QRunnable，跑完把结果发回界面线程。
@@ -65,6 +87,11 @@ public:
         // （scan() 开头会自己清零）。
         const int skippedLinks = FileScanner::skippedLinkCount();
         const int unreadableDirs = FileScanner::unreadableDirCount();
+        // 跳过清单同样只有这一刻问得到（scan() 清空、detectSuffixes 只追加）。
+        // 界面靠它说清"到底是为什么没扫全"，不能再统一报"条目超过上限"。
+        g_scanSkipNotes = FileScanner::skippedNotes();
+        // 因后缀不符合同步规则被跳过的文件数（只计数，不逐条）。
+        g_scanSkippedBySuffix = FileScanner::skippedBySuffixCount();
         // 投递之前必须确认接收者还活着。
         //
         // 原来这里无条件 invokeMethod(m_sink, ...)：目录很大时扫描要几十秒，
@@ -648,13 +675,13 @@ void SyncPanel::buildUi()
     // ---- 带宽限制（rsync --bwlimit）----
     //
     // 档位与后台共用一份：ConfigStore::bandwidthLimitOptionsMBps() 给出
-    // {0, 1, 5, 10, 20, 50, 100}（0 = 不限速）。UI 不自己另写一份，
+    // {0, 1, 5, 10, 20, 50}（0 = 不限速）。UI 不自己另写一份，
     // 否则两边各写一份、以后改档位就会对不上。
     //
     // 另有「自定义…」：客户自己填一个整数（值域由 ConfigStore 给）。
     //
-    // 展示规则（用户 2026-10-27 定，和表格「工具调用」列是同一套）：
-    // 选项超过 3 个时**只露 2 个**，第 3 格是「更多…」，点开才是完整列表。
+    // 菜单**一级平铺**，不做「更多…」二级菜单（用户 2026-10-28 要求）；
+    // 表格「工具调用」列那套折叠规则只管 156px 定宽单元格，跟这里无关。
     //
     // 默认是**不限速**：老版本没有这个键，升级上来不该凭空慢下来。
     m_bwLimit = new QToolButton;
@@ -873,8 +900,8 @@ ToolRule SyncPanel::toolRuleForRow(int row) const
 
 // ---- 带宽限制（底栏）----
 //
-// 菜单条目一共 8 个（不限速 / 自定义… / 6 个预置档位），
-// 按「超过 3 个只露 2 个、第 3 格是「更多…」」的规则铺。
+// 菜单条目一共 7 个（不限速 / 自定义… / 5 个预置档位），**一级平铺**，
+// 不做「更多…」二级菜单（用户 2026-10-28 要求）。
 //
 // 每次展开前都重铺一遍：勾选状态必须跟着**当前落盘的值**走。
 // 建菜单时把值记下来再复用是不行的 —— 别的窗口（设置窗口）改过配置后，
@@ -908,28 +935,24 @@ void SyncPanel::rebuildBandwidthMenu()
         items.append(qMakePair(QString::fromUtf8(u8"%1 MB/s").arg(mbps), mbps));
     }
 
-    // 折叠规则：不超过 3 个就全列；超过 3 个只露前 2 个，第 3 格是「更多…」。
-    const int visible = (items.size() <= 3) ? items.size() : 2;
-    for (int pass = 0; pass < 2; ++pass) {
-        // pass 0 = 直接露出来的前两项，pass 1 = 「更多…」子菜单里的其余项。
-        QMenu *target = (pass == 0) ? menu : menu->addMenu(QString::fromUtf8(u8"更多…"));
-        const int from = (pass == 0) ? 0 : visible;
-        const int to   = (pass == 0) ? visible : items.size();
-        if (pass == 1 && items.size() <= visible)
-            break;
-        for (int i = from; i < to; ++i) {
-            const int v = items.at(i).second;
-            QAction *a = target->addAction(items.at(i).first);
-            a->setCheckable(true);
-            a->setChecked(v < 0 ? curIsCustom : (cur == v));
-            if (v < 0) {
-                connect(a, &QAction::triggered,
-                        this, &SyncPanel::askCustomBandwidthLimit);
-            } else {
-                connect(a, &QAction::triggered, this, [this, v]() {
-                    applyBandwidthLimit(v, false);
-                });
-            }
+    // **一级平铺，不做二级菜单**（用户 2026-10-28 要求去掉「更多…」）。
+    //
+    // 原来学表格「工具调用」列那套折叠：超过 3 项只露 2 项、其余塞进「更多…」。
+    // 那套规则是为 156px 定宽单元格发明的，而这里是弹出菜单 ——
+    // 菜单本来就能往下长，折叠只让客户多点一次、还看不全档位。
+    // 现在档位精简到 6 个（不限速 + 自定义 + 1/5/10/20/50），一屏铺得下。
+    for (int i = 0; i < items.size(); ++i) {
+        const int v = items.at(i).second;
+        QAction *a = menu->addAction(items.at(i).first);
+        a->setCheckable(true);
+        a->setChecked(v < 0 ? curIsCustom : (cur == v));
+        if (v < 0) {
+            connect(a, &QAction::triggered,
+                    this, &SyncPanel::askCustomBandwidthLimit);
+        } else {
+            connect(a, &QAction::triggered, this, [this, v]() {
+                applyBandwidthLimit(v, false);
+            });
         }
     }
 }
@@ -1663,6 +1686,8 @@ void SyncPanel::scanFiles()
     if (m_localRoot.isEmpty()) {
         appendLogLine(QStringLiteral("WARN"),
                       QObject::tr("\xE6\x9C\xAC\xE6\x9C\xBA\xE6\x96\x87\xE4\xBB\xB6\xE7\x9B\xAE\xE5\xBD\x95\xE4\xB8\xBA\xE7\xA9\xBA\xE3\x80\x82"), 3);
+        // 同 rootMissing：目录都没设，界面不该停在「就绪」让人以为一切正常。
+        setStatusLine(QString::fromUtf8(u8"未设置本机目录"), 2);
         return;
     }
 
@@ -1698,8 +1723,18 @@ void SyncPanel::scanFiles()
         appendLogLine(QStringLiteral("WARN"),
                       QObject::tr("\xE6\x9C\xAC\xE6\x9C\xBA\xE7\x9B\xAE\xE5\xBD\x95\xE6\xB2\xA1\xE6\x9C\x89\xE8\xAF\xBB\xE5\x8F\x96\xE6\x9D\x83\xE9\x99\x90\xEF\xBC\x9A%1")
                           .arg(m_localRoot), 3);
+        // 状态栏必须跟着说人话。
+        //
+        // 原来这两个分支只写日志抽屉，而日志抽屉**默认是收起的** ——
+        // 界面留在「就绪 / 全部 (0)」，和"这个目录里确实没有文件"一模一样。
+        // 客户遇上数据盘没挂上、移动硬盘拔了、共享断开，看到的就是这个画面，
+        // 于是以为今天没采到数据（实测 2026-10-30：localRoot 指向不存在的路径，
+        // 扫描后状态栏仍是「就绪」）。这属于静默漏数据，必须让状态栏自己说出来。
         m_scanKey.clear();
         onScanFinished(QVector<FileItem>());
+        // 必须放在 onScanFinished 之后：它内部会把状态栏重置成「就绪」，
+        // 先设再调等于自己把话抹掉（实测 2026-10-31 先设后调，界面仍显示「就绪」）。
+        setStatusLine(QString::fromUtf8(u8"本机目录无读取权限"), 2);
         return;
     }
 
@@ -1709,6 +1744,7 @@ void SyncPanel::scanFiles()
                        ? QObject::tr("\xE6\x9C\xAC\xE6\x9C\xBA\xE7\x9B\xAE\xE5\xBD\x95\xE4\xB8\x8D\xE5\xAD\x98\xE5\x9C\xA8\xEF\xBC\x9A%1")
                        : QObject::tr("\xE6\x9C\xAC\xE6\x9C\xBA\xE8\xB7\xAF\xE5\xBE\x84\xE4\xB8\x8D\xE6\x98\xAF\xE6\x96\x87\xE4\xBB\xB6\xE5\xA4\xB9\xEF\xBC\x9A%1"))
                           .arg(m_localRoot), 3);
+        // 同 rootUnreadable：状态栏必须说明"不可用"，不能停在「就绪」。
         // **清单必须一起清掉。**
         // 早退而不清，界面上会留着**上一个目录**的整份文件清单，
         // 而配置里写的是另一个（无效的）路径 —— 用户看着 7 个文件，
@@ -1720,6 +1756,11 @@ void SyncPanel::scanFiles()
         // 用户不会拿着上一份清单去做判断。
         m_scanKey.clear();
         onScanFinished(QVector<FileItem>());
+        // 同 rootUnreadable：必须放在 onScanFinished 之后。
+        setStatusLine(rootMissing
+                          ? QString::fromUtf8(u8"本机目录不存在")
+                          : QString::fromUtf8(u8"本机路径不是文件夹"),
+                      2);
         return;
     }
 
@@ -1964,14 +2005,46 @@ void SyncPanel::onScanFinished(const QVector<FileItem> &files)
         // 报「已完成」等于告诉用户"全传完了"。
         // 状态改回 2（警示配色），文字仍是「就绪」——
         // 扫描本身确实结束了、界面也确实可继续操作，只有"完整"这件事不成立。
-        // 真正的原因由下面这行 WARN 说清楚，不靠状态文案承担。
         setStatusLine(T(kStatusReady), 2);
-        appendNotice(QObject::tr("\xE6\x89\xAB\xE6\x8F\x8F\xE8\xA7\xA6\xE9\xA1\xB6\xEF\xBC\x9A\xE7\x9B\xAE\xE5\xBD\x95\xE6\x9D\xA1\xE7\x9B\xAE\xE8\xB6\x85\xE8\xBF\x87\xE6\x89\xAB\xE6\x8F\x8F\xE4\xB8\x8A\xE9\x99\x90\xEF\xBC\x8C\xE6\x9C\xAC\xE6\xAC\xA1\xE5\x8F\xAA\xE6\x89\xAB\xE5\x88\xB0 %1 \xE4\xB8\xAA\xE5\xBE\x85\xE5\x90\x8C\xE6\xAD\xA5\xE6\x96\x87\xE4\xBB\xB6\xEF\xBC\x8C\xE5\x85\xB6\xE4\xBD\x99\xE6\x96\x87\xE4\xBB\xB6\xE6\x9C\xAA\xE7\xBA\xB3\xE5\x85\xA5\xE6\xB8\x85\xE5\x8D\x95\xE3\x80\x81\xE4\xB8\x8D\xE4\xBC\x9A\xE8\xA2\xAB\xE4\xBC\xA0\xE8\xBE\x93")
-                       .arg(files.size()));
+        // 先把 FileScanner 记下的**具体原因**逐条播报，再给一句汇总。
+        //
+        // 原来这里只有一句写死原因的汇总文案「目录条目超过扫描上限」，
+        // 而 FileScanner 有 6 种情况会置 truncated。实测（2026-10-30）：
+        // 一个只有 5 个文件的目录，因为一棵深层子树超了 MAX_PATH 被跳过，
+        // 界面报的却是"条目超过扫描上限"——用户照着这句去删文件，
+        // 永远查不到真因（该缩短路径）。原因必须来自 FileScanner 的实际记录。
+        for (int i = 0; i < g_scanSkipNotes.size() && i < 10; ++i)
+            appendLogLine(QStringLiteral("WARN"), g_scanSkipNotes.at(i), 3);
+        if (g_scanSkipNotes.size() > 10)
+            appendLogLine(QStringLiteral("WARN"),
+                          QString::fromUtf8(u8"另有 %1 处跳过未逐条列出。")
+                              .arg(g_scanSkipNotes.size() - 10), 3);
+        appendNotice(QString::fromUtf8(
+            u8"扫描不完整：有 %1 处目录或文件被跳过（路径过长 / 层级过深 / 条目过多 / 链接 / 无权限），"
+            u8"本次只扫描到 %2 个待同步文件，其余文件未纳入清单、不会被传输。逐条原因见上方日志。")
+                         .arg(g_scanSkipNotes.size())
+                         .arg(files.size()));
     } else {
         appendLogLine(QStringLiteral("SCAN"),
                       QObject::tr("\xE6\xB7\xB1\xE5\xBA\xA6\xE9\x81\x8D\xE5\x8E\x86\xE7\x9B\xAE\xE5\xBD\x95\xE5\xAE\x8C\xE6\x88\x90\xEF\xBC\x8C\xE5\x8F\x91\xE7\x8E\xB0 %1 \xE4\xB8\xAA\xE5\xBE\x85\xE5\x90\x8C\xE6\xAD\xA5\xE6\x96\x87\xE4\xBB\xB6")
                           .arg(files.size()), 0);
+    }
+
+    // 因后缀不符合同步规则被跳过的文件 —— 必须说一句。
+    //
+    // 这些文件既不在清单里、界面上也没有任何痕迹：客户看到「全部 (4)」会以为
+    // 目录里就 4 个文件，而实际还有 8 个 .iq/.dat 永远不会被传
+    // （实测 2026-10-30：目录 12 个文件、规则只配 spe）。
+    // 这跟本文件其它几处"静默漏掉"是同一类，而产品原则是「跳过必须留痕」。
+    //
+    // 用 SCAN 级（非 WARN）：只配部分后缀往往是有意为之，不该刷成告警；
+    // 但客户必须能看到"另外还有多少没在列表里"这个事实。
+    if (g_scanSkippedBySuffix > 0) {
+        appendLogLine(QStringLiteral("SCAN"),
+                      QString::fromUtf8(
+                          u8"另有 %1 个文件的后缀不在同步规则里，不会出现在清单中、也不会被传输"
+                          u8"（如需要它们，请在「设置」里补一条对应后缀的规则）。")
+                          .arg(g_scanSkippedBySuffix), 0);
     }
 
     // 扫描是「开始同步」的前置步骤时，扫完要自动接着同步，

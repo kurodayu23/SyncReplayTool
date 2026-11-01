@@ -801,7 +801,7 @@ QComboBox QAbstractItemView::item { color: #e2e8f0; padding: 4px 8px; }
 QComboBox QAbstractItemView::item:selected { background: #1f6fe0; color: #ffffff; }
 
 /* 带宽限制选择器：外观和下拉框完全一致，只是它是按钮 + 菜单
-   （选项超过 3 个时要折叠成「两项 + 更多…」，QComboBox 做不到）。
+   （按钮上要能显示「自定义」的任意值，QComboBox 做不到）。
    箭头复用同一张 %COMBO_ARROW%，不然两个控件的下拉感会不一样。 */
 QToolButton#cmbBandwidthLimit {
     background: #0a0f1d; color: #f8fafc;
