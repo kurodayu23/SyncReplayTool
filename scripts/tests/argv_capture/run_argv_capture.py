@@ -226,7 +226,17 @@ def parse_dump():
     return argv, cwd, cwd_files
 
 
-def check_argv(argv, cwd, remote_files, cwd_files):
+def _norm(p):
+    return os.path.normcase(os.path.normpath(p)) if p else ""
+
+
+def parse_selfcheck_dir(out):
+    """取产品自报的探针根（INFO selfcheck-src ... dir=<path>）。"""
+    m = re.search(r"selfcheck-src\b[^\r\n]*?\bdir=(\S+)", out or "")
+    return m.group(1) if m else ""
+
+
+def check_argv(argv, cwd, remote_files, cwd_files, expect_cwd=""):
     """返回 (ok, [verdict lines])。判定逻辑单独成函数，反向锁直接喂它假 argv。"""
     v = []
 
@@ -279,8 +289,16 @@ def check_argv(argv, cwd, remote_files, cwd_files):
     leaked = [a for a in argv if PASS in a]
     ok &= verdict(not leaked, "命令行里没有明文口令")
 
-    ok &= verdict(bool(cwd) and os.path.isdir(cwd),
-                  "工作目录是产品建的本地根（%s）" % cwd)
+    # 产品 2026-11-02 起：探针根建在 %TEMP%\srt-sc-src-<pid>，**跑完自己删掉**。
+    # 所以判据不能要求"目录现在还在"，而要要求"cwd 就是产品自报的那个探针根"：
+    #   还在        = 还没清理（也算对，判据不该因此报红）
+    #   已不在      = 清理过了（**期望行为**）
+    #   与自报不一致 = 错（反查到了别处的目录）
+    if expect_cwd:
+        cwd_ok = bool(cwd) and _norm(cwd) == _norm(expect_cwd)
+    else:
+        cwd_ok = bool(cwd) and re.search(r"srt-sc-src-\d+$", cwd) is not None
+    ok &= verdict(cwd_ok, "工作目录是产品自报的探针根（%s）" % cwd)
 
     ok &= verdict(len(remote_files) >= 1,
                   "接收端真收到文件（%s）" % (",".join(remote_files) or "-"))
@@ -329,13 +347,16 @@ def main():
         log("FAIL 没有抓到 argv（记录器没被调用）")
         return 1
     argv, cwd, cwd_files = parsed
+    expect_cwd = parse_selfcheck_dir(out)
     log("抓到 argv（%d 项，cwd=%s）:" % (len(argv), cwd))
+    if expect_cwd:
+        log("产品自报探针根：%s（现存=%s）" % (expect_cwd, os.path.isdir(expect_cwd)))
     for i, a in enumerate(argv):
         log("  [%d] %s" % (i, a))
 
     remote_files = [x for x in sh("ls -A1 '%s' 2>/dev/null" % REMOTE).stdout.split()
                     if x and not x.startswith(".srt-partial")]
-    ok, verdicts = check_argv(argv, cwd, remote_files, cwd_files)
+    ok, verdicts = check_argv(argv, cwd, remote_files, cwd_files, expect_cwd)
     for line in verdicts:
         log(line)
 
@@ -351,19 +372,25 @@ def main():
     neg1 = list(argv)
     if "--protect-args" in neg1:
         neg1.remove("--protect-args")
-    nok1, _ = check_argv(neg1, cwd, remote_files, cwd_files)
+    nok1, _ = check_argv(neg1, cwd, remote_files, cwd_files, expect_cwd)
     log("%s 反向锁①：抽掉 --protect-args 后检查器必须报红" % ("PASS" if not nok1 else "FAIL"))
     ok &= not nok1
 
     neg2 = list(argv) + ["--password=" + PASS]
-    nok2, _ = check_argv(neg2, cwd, remote_files, cwd_files)
+    nok2, _ = check_argv(neg2, cwd, remote_files, cwd_files, expect_cwd)
     log("%s 反向锁②：命令行里塞进口令后检查器必须报红" % ("PASS" if not nok2 else "FAIL"))
     ok &= not nok2
 
     neg3 = [a for a in argv if not a.startswith("--files-from=")]
-    nok3, _ = check_argv(neg3, cwd, remote_files, cwd_files)
+    nok3, _ = check_argv(neg3, cwd, remote_files, cwd_files, expect_cwd)
     log("%s 反向锁③：抽掉 --files-from 后检查器必须报红" % ("PASS" if not nok3 else "FAIL"))
     ok &= not nok3
+
+    # 反向锁④：把工作目录换成别的目录，这条判据必须报红（证明它不是恒真的）
+    neg4_cwd = os.path.join(pc.WORKROOT, "argv-app")
+    nok4, _ = check_argv(argv, neg4_cwd, remote_files, cwd_files, expect_cwd)
+    log("%s 反向锁④：换掉工作目录后检查器必须报红" % ("PASS" if not nok4 else "FAIL"))
+    ok &= not nok4
 
     clean = "SECRETS_ALL_CLEAN" in (out or "")
     log("%s 产品自检报告口令无残留（SECRETS_ALL_CLEAN）" % ("PASS" if clean else "FAIL"))

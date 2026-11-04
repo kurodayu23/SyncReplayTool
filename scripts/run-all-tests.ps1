@@ -31,7 +31,9 @@ param(
     [string]$QtKitBuild = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\build-Release',
     [string]$Exe        = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\build-Release\release\SyncReplayTool.exe',
     [string]$PackageRoot = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool',
-    [string]$WorkRoot   = 'D:\AP\AP7000\ai-workspace\SyncReplayTool',
+    # 工作根放**构建目录**，不放 ai-workspace：后者是会被定期清空的临时区，
+    # 清一次就再也跑不成测试了（2026-11-02 已把默认路径搬到这里）。
+    [string]$WorkRoot   = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\work',
     [string]$Container  = 'srt-e2e-recv',
     [int]   $E2ePort    = 2222,
     [string]$E2eUser    = 'srtpw',

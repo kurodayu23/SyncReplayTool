@@ -6,7 +6,7 @@
 scripts/run-all-tests.ps1 与 kylin-payload 已经因为同样的理由收编过一次）。
 
 路径口径（全部可用环境变量覆盖，默认值与仓库里 run-all-tests.ps1 一致）：
-  SRT_WORKROOT    工作根（日志/夹具）   默认 D:\\AP\\AP7000\\ai-workspace\\SyncReplayTool
+  SRT_WORKROOT    工作根（日志/夹具）   默认 AP7000-Build-Directories\\...\\SyncReplayTool\\work
   SRT_STAGE_DIR   夹具目录              默认 <WORKROOT>\\stage
   SRT_TOOLS_DIR   rsync/ssh 所在目录     默认 AP7000-Build-Directories\\...\\build-Release\\release
   SRT_CONTAINER   接收端容器名           默认 srt-e2e-recv
@@ -31,7 +31,7 @@ import time
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 WORKROOT = os.environ.get(
-    "SRT_WORKROOT", r"D:\AP\AP7000\ai-workspace\SyncReplayTool")
+    "SRT_WORKROOT", r"D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\work")
 STAGE = os.environ.get("SRT_STAGE_DIR", os.path.join(WORKROOT, "stage"))
 TOOLS = os.environ.get(
     "SRT_TOOLS_DIR",

@@ -28,7 +28,8 @@
 [CmdletBinding()]
 param(
     [string]$TestsDir = 'D:\AP\AP7000\SyncReplayTool\scripts\tests',
-    [string]$WorkRoot = 'D:\AP\AP7000\ai-workspace\SyncReplayTool'
+    # 工作根放构建目录，不放会被清空的 ai-workspace（2026-11-02 搬）
+    [string]$WorkRoot = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\work'
 )
 
 $ErrorActionPreference = 'Continue'

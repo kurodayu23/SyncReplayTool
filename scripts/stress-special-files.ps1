@@ -6,16 +6,16 @@
     接收端：Docker 麒麟容器（port 2222,srtpw），见 run-all-tests.ps1 第 4 段口径。
 #>
 $ErrorActionPreference = 'Continue'
-$w  = 'D:\AP\AP7000\ai-workspace\SyncReplayTool'
+$w  = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\work'
 $logs = Join-Path $w 'logs'
 New-Item -ItemType Directory -Force -Path $logs | Out-Null
 $log = Join-Path $logs 'stress-20261030.txt'
 "===== 暴力/边界压力测试 $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') =====" | Tee-Object $log
 
-$rsync = 'D:\AP\AP7000\ai-workspace\SyncReplayTool\stage\tools\rsync.exe'
+$rsync = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\work\stage\tools\rsync.exe'
 if (-not (Test-Path $rsync)) {
     # 用交付包 zip 里抽全量 msys 工具集（rsync 依赖 msys-*.dll，缺一个都起不来）
-    $zip = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\交付包-20261028\数据同步工具-Windows-x64.zip'
+    $zip = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\交付包-20261102-021825\数据同步工具-Windows-x64.zip'
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $z = [IO.Compression.ZipFile]::OpenRead($zip)
     $dst = Join-Path $w 'stage\tools'

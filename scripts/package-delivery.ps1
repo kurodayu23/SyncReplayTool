@@ -59,9 +59,12 @@ param(
     # 而 ai-workspace 是会被定期清空的临时区 —— 清一次就再也打不出包了。
     # 仓库里的副本是唯一事实来源。
     [string]$PayloadDir  = 'D:\AP\AP7000\SyncReplayTool\scripts\kylin-payload',
-    [string]$KylinBaseTar = 'D:\AP\AP7000\ai-workspace\kylin-pkg\.stage\base.tar.gz',
+    # base.tar.gz = **上一版麒麟交付包**（自带 Qt 运行时与插件）。pkg.sh 会解开它、
+    # 裁死重、覆盖 payload、装新二进制、再打包 —— 所以它不是神秘产物。
+    # 放构建目录，不放会被清空的 ai-workspace；缺失时会自动用本地已有的交付包补。
+    [string]$KylinBaseTar = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\kylin-base\base.tar.gz',
     [string]$KylinBinary  = '',
-    [string]$WorkRoot     = 'D:\AP\AP7000\ai-workspace\pkg-preflight',
+    [string]$WorkRoot     = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\work\pkg-preflight',
     [string]$ContainerImage = 'kylin-v10-real:latest',
     [string]$ContainerName  = 'srt-nightd-pkg',
     [int]$ContainerPort     = 0,
@@ -525,7 +528,16 @@ if (-not $SkipKylinTar) {
     Write-Step '4. 麒麟 tar.gz（Linux 容器）'
 
     if (-not (Test-Path -LiteralPath $ContainerScript)) { throw "缺少容器脚本：$ContainerScript" }
-    if (-not (Test-Path -LiteralPath $KylinBaseTar)) { throw "缺少基础包：$KylinBaseTar" }
+    # 基础包缺失时自愈：用本地已有的最新一版麒麟交付包当 base（内容等价 ——
+    # pkg.sh 会覆盖 payload 与二进制，只留里面的 lib/ 与 plugins/ 运行时）。
+    if (-not (Test-Path -LiteralPath $KylinBaseTar)) {
+        $alt = Get-ChildItem -LiteralPath (Split-Path -Parent $OutDir) -Filter '数据同步工具-麒麟.tar.gz' -Recurse -File -ErrorAction SilentlyContinue |
+               Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if (-not $alt) { throw "缺少基础包：$KylinBaseTar（且在 $(Split-Path -Parent $OutDir) 下找不到可当 base 的 麒麟.tar.gz）" }
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $KylinBaseTar) | Out-Null
+        Copy-Item -LiteralPath $alt.FullName -Destination $KylinBaseTar
+        Write-Host "   [自愈] 基础包缺失，已用上一版交付包补：$($alt.FullName)" -ForegroundColor Yellow
+    }
     if (-not (Test-Path -LiteralPath $PayloadDir)) { throw "缺少 payload 目录：$PayloadDir" }
 
     # 4.1 找 Linux ELF 二进制

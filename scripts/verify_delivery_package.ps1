@@ -41,10 +41,11 @@ param(
     [string]$SrcRoot = '',
     [string]$RuntimeDir = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\deploy',
     [string[]]$FallbackRuntimeDirs = @('C:\Windows\System32'),
-    [string]$PayloadDir = 'D:\AP\AP7000\ai-workspace\kylin-pkg\payload',
+    # payload 与工作根都不放 ai-workspace：那是会被清空的临时区（2026-11-02 搬）
+    [string]$PayloadDir = 'D:\AP\AP7000\SyncReplayTool\scripts\kylin-payload',
     [string]$BuildRoot = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\nightD',
     [string]$KylinBinary = '',
-    [string]$WorkRoot = 'D:\AP\AP7000\ai-workspace\pkg-preflight',
+    [string]$WorkRoot = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\work\pkg-preflight',
     [string]$ContainerImage = 'kylin-v10-real:latest',
     [string]$ContainerName = 'srt-nightd-verify',
     [int]$ContainerPort = 0,
