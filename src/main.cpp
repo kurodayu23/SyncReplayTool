@@ -3284,6 +3284,24 @@ int runGuiSelfCheck()
               QString::fromUtf8(u8"isLogOpenForTest=1\uFF08\u9ED8\u8BA4\u5E94\u5F53\u662F\u6536\u8D77\u7684\uFF09"));
         // 收起时主界面高度 = 460（定稿图 980×460），但要**按屏幕可用高收敛**：
         // 1366×768 这类笔记本的可用高是 728，460 放得下；更矮的屏幕才收敛。
+        // 屏幕扫描：availH 1..3000 逐个比"展开高度"与"收起高度"，
+        // 锁住一条本该永远成立的不变量：**展开日志不会让窗口变矮**。
+        // 有了它，ScreenFit::mainWindow 里就不需要一层永不生效的 qMax 去"防御"
+        // （2026-11-05 审查指出那层是死代码）。
+        {
+            int sweepBad = 0, sweepFirst = -1;
+            for (int ah = 1; ah <= 3000; ++ah) {
+                if (ScreenFit::mainWindow(1280, ah, true).height()
+                    < ScreenFit::mainWindow(1280, ah, false).height()) {
+                    ++sweepBad;
+                    if (sweepFirst < 0) sweepFirst = ah;
+                }
+            }
+            check("screen-sweep-open-never-shorter", sweepBad == 0,
+                  QStringLiteral("availH 1..3000: open<shut %1 times, first=%2")
+                      .arg(sweepBad).arg(sweepFirst));
+        }
+
         check("G2-main-height-collapsed", w.height() == hShut,
               QStringLiteral("height=%1 expected=%2").arg(w.height()).arg(hShut));
     }
@@ -3438,7 +3456,9 @@ int runGuiSelfCheck()
         };
         // 先按**收起态**把窗口重置一次，再量 before。
         //
-        // 为什么必须重置：跑到这里之前，前面几个尺寸判据（G22/G23 要模拟
+        // 为什么必须重置：跑到这里之前，前面的判据可能把窗口改成非收起态的尺寸
+        // 且没有还原（实测残留 600；具体是哪一条未确证 —— 注意 G22/G23 在源码里
+        // 位于本项**之后**，别再把因果归给它们）。
         // "窗口在屏幕下半屏"）会 resize 窗口且不还原。offscreen 平台屏幕可用高
         // 只有 460，残留的 600 高窗口会让 before 与 hShut 不等，
         // 于是"展开后高度收敛到 hShut"被判成"进度条位移" —— 假 FAIL。
