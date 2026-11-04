@@ -3480,16 +3480,10 @@ int runGuiSelfCheck()
         // 钳死、抽屉 175px 必须占位，布局只能压缩清单卡片 —— "进度条不动"做不到，
         // 属环境限制而非产品缺陷。实测麒麟 offscreen(avail=460)：listCard 137→270、
         // progressCard 207→355。真实桌面 availH≥647（768p 笔记本 728）不触发。
-        // 按 G24 的同一口径 SKIP，避免小屏机器上永远红一条。
-        if (scrAvail.height() < ScreenFit::kMainHeightLogOpen) {
-            out << "SKIP\tG18b-log-open-keeps-progress-position\tscreen-too-short(avail="
-                << scrAvail.height() << " need=" << ScreenFit::kMainHeightLogOpen << ")\n";
-        } else {
-            check("G18b-log-open-keeps-progress-position",
-                  progYBefore >= 0 && progYBefore == progYAfter,
-                  QStringLiteral("before=%1 after=%2 | %3 | %4")
-                      .arg(progYBefore).arg(progYAfter).arg(dumpBefore).arg(geomDump("after")));
-        }
+        check("G18b-log-open-keeps-progress-position",
+              progYBefore >= 0 && progYBefore == progYAfter,
+              QStringLiteral("before=%1 after=%2 | %3 | %4")
+                  .arg(progYBefore).arg(progYAfter).arg(dumpBefore).arg(geomDump("after")));
 
         w.syncPanelForTest()->toggleLogDrawer();
         QApplication::processEvents();

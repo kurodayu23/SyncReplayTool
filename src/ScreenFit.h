@@ -81,6 +81,20 @@ const int kSettingsHeightMin = 320;
 const int kMargin = 40;
 
 // 主界面尺寸。logOpen = 日志抽屉是否展开。
+// 日志抽屉在给定可用高下能开多高。
+//
+// 为什么需要它：抽屉原来固定 175px。屏幕可用高不足「460 + 175 + 12」时，
+// 窗口长不到那么高，抽屉只能去挤布局 —— 表现就是**进度条整体上移**
+// （实测 availH=600 移 47px = 187-140；availH=460 移 148px 且抽屉越出窗口
+// 压住进度卡）。这不是"环境限制"，是产品该降级的地方。
+// 规则：抽屉最多占「窗口比收起态多出来的那部分」减去间距，其余保持不动。
+inline int logDrawerHeight(int availH)
+{
+    const int shut  = qMax(kMainHeightMin, qMin(kMainHeight, availH));
+    const int open  = qMax(kMainHeightMin, qMin(kMainHeightLogOpen, availH));
+    const int extra = qMax(0, open - shut);          // 窗口能长多高
+    return qMax(0, qMin(kLogDrawerHeight, extra - kPanelSpacing));
+}
 inline QSize mainWindow(int availW, int availH, bool logOpen)
 {
     // 展开目标 647 > 收起目标 460，两者都先卡下界 320、再按可用高收敛，

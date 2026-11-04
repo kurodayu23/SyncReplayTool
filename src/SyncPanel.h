@@ -159,6 +159,8 @@ public:
     // 只给 offscreen 截图探针用。
     void toggleLogDrawerForProbe() { toggleLogDrawer(); }
     bool isLogOpenForTest() const { return m_logOpen; }
+    // 按屏幕可用高调整抽屉高度（小屏降级用；MainWindow 在展开时调）。
+    void setLogDrawerHeight(int h);
 
     // 自动化自检要能看见产品自己的日志原文。
     //

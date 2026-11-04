@@ -372,6 +372,12 @@ void MainWindow::onLogDrawerToggled(bool open)
     // 收敛规则只有一份（ScreenFit.h），主界面和设置弹窗共用。
     const QSize sz = ScreenFit::mainWindow(avail.width(), avail.height(), open);
 
+    // 小屏降级：屏幕装不下「460 + 175 + 12」时，把抽屉压到窗口能长出来的高度，
+    // 否则它会去挤清单卡片/进度区 —— 客户看到的「点日志后进度条位置变了」。
+    // 大屏上 logDrawerHeight() 返回 175，与原来完全一致。
+    if (open)
+        m_syncPanel->setLogDrawerHeight(ScreenFit::logDrawerHeight(avail.height()));
+
     // ★**位置也要跟着收敛**（2026-10-28 缺陷 1）：
     // 只 setFixedHeight 不挪位置，窗口加高后**底边会掉出屏幕**。
     // 实测（1280×764 可用区）：460 → 759 后底边到 909，超出 146px，

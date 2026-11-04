@@ -1322,6 +1322,15 @@ void SyncPanel::onToolError(QProcess::ProcessError)
 
 // ---------------------------------------------------------------- 日志抽屉
 
+// 小屏降级：把抽屉压到「窗口能长出来的那部分」，避免它去挤清单卡片/进度区。
+// 高度为 0 时说明这块屏连 12px 间距都腾不出来，此时展开也没有可视区域，
+// 但布局仍然稳定（进度条不会被推走），比原来"越出窗口压住进度卡"好。
+void SyncPanel::setLogDrawerHeight(int h)
+{
+    const int nh = qMax(0, h);
+    if (m_logDrawer && m_logDrawer->height() != nh)
+        m_logDrawer->setFixedHeight(nh);
+}
 void SyncPanel::toggleLogDrawer()
 {
     m_logOpen = !m_logOpen;
