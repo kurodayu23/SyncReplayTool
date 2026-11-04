@@ -75,6 +75,11 @@ zz_probe.txt
 *.bak
 
 # ---- 测试台的工作产物（不进仓库）----
+# work/ 是测试与 GUI 会话的工作根，默认落在仓库外的
+# AP7000-Build-Directories\SyncReplayTool\work；
+# 但带 SRT_CONFIG_DIR 覆盖、或从源码目录启动产品时，会在仓库里长出
+# work/w02/cfg（配置）+ work/<段>/logs（日志）。挡掉，别让 git status 变脏。
+work/
 # 端到端 argv 抓取的 app 目录：平铺的 exe + DLL + 记录器（上百个文件），
 # 是每次跑都重新生成的现场，不该进仓库。
 # 默认建在仓库外（ai-workspace\SyncReplayTool\argv-app），
