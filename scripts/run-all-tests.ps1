@@ -80,6 +80,14 @@ function Record($name, $status, $detail) {
 # ---------------------------------------------------------------- 1. 构建
 if (-not $SkipBuild) {
     Write-Host "`n===== 1. 构建（Qt 5.9.6 / msvc2015_64）=====" -ForegroundColor Cyan
+    # exe 被占用时 MSVC 只会报 LNK1104「无法打开文件 release\SyncReplayTool.exe」，
+    # 看起来像编译错误，实际是上一轮的产品进程（或被别处启动的实例）没退。
+    # 不先清掉的话每轮构建都假红（2026-11-04 实测撞过一次）。
+    Get-Process SyncReplayTool -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host ("  停掉占用 exe 的进程 pid=" + $_.Id) -ForegroundColor Yellow
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Milliseconds 800
     & powershell -ExecutionPolicy Bypass -File 'D:\AP\AP7000\SyncReplayTool\scripts\build-win.ps1' -BuildRoot $QtKitBuild 2>&1 |
         Out-File -FilePath (Join-Path $logs 'build.log') -Encoding UTF8
     if ($LASTEXITCODE -eq 0 -and (Test-Path $Exe)) {
@@ -227,8 +235,16 @@ if (-not $pkgDir) {
         -PackageDir $pkgDir.FullName -BuildRoot $gateBuildRoot 2>&1 |
         Out-File -FilePath (Join-Path $logs 'delivery-gate.log') -Encoding UTF8
     $gateRc = $LASTEXITCODE
-    $verdict = (Select-String -Path (Join-Path $logs 'delivery-gate.log') -Pattern '总判定').Line
-    if ($gateRc -eq 0 -and $verdict -match 'PASS') { Record '交付门禁' 'PASS' $verdict.Trim() }
+    # 判定必须从 UTF-8 原文读：Select-String 在 PowerShell 5.1 下会把无 BOM 的
+    # UTF-8 当成 ANSI，中文全变乱码，'总判定' 匹配不到 -> $verdict 为空 -> 假 FAIL。
+    # 2026-11-04 实测：delivery-gate.log 里明写「总判定 : PASS」，本脚本却记成 FAIL。
+    $gateLogPath = Join-Path $logs 'delivery-gate.log'
+    $verdict = '（日志里没有总判定行）'
+    if (Test-Path $gateLogPath) {
+        $gateText = [IO.File]::ReadAllText($gateLogPath, [Text.Encoding]::UTF8)
+        if ($gateText -match '总判定\s*[:：]\s*(PASS|FAIL)') { $verdict = '总判定 ' + $Matches[1] }
+    }
+    if ($gateRc -eq 0 -and $verdict -match 'PASS') { Record '交付门禁' 'PASS' $verdict }
     else { Record '交付门禁' 'FAIL' "rc=$gateRc $verdict (BuildRoot=$gateBuildRoot)" }
 }
 }

@@ -38,6 +38,7 @@
 #include "Model.h"
 #include "FileTableModel.h"
 #include "ToolColumnDelegate.h"
+#include "ToolRunner.h"
 #include "SettingsDialog.h"
 
 // ------------------------------------------------------------------
@@ -560,6 +561,81 @@ int runSelfCheck()
             << "\totherKept="    << (QFileInfo(otherPass).exists() ? 1 : 0)
             << "\tnoPidKept="    << (QFileInfo(noPid).exists() ? 1 : 0)
             << "\tplainKept="    << (QFileInfo(plain).exists() ? 1 : 0)
+            << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // askpass 口令目录的**回落**必须真的存在
+    //
+    // 缺陷（2026-11-04 实测）：askpassDir() 一次挑一个目录就定了，
+    // 而它的筛选条件（目录存在 + isWritable()）**看不见 Windows 强制完整性控制(MIC)**。
+    // 程序放在带 `Mandatory Label\Low Mandatory Level` 的目录里时，
+    // 进程以 Low 完整性运行，往 Medium 的 %LOCALAPPDATA% / %TEMP% 写文件被内核拒绝 ——
+    // 日志原文：「无法写入临时口令文件：C:/Users/jss18/AppData/Local」+「同步失败」。
+    // ⇒ 低完整性环境下**口令认证整个不可用**，同步功能等于没有。
+    //
+    // 判据（两条，都要真跑一遍）：
+    //   正向：第一个候选目录**不可写**时，必须回落到第二个（文件落在第二个里）。
+    //   反向锁：第一个目录可写时，必须落在第一个（不许绕远路）。
+    // 变异锁：把 createSecretFileIn() 里的循环改成只试第一个，本项立刻红。
+    // ----------------------------------------------------------------
+    {
+        QTemporaryDir sandbox;
+        const QString root = sandbox.path();
+        const QString usable  = root + QStringLiteral("/usable");
+        QDir().mkpath(usable);
+
+        // 「写不进去」的第一种形态（**所有平台都成立**）：目录根本不存在。
+        const QString missing = root + QStringLiteral("/no-such-dir");
+
+        // 第二种形态：目录在，但写不进去。
+        // Windows 上目录的只读位被系统忽略，必须用 ACL；而 ACL 能不能挡住
+        // 取决于当前用户是不是管理员 —— 所以**先验一下**它到底写不写得进去，
+        // 写得进去就跳过这一档，而不是让判据变成"看运气"。
+        const QString blocked = root + QStringLiteral("/blocked");
+        QDir().mkpath(blocked);
+        bool aclBlocked = false;
+        {
+            const QString probeFile = blocked + QStringLiteral("/probe.tmp");
+            QFile pf(probeFile);
+            if (pf.open(QIODevice::WriteOnly)) {
+                pf.close();
+                QFile::remove(probeFile);
+                aclBlocked = false;          // 挡不住 → 这一档跳过
+            } else {
+                aclBlocked = true;
+            }
+        }
+
+        QString landed, landedDir;
+        const bool fellBack = RsyncRunner::createSecretFileIn(
+                    QStringList() << missing << usable,
+                    QStringLiteral("srt_pass_selfcheck_XXXXXX"),
+                    QByteArray("probe"), &landed, &landedDir);
+        const bool landedInSecond = fellBack && (landedDir == usable)
+                                 && QFileInfo(landed).isFile()
+                                 && QFileInfo(landed).size() == 5;
+        if (landedInSecond)
+            QFile::remove(landed);
+
+        // 反向锁：第一个可写时必须落在第一个（不许绕远路）
+        QString landed2, landedDir2;
+        const bool stayedFirst = RsyncRunner::createSecretFileIn(
+                    QStringList() << usable << missing,
+                    QStringLiteral("srt_pass_selfcheck_XXXXXX"),
+                    QByteArray("probe"), &landed2, &landedDir2)
+                && (landedDir2 == usable);
+        if (stayedFirst)
+            QFile::remove(landed2);
+
+        const bool ok = landedInSecond && stayedFirst;
+        if (!ok)
+            ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "askpass-dir-fallback"
+            << "\tcands=" << RsyncRunner::askpassDirCandidates().size()
+            << "\tfallbackTo2nd=" << (landedInSecond ? 1 : 0)
+            << "\tstayedOn1st=" << (stayedFirst ? 1 : 0)
+            << "\taclCaseSkipped=" << (aclBlocked ? 0 : 1)
             << "\n";
     }
 
@@ -2123,20 +2199,56 @@ int runSelfCheck()
         // 三种退出的桩程序。Windows 走 cmd.exe + .bat（QProcess 不能直接
         // CreateProcess 一个 .bat），Linux 走 /bin/sh + 脚本。
         // 两边的"程序"形态不同，但**语义**必须一样：同样的退出码、同样的 stderr。
+        //
+        // 桩脚本放在**带空格的子目录**里，而且是**故意**这么放的。
+        //
+        // 理由：桩脚本路径是当**参数**传下去的，而参数模板会被 splitCommand
+        // 按空白拆开。路径里一旦有空格就被剪碎 —— cmd.exe 报
+        // 「'C:/srt' 不是内部或外部命令」，/bin/sh 报「Can't open /tmp/srt」，
+        // 退出码分类这一整组判据全挂。
+        //
+        // 这不是假想的边缘情况，而是真实客户机的形态：
+        //   · Windows 用户名带空格（John Smith）⇒ %TEMP% 里就有空格
+        //   · Linux 上 TMPDIR 带空格同理
+        // 实测（2026-11-04）：%TEMP% = "C:\srt temp space" 时，
+        // 自检判 tool-launch-runtime FAIL（okTag=ERR）、整体 SELFCHECK_FAILED，
+        // 而自检.sh 会据此告诉客户「程序本体启动失败」「这台机器跑不了」。
+        // 机器其实完全正常 —— 坏的只是判据自己造出来的现场。
+        //
+        // 把桩脚本放进普通目录，这条缺陷就永远测不出来
+        // （判据只在"桩脚本路径含空格"时才咬得到）。
+        const QString stubDir = root + QStringLiteral("/srt stub dir");
+        QDir().mkpath(stubDir);
         #ifdef Q_OS_WIN
         // QFileInfo("cmd.exe").exists() is FALSE: it resolves against the CWD,
         // not PATH.  The pre-flight would then correctly (but uselessly) report
         // "tool missing" and the exit-code cases would never run.
         const QString runner = QStandardPaths::findExecutable(QStringLiteral("cmd.exe"));
-        const auto argsFor = [](const QString &stub) { return QStringLiteral("/c ") + stub; };
+        // 路径必须按"参数模板里的路径"来转义（引号 + 反斜杠），
+        // 否则带空格的路径会被 splitCommand 剪碎。
+        //
+        // 这里**必须**加 call，不能直接 /c "<带空格的路径>"：
+        // cmd.exe /c 的引号规则是"整条命令行里只有一对引号时才保留它"，
+        // 而我们的命令行里至少有两对（桩脚本路径 + 文件路径），
+        // 于是 cmd 按老规矩剥掉第一对引号 → 'C:\srt' 被当成命令名 →
+        // 「'C:\srt' 不是内部或外部命令」（实测 2026-11-04）。
+        //
+        // call 是这里唯一稳的写法：/c 后面第一个字符是 'c' 而不是引号，
+        // cmd 那套剥引号的逻辑压根不触发，整条命令原样交给 call，
+        // call 自己按"引号包住的整条路径"去执行。
+        const auto argsFor = [](const QString &stub) {
+            return QStringLiteral("/c call ") + ToolRunner::quotePathToken(stub);
+        };
         #else
         const QString runner = QStringLiteral("/bin/sh");
-        const auto argsFor = [](const QString &stub) { return stub; };
+        const auto argsFor = [](const QString &stub) {
+            return ToolRunner::quotePathToken(stub);
+        };
         #endif
-        const QString okExe  = makeToolStub(root, QStringLiteral("ok"), QStringLiteral(".bat"), QString(), 0);
-        const QString badExe = makeToolStub(root, QStringLiteral("fail"), QStringLiteral(".bat"),
+        const QString okExe  = makeToolStub(stubDir, QStringLiteral("ok"), QStringLiteral(".bat"), QString(), 0);
+        const QString badExe = makeToolStub(stubDir, QStringLiteral("fail"), QStringLiteral(".bat"),
                                             QStringLiteral("cannot open display"), 2);
-        const QString glibExe = makeToolStub(root, QStringLiteral("glib"), QStringLiteral(".bat"),
+        const QString glibExe = makeToolStub(stubDir, QStringLiteral("glib"), QStringLiteral(".bat"),
                                              QStringLiteral("GLib-GObject-CRITICAL: g_object_get_data: assertion 'G_IS_OBJECT (object)' failed"), 3);
 
         SyncPanel panel;
@@ -3296,9 +3408,36 @@ int runGuiSelfCheck()
     // （SyncPanel::appendNotice() 里「if (!m_logOpen) toggleLogDrawer()」——
     // 那是产品行为：用户该看见这条提示）。原来把次数写死，就差一次，报假 FAIL。
     //
-    // 高度按**屏幕可用高**收敛（展开态 759px 在 1366×768 的笔记本上放不下，硬设会被裁）。
+    // 高度按**屏幕可用高**收敛（展开态 = 收起高度 + 抽屉高度，见 ScreenFit.h）。
     // hShut / hOpen 在上面已经按 ScreenFit 的同一份规则算好了，这里不再另抄。
     {
+        // 展开日志后，**进度区的位置必须一点不动**（2026-11-04 客户现场反馈）。
+        //
+        // 原来展开态窗口高度写死 759，而日志抽屉只有 175 ⇒ 窗口多长出来的
+        // 299px 里只有 175 给了抽屉，**剩下 124px 全被清单卡片与进度区之间
+        // 那段弹性留白吃掉**。后果是两样，客户一眼就看出来：
+        //   ① 进度条（连带底部按钮带）整体下移 124px —— 点一下日志，界面像被抻了；
+        //   ② 卡片和进度区之间空出一大片。
+        // 客户原话：「点击同步日志后进度条的位置变了，拉伸太明显了，出现大量空白处」。
+        //
+        // 判据：抽屉展开前后，进度区相对窗口顶边的 y 必须完全相同。
+        // 变异锁：把 kMainHeightLogOpen 改回 759，本项立刻红。
+        QWidget *progCard = w.syncPanelForTest()->findChild<QWidget *>(QStringLiteral("progressCard"));
+        const int progYBefore = progCard ? progCard->mapTo(&w, QPoint(0, 0)).y() : -1;
+        auto geomDump = [&](const char *tag) {
+            QStringList parts;
+            const char *names[] = { "listCard", "progressCard", "logDrawer", "fileTable" };
+            for (int i = 0; i < 4; ++i) {
+                QWidget *wd = w.syncPanelForTest()->findChild<QWidget *>(QString::fromLatin1(names[i]));
+                if (wd)
+                    parts << QString::fromLatin1("%1(y=%2,h=%3)")
+                                 .arg(QString::fromLatin1(names[i]))
+                                 .arg(wd->mapTo(&w, QPoint(0, 0)).y()).arg(wd->height());
+            }
+            return QStringLiteral("%1 win=%2 %3").arg(QString::fromLatin1(tag)).arg(w.height()).arg(parts.join(QLatin1Char(' ')));
+        };
+        const QString dumpBefore = geomDump("before");
+
         w.syncPanelForTest()->toggleLogDrawer();
         QApplication::processEvents();
         const bool nowOpen = w.syncPanelForTest()->isLogOpenForTest();
@@ -3306,12 +3445,23 @@ int runGuiSelfCheck()
         check("G18-log-height-follows-state", w.height() == expectH,
               QStringLiteral("height=%1 expected=%2 open=%3").arg(w.height()).arg(expectH).arg((int)nowOpen));
 
+        const int progYAfter = progCard ? progCard->mapTo(&w, QPoint(0, 0)).y() : -1;
+        check("G18b-log-open-keeps-progress-position",
+              progYBefore >= 0 && progYBefore == progYAfter,
+              QStringLiteral("before=%1 after=%2 | %3 | %4")
+                  .arg(progYBefore).arg(progYAfter).arg(dumpBefore).arg(geomDump("after")));
+
         w.syncPanelForTest()->toggleLogDrawer();
         QApplication::processEvents();
         const bool backOpen = w.syncPanelForTest()->isLogOpenForTest();
         const int expectH2 = backOpen ? hOpen : hShut;
         check("G19-log-height-follows-state-back", w.height() == expectH2,
               QStringLiteral("height=%1 expected=%2 open=%3").arg(w.height()).arg(expectH2).arg((int)backOpen));
+
+        const int progYBack = progCard ? progCard->mapTo(&w, QPoint(0, 0)).y() : -1;
+        check("G19b-log-close-keeps-progress-position",
+              progYBefore >= 0 && progYBefore == progYBack,
+              QStringLiteral("before=%1 back=%2").arg(progYBefore).arg(progYBack));
     }
 
     // 设置弹窗高度**固定**：min(560, 屏幕限高)。

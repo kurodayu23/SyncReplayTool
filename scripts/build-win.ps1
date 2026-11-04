@@ -111,8 +111,33 @@ try {
     & "$QtRoot\bin\qmake.exe" $Project CONFIG+=release
     if ($LASTEXITCODE -ne 0) { throw "qmake failed ($LASTEXITCODE)" }
 
+    # ---- 占用的产品进程先清掉 ----
+    #
+    # exe 被占用时 MSVC 只会报 LNK1104「无法打开文件 release\SyncReplayTool.exe」，
+    # 看着像编译错误，实际只是上一轮的产品进程（或从别处启动的实例）还活着。
+    # 2026-11-04 实测撞过两次：一次是测试脚本起的实例没退，一次是构建**过程中**
+    # 又有人把 exe 跑起来了（所以光在开头清一次不够，失败后还得再清再重试）。
+    function Stop-ProductInstance {
+        $procs = @(Get-Process SyncReplayTool -ErrorAction SilentlyContinue)
+        if ($procs.Count -eq 0) { return $false }
+        foreach ($p in $procs) {
+            Write-Host ("  停掉占用 exe 的产品进程 pid=" + $p.Id) -ForegroundColor Yellow
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Milliseconds 800
+        return $true
+    }
+    Stop-ProductInstance | Out-Null
+
     & $Jom -f Makefile.Release
-    if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
+    if ($LASTEXITCODE -ne 0) {
+        # 多半是 LNK1104：链接那一刻又有人把 exe 跑起来了。清干净再重试一轮。
+        if (Stop-ProductInstance) {
+            Write-Host '  构建失败后清掉占用进程，重试一轮…' -ForegroundColor Yellow
+            & $Jom -f Makefile.Release
+        }
+        if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
+    }
 
     $targetExe = "$BuildRoot\release\SyncReplayTool.exe"
     if (-not (Test-Path $targetExe)) { throw "artifact missing: $targetExe" }

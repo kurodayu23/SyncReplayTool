@@ -88,6 +88,20 @@ public:
     // cleanupStaleSecrets() 也跟着扫这里，否则挪走之后残留清不掉。
     static QString askpassDir();
 
+    // askpass 口令文件/脚本的**全部**候选目录，按优先级排列。
+    //
+    // 为什么不是一个目录：isWritable() 看不见 Windows 强制完整性控制(MIC)，
+    // 程序在 Low 完整性下写不进 Medium 的 %LOCALAPPDATA% / %TEMP%。
+    // 一次挑死 = 口令认证整个不可用（实测 2026-11-04）。
+    // createAskpass() 挨个试，写不进去就换下一个。
+    static QStringList askpassDirCandidates();
+
+    // 在候选目录列表里，把内容写进**第一个写得进去**的目录。
+    // 全部失败返回 false。抽成独立函数是为了能被 --selfcheck 直接判：
+    // "第一个目录不可写时必须回落"这条，低完整性环境下的口令认证全靠它。
+    static bool     createSecretFileIn(const QStringList &dirs, const QString &nameTemplate,
+                                       const QByteArray &payload, QString *outPath, QString *outDir);
+
     // 启动时清掉上一次崩溃/强杀残留的临时文件（含**明文口令**）。
     // 只删写它的进程已经不在了的那些，多实例并存时不会误删。
     static void    cleanupStaleSecrets();

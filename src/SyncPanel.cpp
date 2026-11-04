@@ -44,6 +44,7 @@
 #include "RsyncRunner.h"
 #include "FileScanner.h"
 #include "ToolRunner.h"
+#include "ScreenFit.h"
 
 namespace {
 
@@ -455,7 +456,7 @@ void SyncPanel::buildUi()
     // 定稿图实测：窗口左右留白 ≈15px，表格卡片左右贴边（卡片内左右内边距 0）。
     // 原来 root 留 18 + 卡片内留 10，表格比定稿图窄了 22px。
     root->setContentsMargins(14, 14, 14, 14);
-    root->setSpacing(12);
+    root->setSpacing(ScreenFit::kPanelSpacing);
 
     // ---- 1. 文件清单卡片 ----
     QFrame *card = new QFrame;
@@ -753,7 +754,7 @@ void SyncPanel::buildUi()
     // 主界面因此保持 980×460，与定稿图一致；需要看日志时点标题栏展开。
     m_logDrawer->setVisible(false);
     m_logOpen = false;
-    m_logDrawer->setFixedHeight(175);
+    m_logDrawer->setFixedHeight(ScreenFit::kLogDrawerHeight);
     QVBoxLayout *logLay = new QVBoxLayout(m_logDrawer);
     logLay->setContentsMargins(0, 0, 0, 0);
     logLay->setSpacing(0);

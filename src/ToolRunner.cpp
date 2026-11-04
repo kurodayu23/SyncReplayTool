@@ -438,6 +438,21 @@ static bool placeholderAlreadyQuoted(const QString &tmpl)
     return false;
 }
 
+// 把一条路径变成"能安全塞进参数模板、再经 splitCommand 拆回来还不变形"的片段。
+//
+// 和 fileArgToken 是同一套转义规则，区别只在于**要不要加引号**：
+// 这里一律加引号 —— 调用方的路径可能含空格，而调用方自己不一定知道
+// （自检里传的是 %TEMP% 下面的桩脚本路径，用户名带不带空格不是产品能控制的）。
+//
+// 2026-11-04 实测：%TEMP% 含空格时自检把桩脚本路径直接拼进 argsTemplate，
+// splitCommand 把 ['C:/srt temp space/.../ok.bat'] 剪成 ['C:/srt', 'temp space/.../ok.bat']，
+// cmd.exe 报「'C:/srt' 不是内部或外部命令」⇒ 自检判 FAIL ⇒
+// 自检.sh 会告诉客户「程序本体启动失败」「这台机器跑不了」，而机器其实完全正常。
+QString ToolRunner::quotePathToken(const QString &path)
+{
+    return fileArgToken(path, true);
+}
+
 QString ToolRunner::buildArgs(const ToolRule &rule, const QString &filePath)
 {
     const QString full = QDir::toNativeSeparators(QFileInfo(filePath).absoluteFilePath());

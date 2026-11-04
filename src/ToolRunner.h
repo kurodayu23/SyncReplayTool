@@ -38,6 +38,20 @@ public:
     // 路径含空格时被撕成两段，界面却全程报「执行完成」。
     // 复刻一份简化版的代价就是下一次修 P29 / T-A 时只改了一边。
     static QStringList buildArgv(const ToolRule &rule, const QString &filePath);
+
+    // 把一个路径变成"塞进参数模板、再经 splitCommand 拆回来还不变形"的片段。
+    //
+    // 给**不是文件参数**的路径用（比如自检里当参数传给 cmd.exe / /bin/sh 的桩脚本）。
+    // 文件参数那一侧由 buildArgs 内部处理，外面的调用方拿不到也不该碰；
+    // 但只要有人要把一条路径塞进 argsTemplate，就必须走这个函数，
+    // 否则路径里的空格会被 splitCommand 当成参数分隔符剪碎。
+    //
+    // 实测（2026-11-04）：%TEMP% 含空格时自检的桩脚本路径被剪成
+    // ['C:/srt', 'temp space/.../ok.bat']，cmd.exe 报
+    // 「'C:/srt' 不是内部或外部命令」，自检判 FAIL ⇒
+    // 自检会告诉客户"这台机器跑不了"，而机器其实完全正常。
+    // Windows 用户名带空格（John Smith）、Linux 的 TMPDIR 带空格都会中。
+    static QString quotePathToken(const QString &path);
     // 只给自动化测试用：把同一段输出按给定分块喂进解码器，返回拼回来的文本。
     // 走的是运行期同一条路径（onReadyRead 用的就是它），不是另写一份实现，
     // 所以这里过了才能说明真实进程输出不会解坏。
