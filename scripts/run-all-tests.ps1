@@ -122,8 +122,17 @@ if ($SkipPackage) {
     Write-Host "`n===== 2. 打包（用刚编出来的那份产物）=====" -ForegroundColor Cyan
     $pkgPath = Join-Path $PackageRoot ('交付包-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
     New-Item -ItemType Directory -Force -Path $pkgPath | Out-Null
-    & powershell -ExecutionPolicy Bypass -File 'D:\AP\AP7000\SyncReplayTool\scripts\package-delivery.ps1' `
-        -BuildRoot $QtKitBuild -OutDir $pkgPath -SkipBuild 2>&1 |
+    # 必须把刚交叉编译出来的麒麟二进制传进去。不传的话 package-delivery.ps1
+    # 会用它的默认值/跳过对账，麒麟包里就不是这一轮的产物 ——
+    # 交付门禁那句「未提供 -KylinBinary，跳过冒烟对账」正是在提示这件事（2026-11-04 发现）。
+    $kylinBin = Join-Path $PackageRoot 'build-kylin\release\SyncReplayTool'
+    if (-not (Test-Path $kylinBin)) {
+        Record '打包' 'FAIL' "找不到麒麟二进制 $kylinBin（先跑 build-kylin-qt596.sh）"
+        $kylinBin = $null
+    }
+    $pkgArgs = @('-BuildRoot', $QtKitBuild, '-OutDir', $pkgPath, '-SkipBuild')
+    if ($kylinBin) { $pkgArgs += @('-KylinBinary', $kylinBin) }
+    & powershell -ExecutionPolicy Bypass -File 'D:\AP\AP7000\SyncReplayTool\scripts\package-delivery.ps1' @pkgArgs 2>&1 |
         Out-File -FilePath (Join-Path $logs 'package.log') -Encoding UTF8
     $pkgRc = $LASTEXITCODE
     $winZip = Get-ChildItem $pkgPath -Filter '*Windows*.zip' -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -231,21 +240,35 @@ if (-not $pkgDir) {
     # 门禁就报「内容与源不一致」的假 FAIL（本脚本 2026-10-30 因此误报过一次）。
     # 默认取 Qt Creator 套件目录：构建段就是往那儿编的，包也是同一份源码打的。
     $gateBuildRoot = if ($env:SRT_GATE_BUILDROOT) { $env:SRT_GATE_BUILDROOT } else { $QtKitBuild }
+    # 必须用 cmd 做**字节级**重定向。verify_delivery_package.ps1 是外部 powershell
+    # 进程，中文走控制台编码（本机 GBK）；用 PowerShell 管道接它，会先按 UTF-8
+    # 解码 GBK 字节（乱码）、再以 UTF-8 写文件 —— 双重编码损坏且不可逆，
+    # 「总判定」四个字再也匹配不回来（2026-11-04 实测：日志里明明写着 PASS，
+    # 本脚本却报「日志里没有总判定行」，两种编码都读不出来）。
+    # 判定**只看退出码**，不解析日志里的中文。
+    #
+    # 为什么不解析：verify_delivery_package.ps1 的输出中文走控制台编码，
+    # 经 PowerShell 管道会被按 UTF-8 误解码再以 UTF-8 写盘，双重编码损坏后
+    # 「总判定」再也匹配不回来（2026-11-04 实测：日志里明明写着 PASS，
+    # 本脚本报「没有总判定行」）。用 Start-Process / cmd 做字节重定向也会踩
+    # 另一个坑：那个上下文里 Get-FileHash 不可用，门禁脚本第一行就崩。
+    #
+    # 退出码的语义是明确的：0 = 三道闸门全 PASS；非 0 = 有闸门 FAIL 或脚本崩了。
+    # 宁可「崩了也算红」，不能让它假绿。
+    $gateLogPath = Join-Path $logs 'delivery-gate.log'
     & powershell -ExecutionPolicy Bypass -File 'D:\AP\AP7000\SyncReplayTool\scripts\verify_delivery_package.ps1' `
         -PackageDir $pkgDir.FullName -BuildRoot $gateBuildRoot 2>&1 |
-        Out-File -FilePath (Join-Path $logs 'delivery-gate.log') -Encoding UTF8
+        Out-File -FilePath $gateLogPath -Encoding UTF8
     $gateRc = $LASTEXITCODE
-    # 判定必须从 UTF-8 原文读：Select-String 在 PowerShell 5.1 下会把无 BOM 的
-    # UTF-8 当成 ANSI，中文全变乱码，'总判定' 匹配不到 -> $verdict 为空 -> 假 FAIL。
-    # 2026-11-04 实测：delivery-gate.log 里明写「总判定 : PASS」，本脚本却记成 FAIL。
-    $gateLogPath = Join-Path $logs 'delivery-gate.log'
-    $verdict = '（日志里没有总判定行）'
-    if (Test-Path $gateLogPath) {
-        $gateText = [IO.File]::ReadAllText($gateLogPath, [Text.Encoding]::UTF8)
-        if ($gateText -match '总判定\s*[:：]\s*(PASS|FAIL)') { $verdict = '总判定 ' + $Matches[1] }
+    if ($gateRc -eq 0) {
+        Record '交付门禁' 'PASS' 'rc=0（三道闸门全绿，详 logs\delivery-gate.log）'
+    } else {
+        $tail = @()
+        if (Test-Path $gateLogPath) {
+            $tail = (Get-Content $gateLogPath -Encoding UTF8 -ErrorAction SilentlyContinue | Select-Object -Last 6)
+        }
+        Record '交付门禁' 'FAIL' ("rc=$gateRc BuildRoot=$gateBuildRoot 尾部：" + ($tail -join ' | '))
     }
-    if ($gateRc -eq 0 -and $verdict -match 'PASS') { Record '交付门禁' 'PASS' $verdict }
-    else { Record '交付门禁' 'FAIL' "rc=$gateRc $verdict (BuildRoot=$gateBuildRoot)" }
 }
 }
 

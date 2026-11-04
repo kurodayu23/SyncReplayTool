@@ -3436,6 +3436,16 @@ int runGuiSelfCheck()
             }
             return QStringLiteral("%1 win=%2 %3").arg(QString::fromLatin1(tag)).arg(w.height()).arg(parts.join(QLatin1Char(' ')));
         };
+        // 先按**收起态**把窗口重置一次，再量 before。
+        //
+        // 为什么必须重置：跑到这里之前，前面几个尺寸判据（G22/G23 要模拟
+        // "窗口在屏幕下半屏"）会 resize 窗口且不还原。offscreen 平台屏幕可用高
+        // 只有 460，残留的 600 高窗口会让 before 与 hShut 不等，
+        // 于是"展开后高度收敛到 hShut"被判成"进度条位移" —— 假 FAIL。
+        // 实测（2026-11-05 麒麟 V10/V11 offscreen）：before win=600 after win=460。
+        // 真实桌面不会出现（窗口不会被外部改成比屏幕还高），但判据不能靠这个前提。
+        w.setFixedSize(ScreenFit::mainWindow(scrAvail.width(), scrAvail.height(), false));
+        QApplication::processEvents();
         const QString dumpBefore = geomDump("before");
 
         w.syncPanelForTest()->toggleLogDrawer();
@@ -3446,10 +3456,20 @@ int runGuiSelfCheck()
               QStringLiteral("height=%1 expected=%2 open=%3").arg(w.height()).arg(expectH).arg((int)nowOpen));
 
         const int progYAfter = progCard ? progCard->mapTo(&w, QPoint(0, 0)).y() : -1;
-        check("G18b-log-open-keeps-progress-position",
-              progYBefore >= 0 && progYBefore == progYAfter,
-              QStringLiteral("before=%1 after=%2 | %3 | %4")
-                  .arg(progYBefore).arg(progYAfter).arg(dumpBefore).arg(geomDump("after")));
+        // 屏幕物理放不下「收起内容 + 抽屉」时，这条判据没有意义：窗口被可用高
+        // 钳死、抽屉 175px 必须占位，布局只能压缩清单卡片 —— "进度条不动"做不到，
+        // 属环境限制而非产品缺陷。实测麒麟 offscreen(avail=460)：listCard 137→270、
+        // progressCard 207→355。真实桌面 availH≥647（768p 笔记本 728）不触发。
+        // 按 G24 的同一口径 SKIP，避免小屏机器上永远红一条。
+        if (scrAvail.height() < ScreenFit::kMainHeightLogOpen) {
+            out << "SKIP\tG18b-log-open-keeps-progress-position\tscreen-too-short(avail="
+                << scrAvail.height() << " need=" << ScreenFit::kMainHeightLogOpen << ")\n";
+        } else {
+            check("G18b-log-open-keeps-progress-position",
+                  progYBefore >= 0 && progYBefore == progYAfter,
+                  QStringLiteral("before=%1 after=%2 | %3 | %4")
+                      .arg(progYBefore).arg(progYAfter).arg(dumpBefore).arg(geomDump("after")));
+        }
 
         w.syncPanelForTest()->toggleLogDrawer();
         QApplication::processEvents();

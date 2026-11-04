@@ -83,10 +83,19 @@ const int kMargin = 40;
 // 主界面尺寸。logOpen = 日志抽屉是否展开。
 inline QSize mainWindow(int availW, int availH, bool logOpen)
 {
-    const int wantH = logOpen ? kMainHeightLogOpen : kMainHeight;
+    // 收起态高度（屏幕放不下时按可用高收敛）。
+    const int hShut = qMax(kMainHeightMin, qMin(kMainHeight, availH));
+    // 展开态：目标 kMainHeightLogOpen，但**绝不能比收起态更矮**。
+    //
+    // 为什么：屏幕可用高小于展开目标时（麒麟 offscreen 实测 600），按 min() 收出来
+    // 的展开高度会**小于**收起高度 —— 用户点「展开日志」，窗口反而缩小、
+    // 清单卡片被拉长、进度条整体下移（实测 600→460，进度条 302→349）。
+    // 这正是客户反馈的「点日志后进度条位置变了、拉伸太明显」在小屏上的表现。
+    // 展开≥收起之后，这类屏幕上点日志就只是"抽屉盖在低部"，位置不动。
+    const int hOpen = qMax(hShut,
+                           qMax(kMainHeightMin, qMin(kMainHeightLogOpen, availH)));
     const int w = qMax(kMainWidthMin,  qMin(kMainWidth,  availW));
-    const int h = qMax(kMainHeightMin, qMin(wantH,       availH));
-    return QSize(w, h);
+    return QSize(w, logOpen ? hOpen : hShut);
 }
 
 // 设置弹窗尺寸。
