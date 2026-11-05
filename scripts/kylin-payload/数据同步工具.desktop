@@ -10,7 +10,11 @@ Exec=sh "%k/run.sh"
 Path=%k
 Icon=system-file-share
 Terminal=false
-Categories=Network;FileTransfer;Utility;
+# Categories 只能是「一个主分类 + 若干附加分类」。
+# 原来写的是 Network;FileTransfer;Utility; —— Network 和 Utility **都是主分类**，
+# 放两个主分类不符合 freedesktop 规范，部分桌面环境会因此把图标归错类或不显示。
+# 现在：主分类 Network（网络工具），附加分类 FileTransfer（文件传输）。
+Categories=Network;FileTransfer;
 
 # =====================================================================
 # 开机自动启动用的那一份，**不是**上面这个。
@@ -35,7 +39,7 @@ Categories=Network;FileTransfer;Utility;
 #   Icon=system-file-share
 #   Terminal=false
 #   X-GNOME-Autostart-enabled=true
-#   Categories=Network;FileTransfer;Utility;
+#   Categories=Network;FileTransfer;
 #
 # 要点：
 #   · Exec 指向 **sh run.sh**，不是裸二进制。裸二进制缺 LD_LIBRARY_PATH /

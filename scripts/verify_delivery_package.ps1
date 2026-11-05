@@ -70,8 +70,33 @@ if (-not $SrcRoot) {
 }
 $SrcRoot = (Resolve-Path -LiteralPath $SrcRoot).Path
 
-if (-not $ZipPath) { $ZipPath = Join-Path $PackageDir '数据同步工具-Windows-x64.zip' }
-if (-not $TarPath) { $TarPath = Join-Path $PackageDir '数据同步工具-麒麟.tar.gz' }
+# =============================================================================
+# 版本号（唯一真源 = src/AppVersion.h）
+# =============================================================================
+#
+# 包名与包内顶层目录名都带版本号（2026-11-05 交付包审计 D5/D8/D9）：
+#   · 文件名带版本 + 架构 → 5 个同名包二进制各不相同的问题从**名字**上就分开了；
+#   · zip 内有顶层目录 → 解压出来是一个干净的文件夹，不是一堆文件平铺。
+# 这里的口径必须与 package-delivery.ps1 完全一致，所以两边都从同一个头文件读。
+$SrtVersion = ''
+$SrtVersionTag = ''
+$vhPath = Join-Path $SrcRoot 'src\AppVersion.h'
+if (Test-Path -LiteralPath $vhPath) {
+    $vhText = [System.IO.File]::ReadAllText($vhPath, [System.Text.Encoding]::UTF8)
+    $mv = [regex]::Match($vhText, '#define\s+SRT_VERSION_STRING\s+"([^"]+)"')
+    if ($mv.Success) { $SrtVersion = $mv.Groups[1].Value }
+    $mt = [regex]::Match($vhText, '#define\s+SRT_VERSION_TAG\s+"([^"]+)"')
+    if ($mt.Success) { $SrtVersionTag = $mt.Groups[1].Value }
+}
+if (-not $SrtVersionTag) { $SrtVersionTag = 'v' + $SrtVersion }
+
+$WinPkgName   = "数据同步工具-Windows-x64-$SrtVersionTag"
+$KylinPkgName = "数据同步工具-麒麟-x86_64-$SrtVersionTag"
+
+if (-not $ZipPath) { $ZipPath = Join-Path $PackageDir "$WinPkgName.zip" }
+if (-not $TarPath) { $TarPath = Join-Path $PackageDir "$KylinPkgName.tar.gz" }
+# zip 内的顶层目录名（条目前缀）
+$WinRootPrefix = "$WinPkgName/"
 
 $DeliverRoot = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool'
 $TrashCmd    = 'C:\Users\jss18\.minimax\bin\mavis-trash.cmd'
@@ -212,17 +237,24 @@ Say ''
 Say '--- 闸门一：时间戳（Windows zip，逐个文件比） ---'
 
 # 源文件映射：zip 条目名 -> 磁盘上的源文件
+#
+# 注意：条目名带**顶层目录前缀**（"<包名>/xxx"），对照源文件前必须先剥掉前缀 ——
+# 否则每个条目都会被判成"源里找不到对应文件"。
 function Resolve-WinSource {
     param([string]$Entry)
-    if ($Entry -eq 'SyncReplayTool.exe') { return (Join-Path $BuildRoot 'release\SyncReplayTool.exe') }
+    $rel = $Entry
+    if ($WinRootPrefix -and $rel.StartsWith($WinRootPrefix)) {
+        $rel = $rel.Substring($WinRootPrefix.Length)
+    }
+    if ($rel -eq 'SyncReplayTool.exe') { return (Join-Path $BuildRoot 'release\SyncReplayTool.exe') }
     # ⚠ 手册已不在包里（2026-10-25 客户要求「包里不要文档」）⇒ 这里不再需要它的源对照。
-    if ($Entry -eq '使用步骤与注意事项.md') { return $null }
-    if ($Entry -eq 'qt.conf') { return (Join-Path $PayloadDir 'qt.conf') }
-    $p = Join-Path $RuntimeDir ($Entry -replace '/', '\')
+    if ($rel -eq '使用步骤与注意事项.md') { return $null }
+    if ($rel -eq 'qt.conf') { return (Join-Path $PayloadDir 'qt.conf') }
+    $p = Join-Path $RuntimeDir ($rel -replace '/', '\')
     if (Test-Path -LiteralPath $p) { return $p }
     foreach ($fb in $FallbackRuntimeDirs) {
         if (-not $fb) { continue }
-        $cand = Join-Path $fb ($Entry -replace '/', '\')
+        $cand = Join-Path $fb ($rel -replace '/', '\')
         if (Test-Path -LiteralPath $cand) { return $cand }
     }
     return $p
@@ -259,7 +291,7 @@ try {
         $entrySha = ''
         $srcSha = ''
         $note = ''
-        if ($IntentionallyModified.ContainsKey($e.FullName)) {
+        if ($IntentionallyModified.ContainsKey(($e.FullName -replace ('^' + [regex]::Escape($WinRootPrefix)), ''))) {
             # 打包脚本**有意**改过的文件（例如启动器归一化）：内容本来就与源不同，
             # 不能拿源做 sha256 对账 —— 改成**内容断言**：
             #   启动器必须指向包内唯一存在的 SyncReplayTool.exe，
@@ -337,8 +369,8 @@ $exeOut = Join-Path $verifyWin 'SyncReplayTool.exe'
 
 $zip2 = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
 try {
-    $entry = $zip2.Entries | Where-Object { $_.FullName -eq 'SyncReplayTool.exe' } | Select-Object -First 1
-    if (-not $entry) { throw 'zip 里没有 SyncReplayTool.exe' }
+    $entry = $zip2.Entries | Where-Object { $_.FullName -eq "$WinRootPrefix`SyncReplayTool.exe" } | Select-Object -First 1
+    if (-not $entry) { throw "zip 里没有 $WinRootPrefix`SyncReplayTool.exe" }
     $ins = $entry.Open()
     try {
         $outs = [System.IO.File]::Create($exeOut)
@@ -356,6 +388,50 @@ Say ("   包内 exe sha256 : {0}" -f $pkgExeSha)
 if ($buildSha) {
     Say ("   编译产物 sha256: {0}   -> {1}" -f $buildSha, $(if ($exeMatch) { '一致' } else { '不一致' }))
 }
+
+# ---- 闸门二·补：版本标识（2026-11-05 交付包审计 D5）----
+#
+# 交付包必须能让人一眼看出是哪个版本：
+#   ① **整个 zip 解压出来**，跑包里的 exe --version；
+#      它必须报出与 src/AppVersion.h 同一个版本号。
+#   ② 版本号还必须出现在**包名**里 —— 5 个同名包二进制各不相同的那个问题，
+#      就是从"名字分不开"开始的。
+#
+# 为什么非要真的解压跑一遍：只比 sha256 只能证明"包里那份 = 编译那份"，
+# 证明不了"客户拿到手能看懂这是哪一版"。而客户问的第一句永远是"我这是最新版吗"。
+$gateVer = [ordered]@{ expected = $SrtVersion; reported = ''; ok = $false; extracted = '' }
+if ($SrtVersion) {
+    $pkgExtract = Join-Path $verifyWin 'pkg'
+    try {
+        Remove-Recyclable @($pkgExtract)
+        New-Item -ItemType Directory -Force -Path $pkgExtract | Out-Null
+        $z = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+        try {
+            foreach ($en in $z.Entries) {
+                if ($en.Name -eq '') { continue }
+                $dest = Join-Path $pkgExtract ($en.FullName -replace '/', '\')
+                $ddir = Split-Path -Parent $dest
+                if (-not (Test-Path -LiteralPath $ddir)) { New-Item -ItemType Directory -Force -Path $ddir | Out-Null }
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($en, $dest, $true)
+            }
+        } finally { $z.Dispose() }
+        $exeInPkg = Join-Path $pkgExtract "$WinPkgName\SyncReplayTool.exe"
+        $gateVer.extracted = $exeInPkg
+        if (Test-Path -LiteralPath $exeInPkg) {
+            $vout = & $exeInPkg --version 2>&1 | Out-String
+            $gateVer.reported = $vout.Trim()
+            $gateVer.ok = $vout.Contains($SrtVersion)
+        }
+    } catch {
+        $gateVer.reported = "解压或运行 --version 失败：$($_.Exception.Message)"
+    }
+}
+if ($gateVer.ok) {
+    Say ("   版本标识   : 通过（包内 exe --version -> {0}）" -f $gateVer.reported) -ForegroundColor Green
+} else {
+    Say ("   版本标识   : FAIL（期望含 {0}，实际 '{1}'）" -f $gateVer.expected, $gateVer.reported) -ForegroundColor Red
+}
+$report.gates.version = $gateVer
 
 # 复用现成闸门 verify_binary_strings.py（时间戳 + 文案，一条命令两个判据）
 $gateTool = Join-Path $SrcRoot 'scripts\verify_binary_strings.py'
@@ -400,7 +476,8 @@ $gate3Win = [ordered]@{ missing = @(); probe_hits = @(); must_have = @(); forbid
 try {
     $names = @($zip3.Entries | ForEach-Object { $_.FullName })
     foreach ($m in $WinMustHave) {
-        $hit = @($names | Where-Object { $_ -eq $m })
+        # 条目名带顶层目录前缀（"<包名>/xxx"）
+        $hit = @($names | Where-Object { $_ -eq "$WinRootPrefix$m" })
         $gate3Win.must_have += [ordered]@{ path = $m; present = ($hit.Count -gt 0) }
         if ($hit.Count -eq 0) { $gate3Win.missing += $m }
     }

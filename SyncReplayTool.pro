@@ -40,6 +40,7 @@ win32-msvc*: QMAKE_LFLAGS += /MANIFEST:NO
 
 SOURCES += \
     src/main.cpp \
+    src/ConsoleOutput.cpp \
     src/ConfigStore.cpp \
     src/SecretStore.cpp \
     src/FileScanner.cpp \
@@ -56,6 +57,8 @@ SOURCES += \
 
 HEADERS += \
     src/Model.h \
+    src/AppVersion.h \
+    src/ConsoleOutput.h \
     src/ConfigStore.h \
     src/SecretStore.h \
     src/FileScanner.h \

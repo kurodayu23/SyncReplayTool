@@ -125,6 +125,37 @@ $DeliverRoot = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool'
 $TrashCmd    = 'C:\Users\jss18\.minimax\bin\mavis-trash.cmd'
 
 # =============================================================================
+# 0.1 版本号（唯一真源 = src/AppVersion.h）
+# =============================================================================
+#
+# 为什么必须带版本（2026-11-05 交付包审计 D5）：
+#   交付包里没有任何版本标识，而 5 个**名字完全一样**的交付包里装的是
+#   二进制各不相同的 exe —— 客户/运维拿到手不知道自己拿的是哪一版，
+#   报问题时说不出版本号，也无法比对"是不是同一个包"。
+#
+# 版本号只写在 src/AppVersion.h 一处；打包脚本从那里读，
+# 程序 --version 打的是同一个值（不会对不上）。
+$VersionHeader = Join-Path $ProjectRoot 'src\AppVersion.h'
+if (-not (Test-Path -LiteralPath $VersionHeader)) {
+    throw "找不到版本头文件：$VersionHeader"
+}
+$vhText = [System.IO.File]::ReadAllText($VersionHeader, [System.Text.Encoding]::UTF8)
+$mVer = [regex]::Match($vhText, '#define\s+SRT_VERSION_STRING\s+"([^"]+)"')
+if (-not $mVer.Success) { throw "src\AppVersion.h 里找不到 SRT_VERSION_STRING" }
+$SrtVersion = $mVer.Groups[1].Value
+$mTag = [regex]::Match($vhText, '#define\s+SRT_VERSION_TAG\s+"([^"]+)"')
+$SrtVersionTag = $(if ($mTag.Success) { $mTag.Groups[1].Value } else { 'v' + $SrtVersion })
+Write-Host "== 版本：$SrtVersion（$SrtVersionTag）"
+
+# 包名里的架构：
+#   Windows -> x64
+#   麒麟   -> x86_64（麒麟官方架构名，不是 amd64）
+# 原来麒麟包叫「数据同步工具-麒麟.tar.gz」，**看不出架构** ——
+# 客户拿了 ARM 机器的包才发现装不上（而麒麟有 ARM 版，名字一样必然拿错）。
+$WinPkgName  = "数据同步工具-Windows-x64-$SrtVersionTag"
+$KylinPkgName = "数据同步工具-麒麟-x86_64-$SrtVersionTag"
+
+# =============================================================================
 # 0. 常量：白名单 / 排除名单 / 受保护目录
 # =============================================================================
 
@@ -241,7 +272,12 @@ function Test-IsUnder {
 function New-DeterministicZip {
     param(
         [Parameter(Mandatory)][string]$SourceDir,
-        [Parameter(Mandatory)][string]$DestZip
+        [Parameter(Mandatory)][string]$DestZip,
+        # 顶层目录名。给了就在每个条目名前面加 "<RootPrefix>/"。
+        # 为什么要有（2026-11-05 交付包审计 D9）：平铺的 zip 解压出来
+        # 一堆文件直接躺在「下载」目录里，混在客户自己的文件中间。
+        # 带一个顶层目录后，解压出来是一个干净的文件夹。
+        [string]$RootPrefix = ''
     )
     if (Test-Path -LiteralPath $DestZip) { Remove-Recyclable @($DestZip) }
     $srcLen = (Get-NormalizedPath $SourceDir).Length + 1
@@ -255,6 +291,7 @@ function New-DeterministicZip {
         try {
             foreach ($f in $files) {
                 $rel = $f.FullName.Substring($srcLen).Replace('\', '/')
+                if ($RootPrefix) { $rel = "$RootPrefix/$rel" }
                 $entry = $zip.CreateEntry($rel, [System.IO.Compression.CompressionLevel]::Optimal)
                 $entry.LastWriteTime = [System.DateTimeOffset]::new($f.LastWriteTime)
                 $es = $entry.Open()
@@ -381,7 +418,7 @@ Write-Host ("   最新源文件 : {0}  {1}" -f $newestSrc.LastWriteTime.ToString
 # =============================================================================
 
 $WinStage = Join-Path $WorkRoot 'win-stage'
-$WinZip   = Join-Path $OutDir '数据同步工具-Windows-x64.zip'
+$WinZip   = Join-Path $OutDir "$WinPkgName.zip"
 $kStage   = ''
 $binStage = ''
 
@@ -510,10 +547,11 @@ if (-not $SkipWinZip) {
     # 3.7 打 zip
     # ------------------------------------------------------------------
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-    $entryCount = New-DeterministicZip -SourceDir $WinStage -DestZip $WinZip
+    $entryCount = New-DeterministicZip -SourceDir $WinStage -DestZip $WinZip -RootPrefix $WinPkgName
     $script:ZipEntries = $entryCount
     $script:StagedFiles = @(Get-ChildItem -LiteralPath $WinStage -Recurse -File).Count
     Write-Host ("   zip 条目数  : {0}" -f $entryCount)
+    Write-Host ("   zip 顶层目录: {0}/" -f $WinPkgName)
     Write-Host ("   zip 大小    : {0} 字节" -f (Get-Item -LiteralPath $WinZip).Length)
 }
 
@@ -521,7 +559,7 @@ if (-not $SkipWinZip) {
 # 4. 麒麟 tar.gz（必须在 Linux 容器里打）
 # =============================================================================
 
-$TarPath = Join-Path $OutDir '数据同步工具-麒麟.tar.gz'
+$TarPath = Join-Path $OutDir "$KylinPkgName.tar.gz"
 $ContainerScript = Join-Path $ProjectRoot 'scripts\package-kylin-container.sh'
 
 if (-not $SkipKylinTar) {
@@ -531,9 +569,9 @@ if (-not $SkipKylinTar) {
     # 基础包缺失时自愈：用本地已有的最新一版麒麟交付包当 base（内容等价 ——
     # pkg.sh 会覆盖 payload 与二进制，只留里面的 lib/ 与 plugins/ 运行时）。
     if (-not (Test-Path -LiteralPath $KylinBaseTar)) {
-        $alt = Get-ChildItem -LiteralPath (Split-Path -Parent $OutDir) -Filter '数据同步工具-麒麟.tar.gz' -Recurse -File -ErrorAction SilentlyContinue |
+        $alt = Get-ChildItem -LiteralPath (Split-Path -Parent $OutDir) -Filter '数据同步工具-麒麟*.tar.gz' -Recurse -File -ErrorAction SilentlyContinue |
                Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        if (-not $alt) { throw "缺少基础包：$KylinBaseTar（且在 $(Split-Path -Parent $OutDir) 下找不到可当 base 的 麒麟.tar.gz）" }
+        if (-not $alt) { throw "缺少基础包：$KylinBaseTar（且在 $(Split-Path -Parent $OutDir) 下找不到可当 base 的 麒麟*.tar.gz）" }
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $KylinBaseTar) | Out-Null
         Copy-Item -LiteralPath $alt.FullName -Destination $KylinBaseTar
         Write-Host "   [自愈] 基础包缺失，已用上一版交付包补：$($alt.FullName)" -ForegroundColor Yellow
@@ -586,7 +624,7 @@ if (-not $SkipKylinTar) {
     #     文件系统里，再用 `docker cp` 拷回宿主 —— 这也顺带保证了
     #     "不会污染/覆盖正式包目录"。
     #     容器命令行保持纯 ASCII：中文根目录名走 base64 传进去。
-    $rootNameB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes('数据同步工具-麒麟'))
+    $rootNameB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($KylinPkgName))
 
     Write-Host "   容器内组装 ...（$ContainerName，端口 $ContainerPort）"
     $pkgCmd = "/pkg.sh --binary /build/SyncReplayTool --base-tar /stage/base.tar.gz " +
@@ -663,6 +701,62 @@ foreach ($a in $artifacts) {
 }
 
 # =============================================================================
+# 5.1 版本说明 + 校验值清单（**放在包外**，不放进包里）
+# =============================================================================
+#
+# 为什么放包外（2026-11-05 交付包审计 D5）：
+#   ① 客户 2026-10-25 明确要求「交付包里不要文档」——
+#      pkg.sh 的文档闸门会把包里任何 .md/.txt/.pdf 挡下来（这是客户的要求，不改）。
+#   ② 但"手上这一份是哪个版本"必须有地方能查 —— 这不是文档，是**交付元数据**。
+#   两者不冲突：元数据与包**并列**放在同一个交付目录里，
+#   客户拿到的是「zip + tar + 一张校验清单」，包里依然只有工具本体。
+#
+# 清单里写什么：版本号、架构、每个产物的 sha256、包内主程序的 sha256、
+# 源码提交号 —— 客服拿到客户机器上的 sha256 就能确认是不是同一版。
+$ManifestPath = Join-Path $OutDir "数据同步工具-$SrtVersionTag-版本与校验值.txt"
+$gitCommit = '未知'
+try {
+    $gitCommit = (& git -C $ProjectRoot rev-parse --short HEAD 2>$null | Select-Object -First 1)
+    if (-not $gitCommit) { $gitCommit = '未知' }
+} catch { $gitCommit = '未知' }
+$manifestLines = @(
+    '数据同步工具  版本与校验值',
+    ''
+    "版本号        : $SrtVersion（$SrtVersionTag）"
+    "打包时间      : $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))"
+    "源码提交      : $gitCommit"
+    "Windows 架构  : x64"
+    "麒麟   架构   : x86_64"
+    ''
+    '【交付产物】'
+)
+foreach ($a in $artifacts) {
+    $manifestLines += ("  {0}" -f $a.Name)
+    $manifestLines += ("    字节数 : {0}" -f $a.Bytes)
+    $manifestLines += ("    sha256 : {0}" -f $a.Sha256)
+}
+$manifestLines += ''
+$manifestLines += '【包内主程序】'
+if ($ExePath -and (Test-Path -LiteralPath $ExePath)) {
+    $manifestLines += ("  Windows SyncReplayTool.exe")
+    $manifestLines += ("    sha256 : {0}" -f (Get-FileHash -LiteralPath $ExePath -Algorithm SHA256).Hash)
+}
+if ($KylinBinary -and (Test-Path -LiteralPath $KylinBinary)) {
+    $manifestLines += ("  麒麟   SyncReplayTool")
+    $manifestLines += ("    sha256 : {0}" -f (Get-FileHash -LiteralPath $KylinBinary -Algorithm SHA256).Hash)
+}
+$manifestLines += ''
+$manifestLines += '【怎么确认自己这一份】'
+$manifestLines += '  Windows：命令行执行  SyncReplayTool.exe --version'
+$manifestLines += '  麒麟  ：命令行执行  ./SyncReplayTool --version'
+$manifestLines += '  两处显示的版本号应与本文件第一行的版本号一致。'
+$manifestLines += '  若不一致，说明手上的包不是同一版，请重新取包。'
+$manifestText = ($manifestLines -join "`r`n") + "`r`n"
+[System.IO.File]::WriteAllText($ManifestPath, $manifestText, (New-Object System.Text.UTF8Encoding($true)))
+Write-Host ''
+Write-Host ("   版本与校验值清单: {0}" -f $ManifestPath) -ForegroundColor Cyan
+
+# =============================================================================
 # 6. 清理（临时文件不留）
 # =============================================================================
 
@@ -683,6 +777,8 @@ Write-Host '下一步：跑 verify_delivery_package.ps1 做三道机械闸门。
 
 $jsonReport = [ordered]@{
     generated_at = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    version      = $SrtVersion
+    version_tag  = $SrtVersionTag
     build_root   = $BuildRoot
     out_dir      = $OutDir
     runtime_dir  = $RuntimeDir
@@ -699,6 +795,7 @@ $jsonReport = [ordered]@{
     }
     windows = [ordered]@{
         zip             = $WinZip
+        root_prefix     = $WinPkgName
         entries         = $script:ZipEntries
         staged_files    = $script:StagedFiles
         excluded_names  = $ExcludedExeNames
@@ -707,10 +804,12 @@ $jsonReport = [ordered]@{
     }
     kylin = [ordered]@{
         tar       = $TarPath
+        root_name = $KylinPkgName
         base_tar  = $KylinBaseTar
         binary    = $KylinBinary
         markers   = $script:KylinMarkers
     }
+    manifest  = $ManifestPath
     artifacts = @($script:ArtifactList)
 }
 # 注意：局部变量不能叫 $json —— PowerShell 变量名大小写不敏感，

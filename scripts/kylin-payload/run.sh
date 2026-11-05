@@ -11,6 +11,63 @@
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 
+# =====================================================================
+# 完整性检查：这个包是不是**被 Windows 解压过**？
+#
+# 为什么必须查（2026-11-05 实测，不是推测）：
+#   客户拿到 .tar.gz，最自然的动作是"拷到 Windows 上双击解压"，或者直接用
+#   Windows 自带的 tar.exe 解压。**那样必坏，而且坏得看不出原因**：
+#     ① lib/ 里 27 个符号链接（libQt5Core.so.5 -> libQt5Core.so.5.9.6）
+#        Windows 解不出来 —— tar.exe 直接报
+#          "Can't create '...libQt5Core.so.5': Invalid argument"，
+#        27 个 soname 链接**全部消失**。动态链接器随后去找 soname
+#        "libQt5Core.so.5"，包里已经没有这个文件 ⇒ 程序起不来。
+#     ② 中文文件名（自检.sh / 安装.sh / 安装自启.sh / 数据同步工具.desktop）
+#        与包根目录名一起变成乱码（UTF-8 被当 GBK 读）：
+#          自检.sh   -> 鑷.sh
+#          安装.sh   -> 瀹夎.sh
+#          包根目录  -> 鏁版嵁鍚屾宸ュ叿-楹掗簾
+#        ⇒ 自检脚本找不到、桌面图标装不上。
+#   客户看到的是"软件打不开 + 一句看不懂的英文错误"，
+#   完全想不到是自己解压方式不对 —— 这个坑只有一次机会踩，客户一试就废了。
+#
+# 所以这里主动拦下来，并且把正确做法说清楚。
+# =====================================================================
+_srt_link_broken=0
+_srt_name_broken=0
+# soname 链接必须在（它是程序能不能起来的决定条件）
+[ -e "$HERE/lib/libQt5Core.so.5" ] || _srt_link_broken=1
+# 中文文件名必须在（决定自检/安装/桌面图标能不能用）
+[ -e "$HERE/自检.sh" ] || _srt_name_broken=1
+
+if [ "$_srt_link_broken" -eq 1 ]; then
+    echo "✗ 这个安装包是用 Windows 解压过的，已经损坏，不能用。"
+    echo
+    echo "  原因：包里的运行库用了符号链接（lib/libQt5Core.so.5 -> libQt5Core.so.5.9.6），"
+    echo "        Windows 解压时解不出来，包里就少了这些文件 —— 程序必然起不来。"
+    echo
+    echo "  正确做法（**不要在 Windows 上解压**）："
+    echo "    1) 用 U 盘 / scp / 共享目录，把这个 .tar.gz **原文件**拷到麒麟机器上；"
+    echo "    2) 在麒麟上执行："
+    echo "           tar -xzf 数据同步工具-麒麟.tar.gz"
+    echo "    3) 进到解压出来的目录里运行："
+    echo "           sh run.sh"
+    echo
+    echo "  已经解压错了也不要紧：把上面第 1 步的 .tar.gz 原文件拷过去重新解压即可。"
+    echo
+    exit 1
+fi
+
+if [ "$_srt_name_broken" -eq 1 ]; then
+    echo "⚠ 警告：包里的中文文件名已经乱码（自检.sh 找不到）。"
+    echo "  通常也是被 Windows 解压过。程序本身还能启动，但："
+    echo "    · 自检脚本（自检.sh）跑不了；"
+    echo "    · 桌面图标（数据同步工具.desktop）装不上。"
+    echo "  建议：把 .tar.gz 原文件拷到麒麟上重新解压（tar -xzf ...）。"
+    echo
+fi
+unset _srt_link_broken _srt_name_broken
+
 # 文件名编码。Qt 用**当前 locale 的字符集**解码文件名，所以会话是 POSIX/C 时，
 # 每一个非 ASCII 字节都会变成 U+FFFD。
 #

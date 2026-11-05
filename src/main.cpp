@@ -40,6 +40,8 @@
 #include "ToolColumnDelegate.h"
 #include "ToolRunner.h"
 #include "SettingsDialog.h"
+#include "AppVersion.h"
+#include "ConsoleOutput.h"
 
 // ------------------------------------------------------------------
 // --selfcheck：不开窗口，把归因判据和看门狗预算跑一遍，输出 PASS/FAIL。
@@ -4269,6 +4271,7 @@ int main(int argc, char *argv[])
 
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("SyncReplayTool"));
+    app.setApplicationVersion(QString::fromLatin1(SRT_VERSION_STRING));
     app.setOrganizationName(QStringLiteral("AP"));
 
     // FileItem 要跨线程从扫描线程传回界面线程。没注册元类型的话
@@ -4316,6 +4319,8 @@ int main(int argc, char *argv[])
     const QCommandLineOption optSecretCheck(QStringLiteral("selfcheck-secrets"),
         QStringLiteral("Run real syncs and verify no plaintext password file is left behind."),
         QStringLiteral("rounds"));
+    const QCommandLineOption optVersion(QStringLiteral("version"),
+        QStringLiteral("Print version information and exit."));
     parser.addOption(optSkip);
     parser.addOption(optSplashMs);
     parser.addOption(optShot);
@@ -4323,6 +4328,7 @@ int main(int argc, char *argv[])
     parser.addOption(optSelfCheck);
     parser.addOption(optGuiCheck);
     parser.addOption(optSecretCheck);
+    parser.addOption(optVersion);
     // 「--help」必须能用：客户机上的运维第一反应就是敲 --help 看用法。
     //
     // 原来建了 parser 却**从未调 addHelpOption()**，于是 --help 被当成未知选项
@@ -4340,13 +4346,36 @@ int main(int argc, char *argv[])
     if (!parser.parse(QCoreApplication::arguments())) {
         const QByteArray err = parser.errorText().toUtf8();
         const QByteArray help = parser.helpText().toUtf8();
-        fprintf(stderr, "%s\n", err.constData());
-        fprintf(stdout, "%s\n", help.constData());
+        writeConsoleText(stderr, err + "\n");
+        writeConsoleText(stdout, help + "\n");
         return 2;
     }
     if (parser.isSet(QStringLiteral("help"))) {
         const QByteArray help = parser.helpText().toUtf8();
-        fprintf(stdout, "%s\n", help.constData());
+        writeConsoleText(stdout, help + "\n");
+        return 0;
+    }
+
+    // ----------------------------------------------------------------
+    // --version
+    //
+    // 为什么必须有（2026-11-05 交付包审计 D5）：
+    //   交付包里没有任何版本标识，5 个同名交付包的二进制各不相同，
+    //   客户/运维拿到手不知道自己拿的是哪一版 —— 报问题时说不出版本，
+    //   也无法比对"是不是同一个包"。
+    //
+    // 这里打的版本号来自 src/AppVersion.h（**唯一真源**），
+    // 与交付包文件名、包内 版本信息.txt 是同一个值。
+    // ----------------------------------------------------------------
+    if (parser.isSet(optVersion)) {
+        QByteArray v = "SyncReplayTool ";
+        v += SRT_VERSION_STRING;
+        v += " (";
+        v += SRT_VERSION_TAG;
+        v += ", build ";
+        v += __DATE__;
+        v += ")\n";
+        writeConsoleText(stdout, v);
         return 0;
     }
 
@@ -4373,9 +4402,8 @@ int main(int argc, char *argv[])
     // 脚本把参数写错了却"成功"，这种比报错难查得多。
     // 未知选项的行为本来就是对的，这里补的是位置参数这一半。
     if (!parser.positionalArguments().isEmpty()) {
-        QTextStream err(stderr);
-        err << "Unknown argument(s): " << parser.positionalArguments().join(' ') << "\n";
-        err.flush();
+        writeConsoleText(stderr,
+            ("Unknown argument(s): " + parser.positionalArguments().join(' ') + "\n").toUtf8());
         return 2;
     }
 

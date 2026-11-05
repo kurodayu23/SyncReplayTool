@@ -73,7 +73,8 @@ Path=$HERE
 Icon=system-file-share
 Terminal=false
 X-GNOME-Autostart-enabled=true
-Categories=Network;FileTransfer;Utility;
+# 与包里的 .desktop 保持同一口径：主分类只有一个（Network），其余是附加分类。
+Categories=Network;FileTransfer;
 EOF
     if [ ! -f "$AUTOSTART_FILE" ]; then
         echo "写自启文件失败：$AUTOSTART_FILE"
