@@ -567,10 +567,17 @@ bool pathLooksCorrupted(const QString &p)
 //   3) 用 notice() 说清楚发生了什么、备份在哪、要做什么。
 // 归一化：把 ini 的原始字节变成"QSettings 能一字不差读出来"的 UTF-8 字节。
 // 返回空 QByteArray = 不需要改（正常文件一个字节都不许碰）。
-static QByteArray normalizedIniBytes(const QByteArray &raw, QString *reason)
+//
+// blocked（可选出参）：被填上时表示"**这份字节解不了，所以一个字节都不许改**"。
+//   调用方据此发提示（而不是默默跳过）——
+//   默默跳过的话，客户会以为配置没问题，其实中文值在界面上是乱码。
+static QByteArray normalizedIniBytes(const QByteArray &raw, QString *reason,
+                                     QString *blocked = nullptr)
 {
     if (reason)
         reason->clear();
+    if (blocked)
+        blocked->clear();
     if (raw.isEmpty())
         return QByteArray();
 
@@ -582,10 +589,77 @@ static QByteArray normalizedIniBytes(const QByteArray &raw, QString *reason)
     } else if (!isValidUtf8Bytes(raw)) {
         // 不是合法 UTF-8 ⇒ 按**本机代码页**解（中文 Windows 是 GBK/CP936）。
         // 这一条以前没有：GBK 的中文值会被解成 U+FFFD 并写回磁盘（静默毁配置）。
-        QTextCodec *c = QTextCodec::codecForLocale();
-        normalized = c ? c->toUnicode(raw).toUtf8() : raw;
-        why = QString::fromUtf8(u8"非 UTF-8 编码")
-              + (c ? QString::fromLatin1(c->name()) : QString());
+        //
+        // ★ 但"只用本机代码页"在国产 Linux 上是错的（2026-11-05 麒麟容器实测）：
+        //   麒麟/UOS 的 locale 通常是 UTF-8，用 UTF-8 解 GBK 字节
+        //   ⇒ 每两个字节变一个 U+FFFD ⇒ 客户的中文账号被解成乱码**并写回磁盘**。
+        //   而且界面上**一句提示都没有** —— 键名全是 ASCII，看起来"没事"，
+        //   值已经全毁了（这与本文件开头 A 条说的完全同一类问题）。
+        //
+        //   所以顺序是：**先本机代码页，解不干净再退 GB18030**（GBK 的超集）。
+        //     1) 本机代码页能干净解出来 ⇒ 用它（这台机器自己存的文件）；
+        //     2) 本机代码页解出来带 U+FFFD ⇒ 换 GB18030 再试
+        //        （文件是从别的 locale 拿来的，最典型的就是 Windows 上存成 GBK 的配置）；
+        //     3) 两边都解不干净 ⇒ **一个字节都不许改**（见下面的 blocked）。
+        //
+        // ★ 第 3 条在国产 Linux 上是常态而不是边角（2026-11-05 麒麟容器实测）：
+        //   Qt5 在 Linux 上把 GBK/GB18030 解码器放在**单独的插件**里
+        //   （libqcodecs.so），而交付包里**没有这个插件**
+        //   （`QTextCodec::codecForName("GBK")` 直接返回 null，实测确认）。
+        //   ⇒ 麒麟上遇到 GBK 配置，本机代码页（UTF-8）解不干净、GB18030 也没有
+        //   ⇒ 以前那版会"带替换符地写回去"，**把客户的中文账号毁成乱码**。
+        //   现在这种情况**保持原文件一个字节不动**，并明确告诉客户该怎么处理。
+        QTextCodec *loc = QTextCodec::codecForLocale();
+        QTextCodec *gb  = QTextCodec::codecForName("GB18030");
+        QTextCodec *used = nullptr;
+        QString decoded;
+        //
+        // ★ 判"解对了"**不能只看 ConverterState::invalidChars**（2026-11-05 麒麟容器实测）：
+        //   麒麟的 locale 是 UTF-8，用它解 GBK 字节 ⇒ 每个非法字节变成 U+FFFD，
+        //   而 invalidChars 仍然是 **0**（不报）⇒ 程序以为"解干净了"，
+        //   把一串 U+FFFD 当成正文写回磁盘 —— 客户的中文账号当场变成乱码，
+        //   而界面上一个提示都没有（键名全是 ASCII，看着"没事"）。
+        //   实测落盘字节：757365723d65666266626465666266... = "user=" + 一串 efbfbd。
+        //
+        //   ⇒ 判据改成**双保险**：invalidChars == 0 **且** 解出来的串里没有 U+FFFD。
+        //   只有"没有替换符"才真的代表"每个字节都被正确解释了"。
+        if (loc) {
+            QTextCodec::ConverterState st;
+            const QString s = loc->toUnicode(raw.constData(), raw.size(), &st);
+            if (st.invalidChars == 0 && !s.contains(QChar(0xFFFD))) {
+                used = loc;
+                decoded = s;
+            }
+        }
+        if (!used && gb && gb != loc) {
+            QTextCodec::ConverterState st;
+            const QString s = gb->toUnicode(raw.constData(), raw.size(), &st);
+            if (st.invalidChars == 0 && !s.contains(QChar(0xFFFD))) {
+                used = gb;
+                decoded = s;
+            }
+        }
+        if (used) {
+            normalized = decoded.toUtf8();
+            why = QString::fromUtf8(u8"非 UTF-8 编码")
+                  + QString::fromLatin1(used->name());
+        } else {
+            // 解不出来：这份字节既不是 UTF-8，本机也没有能解它的代码页。
+            //
+            // 绝不能"带替换符地写回去"（那等于把客户的中文值毁成 U+FFFD），
+            // 也绝不能默默跳过（客户会以为配置没问题，其实界面上是乱码）。
+            // ⇒ 保持原样 + 给一条能照着做的提示。
+            if (blocked) {
+                *blocked = QString::fromUtf8(
+                    u8"这份配置文件不是 UTF-8 编码，而且当前系统里没有能正确识别它的"
+                    u8"字符集（GBK/GB18030），程序**不会**改动它 —— 改动会把里面的"
+                    u8"中文变成乱码。\n"
+                    u8"请用记事本（或任何文本编辑器）打开它，另存为 **UTF-8** 编码，"
+                    u8"再重新打开本程序。\n"
+                    u8"原文件没有被修改，账号、密码、路径都还在。");
+            }
+            return QByteArray();
+        }
     } else {
         normalized = raw;
     }
@@ -670,7 +744,15 @@ bool ConfigStore::ensureConfigEncodingUsable(const QString &path, QString *backu
     f.close();
 
     QString reason;
-    const QByteArray normalized = normalizedIniBytes(raw, &reason);
+    QString blocked;
+    const QByteArray normalized = normalizedIniBytes(raw, &reason, &blocked);
+    if (!blocked.isEmpty()) {
+        // 解不出来 ⇒ 原文件**一个字节都不动**（改动会把中文毁成乱码）。
+        // 但必须说出来：默默跳过的话，客户看到的只是"中文乱码"，
+        // 根本不知道该把文件另存成 UTF-8。
+        notice(blocked);
+        return false;
+    }
     if (normalized.isEmpty())
         return false;                          // 正常文件：一个字节都不动
 

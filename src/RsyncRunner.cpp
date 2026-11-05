@@ -652,7 +652,7 @@ int classifyLayer(const QString &text)
 // 只留尾部：ssh / rsync 都是把最终原因打在最后一行，前面那些
 // "Warning: Permanently added ..." 之类的噪音会把真正有用的那行挤下去。
 // 每行再截一次长，避免一整段远端路径把日志撑变形。
-QString failureKeyLines(const QString &text, int maxLines = 3)
+QStringList failureKeyLinesList(const QString &text, int maxLines = 3)
 {
     QStringList keep;
     const QStringList lines = text.split(QLatin1Char('\n'));
@@ -674,7 +674,14 @@ QString failureKeyLines(const QString &text, int maxLines = 3)
     }
     while (keep.size() > maxLines)
         keep.removeFirst();
-    return keep.join(QStringLiteral(" / "));
+    return keep;
+}
+
+// 单行版：给"只能放一行"的地方用（设置弹窗那个标签、测试连接）。
+// 多行版给日志：客户要的是"英文原文一行一条"，拼成一行再被控件截断就看不清了。
+QString failureKeyLines(const QString &text, int maxLines = 3)
+{
+    return failureKeyLinesList(text, maxLines).join(QStringLiteral("  "));
 }
 
 // 给「测试网络连接」用的归因文案，压成一行。
@@ -1325,14 +1332,32 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer, const QS
     if (advice.isEmpty())
         advice = QString::fromUtf8(kLayerAdvice[layer]);
 
-    emit logText(QString::fromUtf8(u8"\u3010\u5F52\u56E0\u3011") + QString::fromUtf8(kLayerName[layer])
-                 + QString::fromUtf8(u8"\uFF1A") + QString::fromUtf8(kLayerMeaning[layer]));
-
+    // 日志层次（2026-11-05 客户反馈重排）：
+    //   ① 先给**原始英文报错**，原样不动 —— 客户能直接复制给技术支持；
+    //   ② 再给**一行中文**说明哪里出了问题（不堆【】（）标签，客户原话：
+    //      「符号和括号太多，看着很复杂」）；
+    //   ③ 最后给该怎么做。
+    // 原来是「归因 → 原始报错 → 说明」，且归因那行把【归因】【责任归属：xx】
+    // 和括号全堆在一行里。
     const QString keys = failureKeyLines(raw);
     if (!keys.isEmpty())
-        emit logText(QString::fromUtf8(u8"\u539F\u59CB\u62A5\u9519\uFF1A") + keys);
+        emit logText(keys);
 
-    emit logText(QString::fromUtf8(u8"\u8BF4\u660E\uFF1A") + advice);
+    emit logText(QString::fromUtf8(kLayerShort[layer]));
+
+    // kLayerMeaning 里带着【责任归属：xx】前缀 —— 对客户是噪音（他要的是
+    // "哪里出问题"一句话）。运行时剥掉前缀，只留后面那句人话，不用改那 7 条长转义串。
+    // 【 = U+3010, 】 = U+3011
+    {
+        QString meaning = QString::fromUtf8(kLayerMeaning[layer]);
+        const int rb = meaning.indexOf(QChar(0x3011));
+        if (rb > 0 && meaning.startsWith(QChar(0x3010)))
+            meaning = meaning.mid(rb + 1).trimmed();
+        if (!meaning.isEmpty())
+            emit logText(meaning);
+    }
+
+    emit logText(advice);
 }
 QString RsyncRunner::locateTool(const QString &name)
 {

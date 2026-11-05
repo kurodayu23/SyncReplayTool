@@ -1762,43 +1762,119 @@ int runSelfCheck()
     // ----------------------------------------------------------------
     {
         bool gbkOk = false, bslashOk = false, untouchedOk = false;
+        bool gbkChangedRpt = false, gbkValueRpt = false, gbkBackupRpt = false;  // 只用于把失败原因打出来
+        QString gbkModeRpt = QStringLiteral("?");                              // codec / nocodec
+        QByteArray gbkHexRpt;                                          // 落盘字节取证
         const QString savedDir = qgetenv("SRT_CONFIG_DIR");
         {
             QTemporaryDir box;
-            // ---- ① GBK：中文值必须一字不差地活下来 ----
-            QTextCodec *gbk = QTextCodec::codecForName("GBK");
-            if (gbk) {
-                const QString dir = box.path() + QStringLiteral("/gbk");
+            // ---- ① 非 UTF-8 的字节：能无损转码就转，转不了就一个字节都不许动 ----
+            //
+            // 两个**都必跑**的断言（平台差异只体现在第 1 条走不走）：
+            //
+            //  (1) 本机**有** GBK 解码器时（中文 Windows；麒麟容器里也有）：
+            //      造一份 GBK 的 ini ⇒ 中文值必须一字不差地活下来，
+            //      并且原文件要留备份（客户能回退）。
+            //
+            //  (2) **永远都跑**：造一份"谁都解不了"的字节 ⇒ 文件必须**一个字节都不动**。
+            //      这条锁的是"解不了就不许改"这条保证 ——
+            //      破了它，客户配置里的中文会被 U+FFFD 覆盖（实测落盘字节是
+            //      757365723d656662666264… = "user=" + 一串 efbfbd）。
+            //
+            //      用的字节是 0x81 0x30：0x81 在 GB18030 里是前导字节，
+            //      而 0x30 不是合法后继字节 ⇒ GBK/GB18030/CP936 全都解不出来；
+            //      在 UTF-8 里 0x81 本身就非法 ⇒ 也解不出来。
+            //      ⇒ 两个平台都必然落到"解不了"这一支。
+            //
+            // ★ 没有"跳过"这种选项：要么转对了，要么原样不动。
+            {
+                const QString dir = box.path() + QStringLiteral("/nonutf8");
                 QDir().mkpath(dir);
                 const QString iniPath = dir + QStringLiteral("/SyncReplayTool.ini");
+                QByteArray body;
+                body.append("[target]\r\nhost=10.0.0.9\r\nuser=");
+                body.append(static_cast<char>(0x81));
+                body.append(static_cast<char>(0x30));
+                body.append("\r\n");
                 {
                     QFile f(iniPath);
                     f.open(QIODevice::WriteOnly);
-                    f.write(gbk->fromUnicode(QString::fromUtf8(
-                        u8"[target]\r\nhost=10.0.0.9\r\nuser=\u4E2D\u6587\u7528\u6237\r\n")));
+                    f.write(body);
                     f.close();
                 }
-                QString backup;
-                const bool changed = ConfigStore::ensureConfigEncodingUsable(iniPath, &backup);
-                QString back;
-                {
-                    QSettings s(iniPath, QSettings::IniFormat);
-                    s.setIniCodec(QTextCodec::codecForName("UTF-8"));
-                    back = s.value(QStringLiteral("target/user")).toString();
+                // 这条只在"本机代码页真的可能解不出来"时才成立：
+                //   中文 Windows 的 CP936 是**来者不拒**的（任何字节序列都能解成
+                //   用户自定义字符，invalidChars 恒为 0、也没有 U+FFFD）
+                //   ⇒ "解不了"这个场景在 Windows 上**根本不可达**，测它没有意义；
+                //   国产 Linux 的 locale 是 UTF-8 ⇒ 非法字节必然解不出来
+                //   ⇒ 这条可达、必须成立。
+                // 不可达时**据实说明**（mode 里标出来），不假装测过、也不算失败。
+                QTextCodec *locProbe = QTextCodec::codecForLocale();
+                QTextCodec::ConverterState probeSt;
+                QString probeText;
+                if (locProbe)
+                    probeText = locProbe->toUnicode(body.constData(), body.size(), &probeSt);
+                const bool unreachable = locProbe
+                                     && probeSt.invalidChars == 0
+                                     && !probeText.contains(QChar(0xFFFD));
+                if (unreachable) {
+                    gbkModeRpt = QStringLiteral("nocodec-unreachable");
+                    // 这一支在本平台**不可达**（本机代码页什么都解得出来），
+                    // 所以它既不构成失败、也不能被后面的 GBK 往返连坐。
+                    gbkOk = true;
+                } else {
+                    QString backup;
+                    const bool changed = ConfigStore::ensureConfigEncodingUsable(iniPath, &backup);
+                    QByteArray after;
+                    {
+                        QFile f(iniPath);
+                        f.open(QIODevice::ReadOnly);
+                        after = f.readAll();
+                        f.close();
+                    }
+                    const bool untouchedBad = !changed && (after == body) && backup.isEmpty();
+                    gbkChangedRpt = changed;
+                    gbkValueRpt = untouchedBad;
+                    gbkBackupRpt = backup.isEmpty();
+                    gbkOk = untouchedBad;
+                    gbkModeRpt = QStringLiteral("nocodec");
                 }
-                // GBK 归一化只在 Windows 上有意义：Windows 客户的 ini 可能是记事本
-                // 存成 GBK 的；麒麟/Linux 侧配置文件本来就是 UTF-8，
-                // ensureConfigEncodingUsable() 不会（也不该）改动它 ⇒ changed=false。
-                // 判据缺平台条件时，麒麟版会永远红一条（2026-11-05 实测 FAIL gbk=0）。
-#ifdef Q_OS_WIN
-                gbkOk = changed
-                        && (back == QString::fromUtf8(u8"\u4E2D\u6587\u7528\u6237"))
-                        && !backup.isEmpty() && QFile::exists(backup);
-#else
-                // 非 Windows：不适用。只要求"没有把文件弄坏"（不该改就别改）。
-                Q_UNUSED(back);
-                gbkOk = !changed;
-#endif
+            }
+            {
+                QTextCodec *gbk = QTextCodec::codecForName("GBK");
+                if (gbk) {
+                    const QString dir = box.path() + QStringLiteral("/gbk");
+                    QDir().mkpath(dir);
+                    const QString iniPath = dir + QStringLiteral("/SyncReplayTool.ini");
+                    {
+                        QFile f(iniPath);
+                        f.open(QIODevice::WriteOnly);
+                        f.write(gbk->fromUnicode(QString::fromUtf8(
+                            u8"[target]\r\nhost=10.0.0.9\r\nuser=\u4E2D\u6587\u7528\u6237\r\n")));
+                        f.close();
+                    }
+                    QString backup;
+                    const bool changed = ConfigStore::ensureConfigEncodingUsable(iniPath, &backup);
+                    QString back;
+                    {
+                        QSettings s(iniPath, QSettings::IniFormat);
+                        s.setIniCodec(QTextCodec::codecForName("UTF-8"));
+                        back = s.value(QStringLiteral("target/user")).toString();
+                    }
+                    const bool gbkValueOk = (back == QString::fromUtf8(u8"\u4E2D\u6587\u7528\u6237"));
+                    const bool gbkBackupOk = !backup.isEmpty() && QFile::exists(backup);
+                    {
+                        QByteArray after;
+                        QFile f(iniPath);
+                        if (f.open(QIODevice::ReadOnly)) { after = f.readAll(); f.close(); }
+                        gbkHexRpt = after.left(60).toHex();
+                    }
+                    gbkChangedRpt = changed;
+                    gbkValueRpt = gbkValueOk;
+                    gbkBackupRpt = gbkBackupOk;
+                    gbkOk = gbkOk && changed && gbkValueOk && gbkBackupOk;
+                    gbkModeRpt = gbkModeRpt + QStringLiteral("+codec");
+                }
             }
             // ---- ② 单反斜杠 + 行尾续行：host 必须还在，本机目录必须完整 ----
             {
@@ -1858,8 +1934,9 @@ int runSelfCheck()
         if (!ok)
             ++bad;
         out << (ok ? "PASS\t" : "FAIL\t") << "config-ini-lossless-normalize"
-            << "\tgbk=" << (gbkOk ? 1 : 0) << " bslash=" << (bslashOk ? 1 : 0)
-            << " untouched=" << (untouchedOk ? 1 : 0) << "\n";
+            << "\tgbk=" << (gbkOk ? 1 : 0) << " changed=" << (gbkChangedRpt ? 1 : 0) << " valueOk=" << (gbkValueRpt ? 1 : 0) << " backupOk=" << (gbkBackupRpt ? 1 : 0) << " bslash=" << (bslashOk ? 1 : 0)
+            << " untouched=" << (untouchedOk ? 1 : 0)
+            << " mode=" << gbkModeRpt << " hex=" << QString::fromLatin1(gbkHexRpt.toHex()) << "\n";
     }
 
     // ----------------------------------------------------------------
