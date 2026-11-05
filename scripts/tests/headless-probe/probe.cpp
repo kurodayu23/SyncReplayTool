@@ -104,6 +104,7 @@ int main(int argc, char *argv[])
     const int doneBefore = panel->syncFinishedCountForTest();
     int ticks = 0;
     bool scanned = false;
+    bool seenScanning = false;
     int syncStartTick = -1;
     bool cancelSent = false;
 
@@ -112,7 +113,14 @@ int main(int argc, char *argv[])
     QObject::connect(timer, &QTimer::timeout, [&, timer]() {
         ++ticks;
         if (!scanned) {
-            if (!panel->isScanningForTest() && panel->fileCountForTest() > 0) {
+            // 判"扫描结束"不能要求 fileCount > 0：空目录时文件数恒为 0，
+            // 原写法会让"扫描完成"永不成立，只能等 --timeout（默认 300 秒）才报
+            // PROBE_FAIL scan-timeout —— 实测 20 秒不退出，被误判成"产品在空目录上挂死"。
+            // 产品本身正常（isScanningForTest() 会从 true 正常变回 false）。
+            // 正确判据：先看到过 scanning=true，再看它变回 false；另留 2 tick 兜底防极快扫描。
+            if (panel->isScanningForTest())
+                seenScanning = true;
+            if ((seenScanning || ticks >= 2) && !panel->isScanningForTest()) {
                 scanned = true;
                 QStringList rules;
                 const QVector<SyncRule> rs = panel->syncRulesForTest();
