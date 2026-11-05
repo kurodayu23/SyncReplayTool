@@ -35,6 +35,13 @@ grep 必然零命中，**无论坏字在不在**（判据恒为绿，没有鉴�
 按**词组**判、不按单字判：时 / 拉 / 杂 本身都是常用字（超时、实时、拉、杂志），
 按单字判会把一大片正常文案全报成坏字 —— 那是噪音，不是判据。
 
+第五个检查（分组序号）
+----------------------
+launchNext() 启动的是 m_groups.at(m_groupIndex) 这一组。
+"跳过当前组"的早退分支必须先 ++m_groupIndex，否则同一组被无限重跑
+（界面永远停在「同步中」，自动同步被永久挡住）。
+判据见 scan_group_index()，不变量与豁免标记写在源码注释里。
+
 用法
 ----
     python scripts/scan_no_cjk_qstringliteral.py            # 扫 src/
@@ -294,6 +301,72 @@ def scan_broken_ucn(root):
     return hits
 
 
+def scan_group_index(root):
+    """第 5 条检查：RsyncRunner.cpp 里"跳过当前组"的跳转必须推进组号。
+
+    背景（2026-11-05，两个 P0）：
+    launchNext() 启动的是 m_groups.at(m_groupIndex) 这一组。
+    凡是"跳过当前组"的早退分支，只写 launchNext(); return; 而**漏了
+    ++m_groupIndex**，组号不动 = 把同一组再跑一遍 —— 于是同一组被无限重跑：
+      · 界面永远停在「同步中」，客户看不到任何报错，只觉得程序卡死；
+      · m_roundActive 永不为 false ⇒ 自动同步被永久挡住（恢复网络也不管用）；
+      · 实测可达每秒 3 次 rsync 重启，持续 5 分 55 秒不停。
+
+    为什么用源码检查而不是运行时判据：
+    这类缺陷的触发条件是"建目录那步失败、而这一组 rsync 仍然成功"，
+    复现它要一个"部分目录不可写"的远端 + 90 秒超时，
+    塞进 --selfcheck 会让门禁每次都跑满 90 秒，还不稳定。
+    而"早退分支必须推进组号"是**纯控制流不变量**，静态就能判死。
+
+    规则：
+      每个 launchNext(); 调用点必须二选一：
+        (a) **同一个代码块内**（向上找，遇到块边界就停）出现过 ++m_groupIndex;
+            → 跳过当前组（正确）
+        (b) 前 12 行内有【一轮级跳转】标记      → 整轮级跳转（不是跳过当前组）
+      其余一律违规。
+    """
+    hits = []
+    target = os.path.join(root, "RsyncRunner.cpp")
+    if not os.path.isfile(target):
+        return hits
+    with io.open(target, encoding="utf-8", errors="replace") as f:
+        lines = f.read().split("\n")
+
+    call_re = re.compile(r'^\s*launchNext\(\);\s*(//.*)?$')
+    # 标记词必须唯一：说明性文字里如果也出现同样的字样，会让"删掉标记"的
+    # 反向验证失真（标记还在，判据照样绿）。所以用带后缀的这一串。
+    marker = "【一轮级跳转·非跳过当前组】"
+
+    def same_block_has_advance(idx):
+        """从 idx-1 往上找，++m_groupIndex 是否与这一句在同一个代码块内。"""
+        for j in range(idx - 1, max(-1, idx - 40), -1):
+            t = lines[j].strip()
+            if "++m_groupIndex;" in lines[j]:
+                return True
+            if not t or t.startswith("//"):
+                continue                      # 空行/注释不算块边界
+            if t.endswith("{") or t == "}" or "return" in t:
+                return False                 # 离开当前块 / 换了控制路径
+        return False
+
+    for i, line in enumerate(lines):
+        if not call_re.match(line):
+            continue
+        if same_block_has_advance(i):
+            continue                        # (a) 跳过当前组
+        window = "\n".join(lines[max(0, i - 12):i])
+        if marker in window:
+            continue                        # (b) 整轮级跳转
+        prev = ""
+        for j in range(i - 1, max(-1, i - 6), -1):
+            t = lines[j].strip()
+            if t and not t.startswith("//"):
+                prev = t
+                break
+        hits.append((target, i + 1, line.strip(), prev or "(无)"))
+    return hits
+
+
 def main():
     root = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
@@ -350,7 +423,21 @@ def main():
     else:
         print("OK：%s 下没有「被截断的 \\uXXXX / \\UXXXXXXXX」" % root)
 
-    return 1 if (hits or bad or u8hits or ucn) else 0
+    grp = scan_group_index(root)
+    if grp:
+        print()
+        print("FAIL：发现 %d 处「跳过当前组却没推进组号」" % len(grp))
+        for p, ln, s, prev in grp:
+            print("  %s:%d  %s   （上一条代码：%s）" % (p, ln, s, prev))
+        print()
+        print("改法：跳过当前组时先 ++m_groupIndex; 再 launchNext();")
+        print("      整轮级跳转（不是跳过当前组）必须带【一轮级跳转】标记注释。")
+        print("      漏了组号 = 同一组被无限重跑（实测：界面永远「同步中」、")
+        print("      自动同步被永久挡住），静态看不出来，只能靠这一条拦。")
+    else:
+        print("OK：%s 下每个 launchNext() 都是「跳过当前组」或「一轮级跳转」" % root)
+
+    return 1 if (hits or bad or u8hits or ucn or grp) else 0
 
 
 if __name__ == "__main__":

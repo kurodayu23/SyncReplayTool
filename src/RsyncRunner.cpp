@@ -3016,6 +3016,15 @@ void RsyncRunner::ensureRemoteDirs()
 
     const QString sshBin = locateTool(QStringLiteral("ssh"));
     if (sshBin.isEmpty() || (dirs.isEmpty() && !needHomeRoot)) {
+        // 【一轮级跳转·非跳过当前组】整轮建目录这步整段跳过，
+        // 接下来要跑的是**第一组**，组号本来就该是 0。
+        //
+        // 这里**不能**加 ++m_groupIndex —— 加了就把第一组跳过去了，
+        // 一轮文件一个都不传、界面却显示"同步完成"。
+        //
+        // 判据：scripts/scan_no_cjk_qstringliteral.py 的第 5 条检查
+        // 会核对每个 launchNext() 是"跳过当前组"（同块内带 ++m_groupIndex）
+        // 还是整轮级跳转（必须带本行这个标记）。
         launchNext();
         return;
     }
@@ -3145,6 +3154,11 @@ void RsyncRunner::onDirsFinished(int exitCode, QProcess::ExitStatus status)
 
     m_proc->deleteLater();
     m_proc = nullptr;
+    // 【一轮级跳转·非跳过当前组】建目录这步做完，接下来要跑的是
+    // **当前这一组**的 rsync，组号本来就还没动。
+    //
+    // 这里**不能**加 ++m_groupIndex —— 加了就等于跳过这一组，
+    // 这一组的文件一个都不传、界面却显示"同步完成"。
     launchNext();
 }
 
@@ -3162,6 +3176,23 @@ void RsyncRunner::onDirsFinished(int exitCode, QProcess::ExitStatus status)
 // 或 ssh 本身失败）一律放行，不能因为核对手段失效就把正常同步判成失败。
 void RsyncRunner::verifyRemoteDir(const QString &remoteDir)
 {
+    // ★ 本函数里**每一个早退分支都必须先 ++m_groupIndex 再 launchNext()**。
+    //
+    // 为什么：launchNext() 启动的是 m_groups.at(m_groupIndex) 这一组，
+    // 序号不动 = 把**同一组再跑一遍**（rsync 重传、进度条从 0 重新开始）。
+    // 命中早退分支时这一组已经传完了，于是它会被无限重跑 ——
+    // 界面永远停在「同步中」，客户看不到任何报错，只会觉得程序卡死。
+    //
+    // 实测（2026-11-05，本机真容器 + 真 rsync）：远端有两条规则，
+    // 第一条指向可写目录、第二条指向不可写目录 ⇒ 建目录那步写标记失败
+    // （退出码非 0）⇒ 标记被清空；可第一组的 rsync 仍然成功
+    // ⇒ 走到"标记为空"这条早退 ⇒ 旧代码没推进序号 ⇒ 第一组被反复重跑，
+    // 90 秒内 allFinished 一直不来，日志里 "→ 目录 (N 个文件)" 重复刷屏。
+    // 加了 ++m_groupIndex 之后，同一场景 3 秒内正常结束，该行只出现一次。
+    //
+    // 这条规矩不是"约定"而是**硬约束**：新增早退分支时忘了推进序号，
+    // 症状是"同步卡住不动"，静态看不出来，只能靠这一处注释提醒。
+    //
     // 这个远端目录本轮已经核对过了：直接跳过。
     //
     // 标记核对用的是 "cat marker; rm -f marker"，读完即删。而分组只按后缀去重、
@@ -3270,8 +3301,8 @@ void RsyncRunner::onVerifyFinished(int exitCode, QProcess::ExitStatus status)
 
     m_proc->deleteLater();
     m_proc = nullptr;
-        ++m_groupIndex;
-        launchNext();
+    ++m_groupIndex;
+    launchNext();
 }
 
 // 收尾清理的**唯一次序来源**：先远端标记、后口令文件。
@@ -4204,8 +4235,8 @@ void RsyncRunner::onFinished(int exitCode, QProcess::ExitStatus status)
         return;
     }
 
-        ++m_groupIndex;
-        launchNext();
+    ++m_groupIndex;
+    launchNext();
 }
 
 void RsyncRunner::cancel()
