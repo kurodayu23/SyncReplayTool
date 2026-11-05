@@ -1134,6 +1134,21 @@ bool SyncPanel::isBenignLauncherExit(int exitCode, const QByteArray &stderrTail)
 {
     if (exitCode == 0)
         return false;
+    // ★ 退出码必须是启动器型工具的**已知良性码**（xdg-open / gio open = 3）。
+    //
+    // 为什么加这一条（2026-11-05 实测，squadD 抓到的）：
+    //   原来只判"stderr 里有没有 GLib 串"，于是**任何**工具只要碰巧打了
+    //   那句断言就一律降级成黄色 WARN —— 真失败被报成"良性"。
+    //   实测同一个 exit 1：stderr 里有没有 GLib 串，判定在红 ERR 与黄 WARN
+    //   之间来回翻转，而且还取决于 stderr 尾部 8 KB 窗口里有没有那串字
+    //   （GLib 串被 20 KB 噪声挤出窗口后，判定又翻回红色）——
+    //   同一个失败，结论随工具输出内容变化，这比不判更糟。
+    //
+    // 限定成"退出码 == 3"之后：
+    //   · xdg-open / gio open 的良性场景仍然判 WARN（实测退出码就是 3）；
+    //   · 其它退出码一律红 ERR ⇒ 真失败不会再被"洗白"。
+    if (exitCode != kBenignLauncherExitCode)
+        return false;
     static const char *kBenignMarkers[] = {
         "GLib-GObject-CRITICAL",
         "g_object_get_data",
@@ -1178,6 +1193,29 @@ void SyncPanel::launchToolForRow(int row, int toolIndex)
     const qint64 last = m_toolLaunchAtMs.value(row, -1);
     if (last >= 0 && (now - last) < launchDebounceMs()) {
         ++m_toolDebounceSuppressed;
+        return;
+    }
+
+    // ---- 已在运行检测（2026-11-05）----
+    //
+    // 实测：工具挂住时再点一次同一个按钮，会**再起一个副本**，
+    // 两个进程同时跑；界面全程没有"已在运行"的提示，也没有停止入口。
+    // 防抖只挡 500 ms 内的连点，挡不住"挂住之后再点"（那已经是几秒之后了）。
+    //
+    // 只按"行 + 第几个工具"判，不按工具名判 ——
+    // 同一个工具打开**不同**文件是正当的并行场景，按名字拦会误伤。
+    const QString runKey = QString::number(row) + QLatin1Char(':') + QString::number(toolIndex);
+    for (int i = 0; i < m_toolProcs.size(); ++i) {
+        QProcess *q = m_toolProcs.at(i);
+        if (!q || q->state() == QProcess::NotRunning)
+            continue;
+        if (m_toolKeys.value(q) != runKey)
+            continue;
+        ++m_toolAlreadyRunning;
+        appendLogLine(QStringLiteral("WARN"),
+                      QObject::tr("\xE5\xB7\xA5\xE5\x85\xB7 [%1] \xE5\xB7\xB2\xE5\x9C\xA8\xE8\xBF\x90\xE8\xA1\x8C\xEF\xBC\x8C\xE6\x9C\xAA\xE9\x87\x8D\xE5\xA4\x8D\xE5\x90\xAF\xE5\x8A\xA8")
+                          .arg(name), 3);
+        setStatusLine(QObject::tr("\xE5\xB7\xA5\xE5\x85\xB7 [%1] \xE5\xB7\xB2\xE5\x9C\xA8\xE8\xBF\x90\xE8\xA1\x8C").arg(name), 3);
         return;
     }
 
@@ -1236,6 +1274,7 @@ void SyncPanel::launchToolForRow(int row, int toolIndex)
     p->setProcessChannelMode(QProcess::SeparateChannels);
     m_toolNames.insert(p, name);
     m_toolStderr.insert(p, QByteArray());
+    m_toolKeys.insert(p, runKey);
     m_toolProcs.append(p);
     ++m_toolLaunchAttempts;
 
@@ -1245,6 +1284,10 @@ void SyncPanel::launchToolForRow(int row, int toolIndex)
             this, SLOT(onToolError(QProcess::ProcessError)));
     connect(p, SIGNAL(readyReadStandardError()),
             this, SLOT(onToolStderrReady()));
+    // stdout 之前**根本没连** —— 工具往 stdout 写的字节被 Qt 直接丢弃（2026-11-05 实测：
+    // 工具灌 200 KB stdout，产品 stderr 里 0 字节）。现在收下来，进日志抽屉。
+    connect(p, SIGNAL(readyReadStandardOutput()),
+            this, SLOT(onToolStdoutReady()));
 
     p->start();
     appendLogLine(QStringLiteral("SYNC"),
@@ -1264,6 +1307,11 @@ void SyncPanel::onToolStderrReady()
     fwrite(chunk.constData(), 1, static_cast<size_t>(chunk.size()), stderr);
     fflush(stderr);
 
+    // ★ 也写进「同步日志」抽屉（2026-11-05）。
+    // 以前只 fwrite 回本进程 stderr，而产品是 GUI 子系统、客户从桌面双击启动，
+    // 那个 stderr **无处可去** —— 实测工具的报错原文在界面上一个字都看不到。
+    appendToolOutput(p, chunk, "stderr");
+
     // 只留尾部。判据只看尾部那几行特征串，整段留着没有用处，
     // 而一个会往 stderr 刷几万行的工具能把内存吃干净。
     QByteArray &tail = m_toolStderr[p];
@@ -1271,6 +1319,56 @@ void SyncPanel::onToolStderrReady()
     const int kKeep = 8192;
     if (tail.size() > kKeep)
         tail = tail.right(kKeep);
+}
+
+void SyncPanel::onToolStdoutReady()
+{
+    QProcess *p = qobject_cast<QProcess *>(sender());
+    if (!p)
+        return;
+    const QByteArray chunk = p->readAllStandardOutput();
+    if (chunk.isEmpty())
+        return;
+    appendToolOutput(p, chunk, "stdout");
+}
+
+// 工具输出进「同步日志」抽屉。
+//
+// 为什么限长（2026-11-05）：实测有工具往 stdout 灌 200 KB / 50 MB。
+// 全量进抽屉会瞬间占满 2000 行上限，把真正的同步记录挤出去 ——
+// 那等于用"看得见噪声"换"看不见要点"。
+//
+// 为什么按行拆：抽屉的记录单位是"一行 = 一条记录"（TAG + 正文），
+// 一次塞一整块会让徽标和正文糊在一起。
+void SyncPanel::appendToolOutput(QProcess *proc, const QByteArray &chunk, const char *stream)
+{
+    if (chunk.isEmpty())
+        return;
+    const QString name = m_toolNames.value(proc);
+    const int kMax = 2000;          // 单次写入上限（字符）
+    QByteArray data = chunk;
+    bool truncated = false;
+    if (data.size() > kMax) {
+        data = data.left(kMax);
+        truncated = true;
+    }
+    const QStringList lines = QString::fromUtf8(data).split(QLatin1Char('\n'));
+    int emitted = 0;
+    for (int i = 0; i < lines.size(); ++i) {
+        const QString ln = lines.at(i);
+        if (ln.trimmed().isEmpty())
+            continue;
+        if (emitted >= 200)          // 一块最多 200 行，别让一次输出刷屏
+            break;
+        appendLogLine(QStringLiteral("TOOL"),
+                      QObject::tr("[%1] %2").arg(name).arg(ln), 1);
+        ++emitted;
+    }
+    if (truncated) {
+        appendLogLine(QStringLiteral("TOOL"),
+                      QObject::tr("[%1] %2 \xE8\xBE\x93\xE5\x87\xBA\xE8\xBF\x87\xE9\x95\xBF\xEF\xBC\x8C\xE5\xB7\xB2\xE6\x88\xAA\xE6\x96\xAD")
+                        .arg(name).arg(QString::fromLatin1(stream)), 3);
+    }
 }
 
 void SyncPanel::onToolFinished(int exitCode, QProcess::ExitStatus status)
@@ -1288,9 +1386,12 @@ void SyncPanel::onToolFinished(int exitCode, QProcess::ExitStatus status)
     if (tailChunk.isEmpty() == false) {
         fwrite(tailChunk.constData(), 1, static_cast<size_t>(tailChunk.size()), stderr);
         fflush(stderr);
+        // 同样进抽屉（最后这一段往往正是真正的报错行）。
+        appendToolOutput(p, tailChunk, "stderr");
     }
     m_toolStderr.remove(p);
     m_toolNames.remove(p);
+    m_toolKeys.remove(p);
     m_toolProcs.removeAll(p);
     ++m_toolFinishedCount;
 
@@ -1322,8 +1423,16 @@ void SyncPanel::onToolError(QProcess::ProcessError)
     const QString name = m_toolNames.value(p);
     appendLogLine(QStringLiteral("ERR"),
                   QObject::tr("\xE5\xB7\xA5\xE5\x85\xB7 [%1] \xE8\xBF\x9B\xE7\xA8\x8B\xE5\x90\xAF\xE5\x8A\xA8\xE6\x88\x96\xE8\xBF\x90\xE8\xA1\x8C\xE6\x97\xB6\xE5\x87\xBA\xE9\x94\x99\xE3\x80\x82").arg(name), 4);
+    // ★ 状态行也要变（2026-11-05）。
+    // 以前只有日志抽屉里有一行 ERR，底栏状态行仍然显示「就绪」——
+    // 而预检失败那条路径是会变红的，两条路径不一致，客户看到的是
+    // "上面写着失败、下面写着就绪"，不知道该信哪个。
+    setStatusLine(QObject::tr("\xE5\xB7\xA5\xE5\x85\xB7 [%1] \xE5\x90\xAF\xE5\x8A\xA8\xE5\xA4\xB1\xE8\xB4\xA5").arg(name), 4);
+    if (!m_logOpen)
+        toggleLogDrawer();
     m_toolStderr.remove(p);
     m_toolNames.remove(p);
+    m_toolKeys.remove(p);
     m_toolProcs.removeAll(p);
     p->deleteLater();
 }
@@ -2823,6 +2932,7 @@ void SyncPanel::resetToolLaunchStateForTest()
     m_toolLaunchAtMs.clear();
     m_toolLaunchAttempts = 0;
     m_toolDebounceSuppressed = 0;
+    m_toolAlreadyRunning = 0;
     // m_toolFinishedCount 故意**不**清：判据要跨多次 reset 累计它来等进程结束，
     // 清了的话等待条件会从一个已经越过的数重新开始，直接空转。
 }

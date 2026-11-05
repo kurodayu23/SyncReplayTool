@@ -691,6 +691,49 @@ bool RsyncRunner::remoteRootEscapesHome(const QString &rawRemoteRoot)
     return ::subDirEscapesRoot(::remoteRootWithoutTilde(rawRemoteRoot));
 }
 
+// 远端根目录探测（2026-11-05）：mkdir -p 之前先问一句"这个目录本来在不在"。
+//
+// 为什么要有（实测）：客户把远端路径打错时，mkdir -p 会**照样把那个错路径建出来**，
+// rsync 照样传成功，界面照样报"同步完成" —— 数据传到了客户没打算传的地方，
+// 而界面上一个字提示都没有。实测：远端根填 /home/srtpw/srt-missing/deep，
+// 接收端被静默建出两级目录，零告警。
+//
+// 本版只**告警**不阻断：客户可能就是想自动建目录（这是 rsync 的天然行为，
+// 拦掉反而会打断某些工作流）。但"静默"必须变成"明确告知"。
+//
+// 命令形态：
+//     test -d '<root>' || echo 'SRT_MISSING_ROOT:<root>' >&2
+// · test 成功（目录本来就在）⇒ 不产生任何输出，行为与改之前完全一致；
+// · test 失败（目录不存在）⇒ 往 **stderr** 打一行标记。
+//   走 stderr 而不是 stdout：stdout 在这一段是"正常输出"，混进去会被
+//   归因逻辑当成远端的告警；而 stderr 只有出错时才有内容。
+// · 用 >&2 而不是 2>&1：标记必须落在 stderr 上，onDirsFinished 才抓得到。
+// · 退出码不受影响：echo 成功返回 0，而整条命令用 ';' 串接，
+//   最终退出码由后面的 mkdir/drops 决定 —— 目录不存在不会让这一步失败。
+QString RsyncRunner::buildRemoteRootProbe(const QString &root)
+{
+    if (root.isEmpty())
+        return QString();          // 远端根是 home 根（一定存在，不用问）
+    QString e = root;
+    e.replace(QLatin1Char('\''), QLatin1String("'\\''"));
+    return QStringLiteral("test -d '") + e + QLatin1Char('\'')
+         + QStringLiteral("' || echo 'SRT_MISSING_ROOT:") + e
+         + QStringLiteral("' >&2");
+}
+
+QString RsyncRunner::missingRootFromStderr(const QString &text)
+{
+    const QString tag = QStringLiteral("SRT_MISSING_ROOT:");
+    const int i = text.indexOf(tag);
+    if (i < 0)
+        return QString();
+    const int j = i + tag.size();
+    int eol = text.indexOf(QLatin1Char('\n'), j);
+    if (eol < 0)
+        eol = text.size();
+    return text.mid(j, eol - j).trimmed();
+}
+
 // classifyLayer 在上面的匿名命名空间里，没法从外部链进来。
 // --selfcheck 需要直接判一段原始报错，所以在这里开一个薄口。
 // 必须定义在匿名命名空间外面：命名空间内不能定义外部类的成员（MSVC 报 C2888）。
@@ -2827,8 +2870,20 @@ void RsyncRunner::ensureRemoteDirs()
     m_watchdog.start(watchdogMs());
 
     QStringList args = sshArgs(m_target, false);
+    // ★ 远端根目录探测（2026-11-05）：先问"这个目录本来在不在"，再 mkdir。
+    //   目录本来不在 ⇒ 远端往 stderr 打一行 SRT_MISSING_ROOT:<路径>，
+    //   界面据此**明确告警**（"目标目录原本不存在，已自动创建，请确认路径没写错"），
+    //   而不是让"路径打错 ⇒ 数据传到陌生目录"这件事静默过去。
+    //   根目录用 remoteDir(target, "") 拿 —— 与 mkdir 用的是同一套归一化，
+    //   不能自己再剥一次 "~"（那会变成两处实现，历史上出过错）。
+    QString rootOnly = remoteDir(m_target, QString());
+    if (rootOnly.startsWith(QLatin1Char('\x01')))
+        rootOnly.clear();        // "~user/xxx" 哨兵：start() 会先报错，这里不管
+    const QString probe = buildRemoteRootProbe(rootOnly);
+
     args << (m_target.user + QLatin1Char('@') + m_target.host)
-         << (QStringLiteral("mkdir -p -- ") + quoted.join(QLatin1Char(' '))
+         << ((probe.isEmpty() ? QString() : probe + QStringLiteral("; "))
+             + QStringLiteral("mkdir -p -- ") + quoted.join(QLatin1Char(' '))
              + QStringLiteral("; ") + drops.join(QStringLiteral("; ")));
     m_stderrTail.clear();
     m_failedNameHints.clear();
@@ -2845,6 +2900,29 @@ void RsyncRunner::onDirsFinished(int exitCode, QProcess::ExitStatus status)
     // readyReadStandardError 不保证在 finished 之前投递过，
     // 不补这一次读取，目录创建失败就只剩一句"退出码 255"没有原因。
     takeStderrTail();
+
+    // ------------------------------------------------------------------
+    // 远端根目录本来不存在 ⇒ 明确告警（2026-11-05）
+    //
+    // 实测：客户把远端路径打错时，mkdir -p 照样把那个错路径建出来，
+    // 传输"成功"，界面报"同步完成"，而数据落在了客户没打算传的地方。
+    // 这里把"静默成功"变成"明确告知"，但不阻断传输 ——
+    // 自动建目录本身是 rsync 的天然行为，客户可能就是靠它省事。
+    // ------------------------------------------------------------------
+    {
+        const QString missingRoot = missingRootFromStderr(m_stderrTail);
+        if (!missingRoot.isEmpty()) {
+            emit logText(QString::fromUtf8(u8"\u26A0 \u76EE\u6807\u76EE\u5F55\u539F\u672C\u4E0D\u5B58\u5728\uFF0C\u5DF2\u81EA\u52A8\u521B\u5EFA\uFF1A%1"
+                                         u8" \u2014\u2014 \u8BF7\u786E\u8BA4\u8DEF\u5F84\u6CA1\u5199\u9519"
+                                         u8"\uFF08\u591A\u4E00\u4E2A\u7A7A\u683C\u3001\u5C11\u4E00\u6BB5\u76EE\u5F55\uFF0C\u90FD\u4F1A\u4F20\u5230\u522B\u7684\u5730\u65B9\uFF09")
+                             .arg(missingRoot));
+            // 这行标记是我们自己塞的，不能混进下面的归因里 ——
+            // 归因只认真实报错特征串，这一行会让结论跑偏。
+            m_stderrTail.remove(QRegularExpression(
+                QStringLiteral("SRT_MISSING_ROOT:[^\\r\\n]*"),
+                QRegularExpression::MultilineOption));
+        }
+    }
 
     // **看门狗杀掉的情形要单独处理。**
     //

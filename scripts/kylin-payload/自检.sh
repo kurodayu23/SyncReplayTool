@@ -27,7 +27,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 # 文件名编码兜底（非 UTF-8 会话下中文名会全变成乱码方块）
 #
 # Qt 用**当前 locale 的字符集**解码文件名与插件路径。
-# 会话 locale 是 POSIX/C 时，本包目录名「数据同步工具-麒麟」里的每一个非 ASCII 字节
+# 会话 locale 是 POSIX/C 时，本包目录名「数据同步工具-麒麟-x86_64-v2.4」里的每一个非 ASCII 字节
 # 都会变成 U+FFFD，Qt 于是找不到 platforms/libqoffscreen.so，直接 abort(134)。
 #
 # 实测（同一份包，只改 locale 这一个变量）：

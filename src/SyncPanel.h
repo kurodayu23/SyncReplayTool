@@ -241,6 +241,12 @@ public:
     // 下面一行却写着 ERR"。判据要求：**只有** stderr 命中这组特征且退出码非 0
     // 才降级，其余非 0 仍然报 ERR。
     static bool isBenignLauncherExit(int exitCode, const QByteArray &stderrTail);
+    // 启动器型工具（xdg-open / gio open）的**已知良性退出码**。
+    // 实测（2026-10-18 麒麟实机）：xdg-open 打开文件成功、stderr 打 GLib 断言、
+    // 退出码 3。2026-11-05 收紧：良性判定不再只看 stderr 里有没有那串字，
+    // 退出码也必须落在这个集合里 —— 否则任何碰巧打了 GLib 串的工具
+    // 都会被降级成"良性"，真失败被报成良性。
+    enum { kBenignLauncherExitCode = 3 };
     static QString benignLauncherMessage(const QString &toolName, int exitCode);
 
     // 启动防抖窗口（毫秒）。同一行在这个窗口内的重复点击直接忽略。
@@ -256,6 +262,10 @@ public:
     int      toolDebounceSuppressedForTest() const { return m_toolDebounceSuppressed; }
     int      toolFinishedCountForTest() const { return m_toolFinishedCount; }
     int      runningToolCountForTest() const { return m_toolProcs.size(); }
+    // 被"已在运行"挡掉的次数（2026-11-05）。
+    // 实测：工具挂住时再点一次同一个按钮，会**再起一个副本**，
+    // 两个进程同时跑，界面全程没有提示，也没有停止入口。
+    int      toolAlreadyRunningForTest() const { return m_toolAlreadyRunning; }
     void     resetToolLaunchStateForTest();
     // 最近若干条日志，每条 "TAG\t正文"（TAG 是 ASCII，正文是原文）。
     // 判据要断言"这一行到底是 ERR 还是 WARN"，
@@ -311,6 +321,19 @@ private slots:
     // 因为启动器型工具的良性警告码只能从 stderr 认。
     // 收上来的内容原样转发到本进程的 stderr，一行都不少地还给用户。
     void onToolStderrReady();
+    // 工具的 stdout 也要收（2026-11-05）。
+    //
+    // 为什么以前不收：stdout 之前**根本没连** readyReadStandardOutput ——
+    // 工具往 stdout 写的每一个字节都被 Qt 直接丢弃。
+    // 而 stderr 虽然收了，却只 fwrite 回本进程 stderr，不进「同步日志」抽屉；
+    // 产品又是 GUI 子系统（PE subsystem=2）、全仓库没有 AttachConsole ⇒
+    // 客户从桌面双击启动时，这些字节**无处可去**。
+    // 实测：工具的报错原文（"real error: permission denied"）在界面上一个字都看不到。
+    void onToolStdoutReady();
+    // 把工具的一段输出写进「同步日志」抽屉（stdout / stderr 共用）。
+    // 单条限长：工具可能一次灌几百 KB，全进抽屉会把 2000 行上限瞬间占满，
+    // 把真正的同步记录挤掉 —— 那等于用"看得见噪声"换"看不见要点"。
+    void appendToolOutput(QProcess *proc, const QByteArray &chunk, const char *stream);
 
     void copyLog();
     void clearLog();
@@ -567,6 +590,10 @@ private:
     // 手动拉起工具的进程。独立拉起：不 waitForFinished，工具之间并行。
     QVector<QProcess *> m_toolProcs;
     QHash<QProcess *, QString> m_toolNames;
+    // 每个工具进程对应"哪一行、第几个工具"（形如 "12:0"）。
+    // 用来判"这个工具是不是已经在跑了" —— 只按名字判会误伤
+    // "同一个工具打开不同文件"这种正当并行场景。
+    QHash<QProcess *, QString> m_toolKeys;
     // 每个工具进程收到的 stderr 尾部。只用于判退出码的性质
     // （良性警告码 vs 真失败），不拿它当用户可见日志。
     QHash<QProcess *, QByteArray> m_toolStderr;
@@ -577,6 +604,7 @@ private:
     QHash<int, qint64>  m_toolLaunchAtMs;
     int                 m_toolLaunchAttempts = 0;      // 真正 start() 过的次数
     int                 m_toolDebounceSuppressed = 0; // 被防抖挡掉的次数
+    int                 m_toolAlreadyRunning = 0;    // 被"已在运行"挡掉的次数
     int                 m_toolFinishedCount = 0;      // 走到 finished 的次数
     // 日志的「TAG + 正文」流水（判据用），只留最近 500 条。
     QStringList         m_logRecords;

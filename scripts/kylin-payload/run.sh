@@ -49,7 +49,7 @@ if [ "$_srt_link_broken" -eq 1 ]; then
     echo "  正确做法（**不要在 Windows 上解压**）："
     echo "    1) 用 U 盘 / scp / 共享目录，把这个 .tar.gz **原文件**拷到麒麟机器上；"
     echo "    2) 在麒麟上执行："
-    echo "           tar -xzf 数据同步工具-麒麟.tar.gz"
+    echo "           tar -xzf 数据同步工具-麒麟-*.tar.gz"
     echo "    3) 进到解压出来的目录里运行："
     echo "           sh run.sh"
     echo

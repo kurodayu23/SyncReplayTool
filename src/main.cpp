@@ -184,7 +184,15 @@ const LayerCase kLayerCases[] = {
 // Linux 用 /bin/sh + 脚本 + shebang。所以两边的"程序"形态不同，
 // 但**语义**必须一样：同样的退出码、同样的 stderr 原文。
 static QString makeToolStub(const QString &dir, const QString &name, const QString &ext,
-                            const QString &stderrText, int exitCode)
+                            const QString &stderrText, int exitCode,
+                            // 2026-11-05 新增两个可选行为，用来给两条修复做判据：
+                            //   stdoutText —— 工具往 stdout 写的内容
+                            //                （实测：以前 stdout **根本没连**，
+                            //                  工具写的每一个字节都被丢弃）；
+                            //   sleepMs    —— 让工具挂住这么久
+                            //                （实测：工具挂住时再点一次按钮，
+                            //                  会再起一个副本，界面零提示）。
+                            const QString &stdoutText = QString(), int sleepMs = 0)
 {
     const QString path = dir + QLatin1Char('/') + name + ext;
     QFile f(path);
@@ -192,11 +200,22 @@ static QString makeToolStub(const QString &dir, const QString &name, const QStri
         return QString();
     #ifdef Q_OS_WIN
     f.write("@echo off\r\n");
+    if (sleepMs > 0) {
+        const int sec = sleepMs / 1000 + 1;
+        f.write(QString("ping -n %1 127.0.0.1 > nul\r\n").arg(sec).toLocal8Bit());
+    }
+    if (!stdoutText.isEmpty())
+        f.write(("echo " + stdoutText + "\r\n").toLocal8Bit());
     if (!stderrText.isEmpty())
         f.write(("echo " + stderrText + " 1>&2\r\n").toLocal8Bit());
     f.write(QString("exit /b %1\r\n").arg(exitCode).toLocal8Bit());
     #else
     f.write("#!/bin/sh\n");
+    if (sleepMs > 0)
+        f.write(QString("sleep %1\n").arg(sleepMs / 1000 + 1).toLocal8Bit());
+    if (!stdoutText.isEmpty())
+        f.write(("printf '%s\\n' " + QLatin1Char('"') + stdoutText + QLatin1Char('"')
+                 + "\n").toLocal8Bit());
     if (!stderrText.isEmpty())
         f.write(("printf '%s\\n' " + QLatin1Char('"') + stderrText + QLatin1Char('"')
                  + " 1>&2\n").toLocal8Bit());
@@ -2395,10 +2414,19 @@ int runSelfCheck()
             QThread::msleep(5);
         }
         const QStringList rec1 = panel.logRecordsForTest();
+        // ★ 不能用 last() 找那条 WARN（2026-11-05）：工具的输出现在也会进抽屉
+        //   （TOOL 记录），GLib 桩的 stderr 正好排在 WARN 前面 ⇒ last() 是 TOOL。
+        //   改成"找最后一条指定 TAG 的记录" —— 判据本意是"有没有那条 WARN"。
         QString tag1, body1;
-        if (!rec1.isEmpty()) {
-            const QStringList parts = rec1.last().split(QLatin1Char('\t'));
-            tag1 = parts.value(0); body1 = parts.value(1);
+        {
+            QString recW;
+            for (int i = rec1.size() - 1; i >= 0; --i) {
+                if (rec1.at(i).startsWith(QLatin1String("WARN\t"))) { recW = rec1.at(i); break; }
+            }
+            if (!recW.isEmpty()) {
+                const QStringList parts = recW.split(QLatin1Char('\t'));
+                tag1 = parts.value(0); body1 = parts.value(1);
+            }
         }
         // 良性 GLib 码必须是黄色 WARN 并带上退出码。
         // 文案只许陈述观测到的事实（非零退出码 + stderr 命中启动器特征串），
@@ -2456,9 +2484,81 @@ int runSelfCheck()
         // 正例：真机上 xdg-open 的原文
         const bool glibBenign = SyncPanel::isBenignLauncherExit(
             3, QByteArray("GLib-GObject-CRITICAL: g_object_get_data: assertion 'G_IS_OBJECT (object)' failed"));
+        // ★ 收紧后的反向锁（2026-11-05 D4）：
+        //   同一个 exit 1，stderr 里**恰好**含 GLib 串 ⇒ 必须仍然是红 ERR。
+        //   以前只判"stderr 里有没有那串字"，于是判定随工具输出内容在
+        //   红 ERR / 黄 WARN 之间来回翻转 —— 同一个失败，结论却会变。
+        const bool redOnGlibExit1 = !SyncPanel::isBenignLauncherExit(
+            1, QByteArray("GLib-GObject-CRITICAL: g_object_get_data: assertion 'G_IS_OBJECT (object)' failed"));
+
+        // ---- 场景 4（2026-11-05 D3）：工具的输出必须进「同步日志」抽屉 ----
+        //
+        // 实测：工具往 stdout 写 200 KB ⇒ 产品 stderr 里 **0 字节**
+        //（stdout 之前**根本没连** readyReadStandardOutput，Qt 直接丢弃）；
+        // 工具往 stderr 写 ⇒ 进了产品自己的 stderr，但**不进抽屉**，
+        // 而产品是 GUI 子系统、客户从桌面双击启动 ⇒ 那些字节无处可去，
+        // 界面上一个字都看不到（工具的报错原文也一样看不到）。
+        bool toolOutInLog = false;
+        {
+            const QString outExe = makeToolStub(stubDir, QStringLiteral("outtool"), QStringLiteral(".bat"),
+                                                QString(), 0, QStringLiteral("SRT_STDOUT_MARK_42"));
+            rule.toolArgs[0] = argsFor(outExe);
+            panel.setToolRulesForTest(QVector<ToolRule>() << rule);
+            panel.resetToolLaunchStateForTest();
+            const int beforeFin4 = panel.toolFinishedCountForTest();
+            panel.launchToolForTest(0, 0);
+            QElapsedTimer w4; w4.start();
+            while (panel.toolFinishedCountForTest() == beforeFin4 && w4.elapsed() < 8000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 40);
+                QThread::msleep(5);
+            }
+            const QStringList rec4 = panel.logRecordsForTest();
+            for (int i = 0; i < rec4.size(); ++i) {
+                if (rec4.at(i).startsWith(QLatin1String("TOOL\t"))
+                    && rec4.at(i).contains(QStringLiteral("SRT_STDOUT_MARK_42"))) {
+                    toolOutInLog = true;
+                    break;
+                }
+            }
+        }
+
+        // ---- 场景 5（2026-11-05 D1）：工具还挂着时再点一次，不许再起一个副本 ----
+        //
+        // 实测：工具挂住时再点一次同一个按钮 ⇒ **再起一个副本**，两个进程同时跑，
+        // 界面全程零提示，也没有停止入口。防抖只挡 500 ms 内的连点，挡不住这个。
+        int alreadyRunning = 0;
+        bool noDuplicate = false;
+        {
+            const QString hangExe = makeToolStub(stubDir, QStringLiteral("hangtool"), QStringLiteral(".bat"),
+                                                 QString(), 0, QString(), 3000);
+            rule.toolArgs[0] = argsFor(hangExe);
+            panel.setToolRulesForTest(QVector<ToolRule>() << rule);
+            panel.resetToolLaunchStateForTest();
+            const int beforeFin5 = panel.toolFinishedCountForTest();
+            panel.launchToolForTest(0, 0);
+            // 必须越过防抖窗口（500 ms），否则第二次点击会被防抖挡掉，
+            // 测到的就不是"已在运行"这一档。
+            QElapsedTimer w5; w5.start();
+            while (w5.elapsed() < 900) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 40);
+                QThread::msleep(5);
+            }
+            const int attemptsBefore = panel.toolLaunchAttemptsForTest();
+            panel.launchToolForTest(0, 0);
+            const int attemptsAfter = panel.toolLaunchAttemptsForTest();
+            alreadyRunning = panel.toolAlreadyRunningForTest();
+            noDuplicate = (attemptsAfter == attemptsBefore) && (alreadyRunning == 1);
+            // 等它自己结束，别把挂着的进程带出判据（会锁住临时目录里的文件）。
+            QElapsedTimer w5b; w5b.start();
+            while (panel.toolFinishedCountForTest() == beforeFin5 && w5b.elapsed() < 15000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 40);
+                QThread::msleep(5);
+            }
+        }
 
         const bool ok = sceneOk && okDebounce && glibWarn && glibExplains && failErr && okDone
-                        && redOnNoStderr && redOnOtherMsg && redOnZero && redOnEmpty && glibBenign;
+                        && redOnNoStderr && redOnOtherMsg && redOnZero && redOnEmpty && glibBenign
+                        && redOnGlibExit1 && toolOutInLog && noDuplicate;
         if (!ok)
             ++bad;
         out << (ok ? "PASS\t" : "FAIL\t") << "tool-launch-runtime"
@@ -2472,6 +2572,44 @@ int runSelfCheck()
             << " redOtherMsg=" << (redOnOtherMsg ? 1 : 0)
             << " redOnZero=" << (redOnZero ? 1 : 0) << " redEmpty=" << (redOnEmpty ? 1 : 0)
             << " glibBenign=" << (glibBenign ? 1 : 0)
+            << "\tredOnGlibExit1=" << (redOnGlibExit1 ? 1 : 0)
+            << " toolOutInLog=" << (toolOutInLog ? 1 : 0)
+            << " noDuplicate=" << (noDuplicate ? 1 : 0)
+            << " alreadyRunning=" << alreadyRunning
+            << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // 远端根目录探测（2026-11-05）
+    //
+    // 实测：客户把远端路径打错时，mkdir -p 照样把那个错路径建出来，
+    // 传输"成功"，界面报"同步完成"，而数据落在了客户没打算传的地方 ——
+    // 全程零提示。本版在 mkdir 之前先问一句"这个目录本来在不在"，
+    // 不在就明确告警（但不阻断传输：自动建目录本身是 rsync 的天然行为）。
+    //
+    // 判据要锁住**生产装配层**：远端命令里真的带上了 test -d 与那个标记，
+    // 且 stderr 里能把它解析回路径。照抄一份实现，自检就永远验不到真东西。
+    // ----------------------------------------------------------------
+    {
+        const QString probe = RsyncRunner::buildRemoteRootProbe(QStringLiteral("/home/u/in dir"));
+        const bool hasTest = probe.contains(QStringLiteral("test -d"));
+        const bool hasTag  = probe.contains(QStringLiteral("SRT_MISSING_ROOT:"));
+        const bool quoted  = probe.contains(QLatin1Char('\''));
+        // 从 stderr 里把路径取回来（路径里有空格也要完整取回）。
+        const QString parsed = RsyncRunner::missingRootFromStderr(
+                    QStringLiteral("noise\nSRT_MISSING_ROOT:/home/u/in dir\ntail"));
+        const bool parsedOk = (parsed == QStringLiteral("/home/u/in dir"));
+        const bool noneFound = RsyncRunner::missingRootFromStderr(
+                    QStringLiteral("no marker here")).isEmpty();
+        // 远端根是 home 根（空路径）时不用问。
+        const bool emptyRoot = RsyncRunner::buildRemoteRootProbe(QString()).isEmpty();
+        const bool ok = hasTest && hasTag && quoted && parsedOk && noneFound && emptyRoot;
+        if (!ok)
+            ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "remote-root-probe"
+            << "\thasTest=" << (hasTest ? 1 : 0) << " hasTag=" << (hasTag ? 1 : 0)
+            << " quoted=" << (quoted ? 1 : 0) << " parsedOk=" << (parsedOk ? 1 : 0)
+            << " noneFound=" << (noneFound ? 1 : 0) << " emptyRoot=" << (emptyRoot ? 1 : 0)
             << "\n";
     }
 
