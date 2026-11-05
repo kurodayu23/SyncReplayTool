@@ -127,8 +127,13 @@ if (-not $SkipBuild) {
             docker run --rm `
                 -v "${tc}:/toolchain:ro" `
                 -v "D:\AP\AP7000\SyncReplayTool:/src:ro" `
-                -v (Join-Path $WorkRoot 'kylin-build')`:'/work' `
-                -v (Join-Path $PackageRoot 'build-kylin')`:'/out' `
+            # -v 的值必须先拼成字符串：写成 -v (Join-Path ...)`:/work 时
+            # PowerShell 会把它拆成两个参数，docker 报 "invalid reference format"（rc=125）。
+            $kbWork = Join-Path $WorkRoot 'kylin-build'
+            New-Item -ItemType Directory -Force -Path $kbWork | Out-Null
+            $kbOut  = Join-Path $PackageRoot 'build-kylin'
+                -v "${kbWork}:/work" `
+                -v "${kbOut}:/out" `
                 --entrypoint /bin/bash kylin-v10-real:latest `
                 -c "cd /src && bash scripts/build-kylin-qt596.sh" 2>&1 |
                 Out-File -FilePath (Join-Path $logs 'kylin-build.log') -Encoding UTF8
