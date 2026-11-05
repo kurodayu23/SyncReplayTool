@@ -159,6 +159,9 @@ public:
     // 只给 offscreen 截图探针用。
     void toggleLogDrawerForProbe() { toggleLogDrawer(); }
     bool isLogOpenForTest() const { return m_logOpen; }
+    // 日志抽屉的两个按钮：让判据能走真实槽（和用户点按钮同一条路）。
+    void copyLogForTest() { copyLog(); }
+    void clearLogForTest() { clearLog(); }
     // 按屏幕可用高调整抽屉高度（小屏降级用；MainWindow 在展开时调）。
     void setLogDrawerHeight(int h);
 

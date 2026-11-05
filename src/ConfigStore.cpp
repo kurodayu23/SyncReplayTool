@@ -8,6 +8,8 @@
 #include <QStandardPaths>
 #include <QCoreApplication>
 #include <QTextCodec>
+#include <QSet>
+#include <QDateTime>
 #include <memory>
 #include "SecretStore.h"
 #include "AutoSyncScheduler.h"
@@ -59,6 +61,11 @@ QString configDirOverride()
     return d.absolutePath();
 }
 
+// 编码自愈（定义在下面 openSettings 之后）。先声明是因为 openSettings 必须
+// 在**构造 QSettings 之前**就跑一遍 —— 等构造完再自愈就晚了：
+// QSettings 在构造时就按文件内容判定了格式，之后再动文件它也不认。
+static void ensureConfigEncodingOk(const QString &path);
+
 // QSettings 不可拷贝，按指针返回
 std::unique_ptr<QSettings> openSettings()
 {
@@ -82,17 +89,76 @@ std::unique_ptr<QSettings> openSettings()
 
     if (!dir.isEmpty()) {
         QDir().mkpath(dir);
-        std::unique_ptr<QSettings> s(new QSettings(
-            QDir(dir).absoluteFilePath(QStringLiteral("SyncReplayTool.ini")),
-            QSettings::IniFormat));
+        const QString path = QDir(dir).absoluteFilePath(QStringLiteral("SyncReplayTool.ini"));
+        // 编码自愈必须在**构造 QSettings 之前**做：QSettings 一构造出来
+        // 就按文件内容判定了格式（UTF-16 的文件它判成"不是 INI"，
+        // 后面连写都拒绝），那时再动文件已经晚了。
+        ensureConfigEncodingOk(path);
+        std::unique_ptr<QSettings> s(new QSettings(path, QSettings::IniFormat));
         s->setIniCodec(QTextCodec::codecForName(codecName));
         return s;
     }
+    const QString userPath = QSettings(QSettings::IniFormat, QSettings::UserScope,
+                                       QStringLiteral("AP"), QStringLiteral("SyncReplayTool")).fileName();
+    ensureConfigEncodingOk(userPath);
     std::unique_ptr<QSettings> s(new QSettings(
         QSettings::IniFormat, QSettings::UserScope,
         QStringLiteral("AP"), QStringLiteral("SyncReplayTool")));
     s->setIniCodec(QTextCodec::codecForName(codecName));
     return s;
+}
+
+// ----------------------------------------------------------------
+// 配置文件的编码体检
+// ----------------------------------------------------------------
+
+// 这份 ini 的字节是不是"本程序根本读不了"的形态。
+//
+// 只认两条**硬信号**，不猜：
+//   ① 文件里有 NUL 字节 —— 合法的 UTF-8 文本配置里不可能出现 NUL；
+//      UTF-16 的文件每个字符后面都跟一个 0x00（"[\0t\0a\0r\00g..."）。
+//   ② 文件头是 UTF-16 的 BOM（FF FE / FE FF）。
+//
+// 为什么**不**用"是不是合法 UTF-8"当判据（这一点很关键）：
+// GBK 文件不是合法 UTF-8，但它**读得对** —— 键名是 ASCII，
+// QSettings 按 Latin-1 读出来的键名照样是 host=/port=/user=，
+// 实测主机、端口、账号全部保留（只有中文值会走"还原乱码"那条路）。
+// 把 GBK 也判成"坏文件"就是误伤客户配置。
+static bool looksLikeForeignIniEncoding(const QByteArray &head)
+{
+    if (head.isEmpty())
+        return false;
+    if (head.size() >= 2) {
+        const unsigned char b0 = static_cast<unsigned char>(head.at(0));
+        const unsigned char b1 = static_cast<unsigned char>(head.at(1));
+        if ((b0 == 0xFF && b1 == 0xFE) || (b0 == 0xFE && b1 == 0xFF))
+            return true;                       // UTF-16 BOM
+    }
+    for (int i = 0; i < head.size(); ++i) {
+        if (head.at(i) == '\0')
+            return true;                       // NUL = 多字节编码的典型痕迹
+    }
+    return false;
+}
+
+// 自愈失败的文件不再重试，也不再重复提示（免得刷屏）。
+static QSet<QString> g_encodingUnfixable;
+
+static void ensureConfigEncodingOk(const QString &path)
+{
+    if (path.isEmpty() || g_encodingUnfixable.contains(path))
+        return;
+    QFile probe(path);
+    if (!probe.exists())
+        return;                                // 没有文件 = 没问题
+    if (!probe.open(QIODevice::ReadOnly))
+        return;
+    const QByteArray head = probe.read(4096);
+    probe.close();
+    if (!looksLikeForeignIniEncoding(head))
+        return;
+    if (!ConfigStore::ensureConfigEncodingUsable(path, nullptr))
+        g_encodingUnfixable.insert(path);
 }
 
 // 最近一次落盘失败的原因。空串 = 上次写成功了。
@@ -315,6 +381,63 @@ bool pathLooksCorrupted(const QString &p)
 }
 
 } // namespace
+
+// 配置文件的编码自愈（公开静态；实现在匿名命名空间外，理由见 ConfigStore.h）。
+//
+// 缺陷（2026-11-05 实测）：客户从别的机器拷来一份 ini，或者用记事本"另存为"
+// 选了 Unicode(UTF-16) —— 这样的文件里**每一个键名都是乱码**
+// （"[target]" 变成 "%00t%00a%00r%00g%00e%00t%00"）。
+//   · QSettings 按 Latin-1 读它 ⇒ 键名全是垃圾 ⇒ 界面显示"配置里还没有 SSH 端口"，
+//     客户填过的 IP/端口/账号**读不到**；
+//   · 写回时它**把这份乱码原样保留**，同时另起一份空的 [target]
+//     ⇒ 客户原来的配置**永久消失**，文件从此一直带着这份垃圾；
+//   · 写入还被 QSettings 以 FormatError 拒绝 ⇒ 从此**改什么都存不进去**。
+//
+// 这里做的是**可恢复**的自愈，而不是直接丢弃：
+//   1) 原文件挪成 <ini>.corrupt-<时间戳>（字节原样保留）；
+//   2) 程序用一份新的 UTF-8 配置继续工作（客户能改能存）；
+//   3) 用 notice() 说清楚发生了什么、备份在哪、要做什么。
+bool ConfigStore::ensureConfigEncodingUsable(const QString &path, QString *backupOut)
+{
+    if (backupOut)
+        backupOut->clear();
+    if (path.isEmpty())
+        return false;
+
+    QFile f(path);
+    if (!f.exists())
+        return false;                          // 还没有文件 = 没问题
+    if (!f.open(QIODevice::ReadOnly))
+        return false;
+    // 只看头 4 KB 就够判：UTF-16 文件的第一个字符后面就跟着 NUL。
+    const QByteArray head = f.read(4096);
+    f.close();
+    if (!looksLikeForeignIniEncoding(head))
+        return false;
+
+    // 备份名带时间戳：多次自愈不能互相覆盖。
+    const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss"));
+    QString backup = path + QStringLiteral(".corrupt-") + stamp;
+    for (int n = 1; QFile::exists(backup); ++n)
+        backup = path + QStringLiteral(".corrupt-") + stamp + QStringLiteral("-%1").arg(n);
+
+    // 挪不动就**不动**：宁可不自愈，也绝不能把客户仅存的那份配置搞没。
+    if (!f.rename(backup))
+        return false;
+
+    if (backupOut)
+        *backupOut = backup;
+
+    // 提示走 notice（与"设置没有保存到…"同一个通道）。
+    // 弹框不行：自愈可能发生在关窗路径上，嵌套事件循环会表现为"关不掉"。
+    notice(QString::fromUtf8(u8"配置文件的编码无法识别（多半是 UTF-16 或二进制），"
+                             u8"已把它原样备份为：%1")
+           .arg(backup)
+           + QString::fromUtf8(u8"\n程序已经新建了一份空配置，可以正常使用了；"
+                                u8"但原来那份配置里的 IP、端口、账号读不到了，"
+                                u8"请到设置里重新填写一遍（原文件仍在备份里，没有丢）。"));
+    return true;
+}
 
 // 公开静态：实现就在上面那个匿名命名空间里，这里只是把它接出来，
 // 让 saveTarget() 和自检判据走同一条代码路径（理由见 ConfigStore.h 的注释）。

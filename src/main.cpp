@@ -1,4 +1,5 @@
 ﻿#include <QApplication>
+#include <QClipboard>
 #include <QByteArray>
 #include <QIcon>
 #include <QMetaType>
@@ -1613,6 +1614,131 @@ int runSelfCheck()
                 << "\tintervalHidesDaily=" << (okInterval ? 1 : 0)
                 << "\n";
         }
+    }
+
+    // ----------------------------------------------------------------
+    // 配置文件的编码自愈：UTF-16 的 ini 会让客户**静默丢配置**
+    //
+    // 缺陷（2026-11-05 实测，真实 ini 夹具 + 交付包 exe 跑出来的）：
+    // 客户从别的机器拷来一份 SyncReplayTool.ini，或者用记事本"另存为"
+    // 选了 Unicode(UTF-16) —— 这样的文件里**每一个键名都是乱码**
+    // （"[target]" 变成 "%00t%00a%00r%00g%00e%00t%00"）。
+    //   · QSettings 按 Latin-1 读它 ⇒ 键名全是垃圾 ⇒ 界面显示
+    //     「配置里还没有 SSH 端口」，客户填过的 IP/端口/账号**读不到**；
+    //   · 写回时它**把这份乱码原样保留**，同时另起一份空的 [target]
+    //     ⇒ 客户原来的配置**永久消失**，文件从此一直带着这份垃圾；
+    //   · 而且写入被 QSettings 以 FormatError 拒绝 ⇒ 从此**改什么都存不进去**，
+    //     提示又只在默认收起的日志抽屉里 ⇒ 客户以为软件坏了。
+    //
+    // 自愈必须同时满足四条，缺一条都不算修好：
+    //   ① 原文件**原样**留在一份备份里（不许悄悄丢客户的配置）；
+    //   ② 原路径上已经不是那份 UTF-16（不然下一次保存还会把它写回去）；
+    //   ③ 自愈之后**能改能存**（存进去的值要能读回来）；
+    //   ④ 正常的 UTF-8 文件**不许**被当成坏文件（反向锁，防误伤）。
+    {
+        QTemporaryDir sandbox;
+        const bool made = sandbox.isValid();
+        const QString dir = made ? sandbox.path() : QString();
+        const QString ini = dir + QStringLiteral("/SyncReplayTool.ini");
+
+        // UTF-16LE + BOM（记事本"另存为 Unicode"就是这个形态）。
+        //
+        // 字节**手工拼**，不用 QTextCodec 的 UTF-16LE：
+        // 那个编解码器会不会自己补 BOM 在不同 Qt/平台上不一样，
+        // 判据不能建立在这种可有可无的行为上。
+        const QString u16Text = QString::fromUtf8(
+            u8"[target]\r\nhost=10.0.0.9\r\nport=2222\r\nuser=srtuser\r\n");
+        QByteArray u16;
+        u16.append(char(0xFF));
+        u16.append(char(0xFE));
+        for (int i = 0; i < u16Text.size(); ++i) {
+            const ushort ch = u16Text.at(i).unicode();
+            u16.append(char(ch & 0xFF));
+            u16.append(char((ch >> 8) & 0xFF));
+        }
+        {
+            QFile f(ini);
+            f.open(QIODevice::WriteOnly);
+            f.write(u16);
+        }
+
+        const QByteArray savedDir = qgetenv("SRT_CONFIG_DIR");
+        if (made)
+            qputenv("SRT_CONFIG_DIR", dir.toLocal8Bit());
+
+        QString backup;
+        const bool healed = ConfigStore::ensureConfigEncodingUsable(ini, &backup);
+
+        // ① 备份在，而且里面还是原来那份 UTF-16 字节
+        bool backupKept = false;
+        if (!backup.isEmpty() && QFile::exists(backup)) {
+            QFile bf(backup);
+            bf.open(QIODevice::ReadOnly);
+            const QByteArray bytes = bf.readAll();
+            QByteArray bom;
+            bom.append(char(0xFF));
+            bom.append(char(0xFE));
+            // "10.0.0.9" 的 UTF-16LE 形态（同样手工拼）
+            QByteArray needle;
+            const QByteArray ascii = QByteArrayLiteral("10.0.0.9");
+            for (int i = 0; i < ascii.size(); ++i) {
+                needle.append(ascii.at(i));
+                needle.append('\0');
+            }
+            backupKept = bytes.contains(bom) && bytes.contains(needle);
+        }
+        // ② 原路径上已经不是那份 UTF-16 了
+        bool originalGone = true;
+        if (QFile::exists(ini)) {
+            QFile of(ini);
+            of.open(QIODevice::ReadOnly);
+            originalGone = !of.readAll().contains('\0');
+        }
+        // ③ 自愈之后能存能读
+        bool canSave = false;
+        if (made) {
+            TargetConfig t = ConfigStore::loadTarget();
+            t.host = QStringLiteral("10.0.0.9");
+            t.port = 2222;
+            t.user = QStringLiteral("srtuser");
+            ConfigStore::saveTarget(t);
+            const TargetConfig back = ConfigStore::loadTarget();
+            canSave = (back.host == QLatin1String("10.0.0.9")) && (back.port == 2222)
+                      && (back.user == QLatin1String("srtuser"));
+        }
+
+        if (savedDir.isEmpty())
+            qunsetenv("SRT_CONFIG_DIR");
+        else
+            qputenv("SRT_CONFIG_DIR", savedDir);
+
+        // ④ 反向锁：正常的 UTF-8 ini 不许被当成坏文件，值也要原封不动
+        bool normalUntouched = false;
+        {
+            QTemporaryDir box2;
+            const QString good = box2.path() + QStringLiteral("/SyncReplayTool.ini");
+            {
+                QFile f(good);
+                f.open(QIODevice::WriteOnly);
+                f.write("[target]\r\nhost=192.168.77.9\r\n");
+            }
+            QString dummy;
+            normalUntouched = !ConfigStore::ensureConfigEncodingUsable(good, &dummy)
+                              && !QFile::exists(good + QStringLiteral(".corrupt"));
+            QFile f(good);
+            f.open(QIODevice::ReadOnly);
+            normalUntouched = normalUntouched && f.readAll().contains("192.168.77.9");
+        }
+
+        const bool ok = made && healed && backupKept && originalGone && canSave && normalUntouched;
+        if (!ok) ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "config-foreign-encoding-healed"
+            << "\thealed="      << (healed ? 1 : 0)
+            << "\tbackupKept="   << (backupKept ? 1 : 0)
+            << "\toriginalGone=" << (originalGone ? 1 : 0)
+            << "\tcanSave="      << (canSave ? 1 : 0)
+            << "\tnormalUntouched=" << (normalUntouched ? 1 : 0)
+            << "\n";
     }
 
     // ----------------------------------------------------------------
@@ -4115,6 +4241,48 @@ int runGuiSelfCheck()
         }
         check("G29-suffix-skip-notice", ok, detail);
         QDir(dir).removeRecursively();
+    }
+
+    // ---- G31/G32：日志抽屉的两个按钮（2026-11-05 补：此前仅覆盖 FIFO 容量，
+    //      「复制」「清空」两个按钮零判据 —— 客户每天都在用）----
+    {
+        SyncPanel *panel = w.syncPanelForTest();
+        bool copyOk = false, clearOk = false;
+        QString copyDetail = QStringLiteral("no-panel"), clearDetail = QStringLiteral("no-panel");
+        if (panel) {
+            // 先造出可读的日志内容
+            panel->appendLogLinesForTest(5);
+            const QStringList before = panel->logTailForTest(50);
+            const int blocksBefore = panel->logBlockCountForTest();
+            // 复制 → 剪贴板里必须有内容，且和日志正文对得上
+            QApplication::clipboard()->clear();
+            panel->copyLogForTest();
+            const QString clip = QApplication::clipboard()->text();
+            copyOk = !clip.isEmpty()
+                     && clip.contains(QStringLiteral("probe-line"), Qt::CaseInsensitive);
+            copyDetail = QStringLiteral("blocks=%1 clipLen=%2 tail=%3")
+                         .arg(blocksBefore).arg(clip.size())
+                         .arg(before.isEmpty() ? QStringLiteral("<empty>") : before.first().left(40));
+            check("G31-log-copy-to-clipboard", copyOk, copyDetail);
+            // 清空 → 块数归零，再读日志为空
+            //
+            // 注意：QTextDocument **永远至少有一个块**（清空后剩下的那个空段落），
+            // 所以"块数 == 0"这个断言在 Qt 上是**不可能成立**的 ——
+            // 原来的写法 blocksAfter == 0 让本条判据**永远红**。
+            // 真正要断言的是"日志里没有内容"：块数塌到 1（只剩空段落）+ 读出来是空的。
+            panel->clearLogForTest();
+            QApplication::processEvents();
+            const int blocksAfter = panel->logBlockCountForTest();
+            const QStringList after = panel->logTailForTest(50);
+            clearOk = (blocksAfter <= 1) && after.isEmpty();
+            clearDetail = QStringLiteral("blocks %1->%2 tailAfter=%3")
+                          .arg(blocksBefore).arg(blocksAfter)
+                          .arg(after.isEmpty() ? QStringLiteral("<empty>") : after.first().left(30));
+            check("G32-log-clear-empties", clearOk, clearDetail);
+        } else {
+            check("G31-log-copy-to-clipboard", false, copyDetail);
+            check("G32-log-clear-empties", false, clearDetail);
+        }
     }
 
     // ---- G30：本机目录不存在时状态栏必须说明（2026-10-31 修）----
