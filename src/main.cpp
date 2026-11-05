@@ -5393,7 +5393,19 @@ int main(int argc, char *argv[])
     if (!automationOnly && ConfigStore::loadAutoStartEnabled()
         && !ConfigStore::isAutoStartActive()) {
         QString autoStartErr;
-        ConfigStore::applyAutoStart(true, &autoStartErr);
+        if (!ConfigStore::applyAutoStart(true, &autoStartErr)) {
+            // 自愈失败必须**说出来**。
+            //
+            // 2026-11-05 实测（本机）：产品调用 RegCreateKeyExW 拿回错误码 5
+            // （拒绝访问），而 PowerShell / reg.exe / python / 裸 Win32 用**完全相同**
+            // 的参数写同一个键都成功 —— 说明存在按进程的注册表防护（安全软件/企业策略）。
+            // 原来的写法把 ok 和 err 一起丢掉：客户把包挪了目录、自愈又失败，
+            // 界面从 ini 读到 autoStartEnabled=true 照样显示「已开启」，
+            // 而开机根本不会启动 —— 客户以为天天在自动同步，其实一次都没跑。
+            // 这里至少让它进日志抽屉，部署人员能看见。
+            ConfigStore::notice(QString::fromUtf8(u8"开机自动启动没设置成功：%1。位置：%2")
+                                      .arg(autoStartErr, ConfigStore::autoStartLocation()));
+        }
     }
 
     // 未知的**位置参数**必须报错，不能静默吞掉。
