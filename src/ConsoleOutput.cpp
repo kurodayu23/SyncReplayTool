@@ -240,6 +240,32 @@ void writeConsoleText(FILE *stream, const QByteArray &utf8)
 #endif // Q_OS_WIN
 
 // ---------------------------------------------------------------------------
+// 按路径写文件：跨平台实现（Windows 走 _wfopen 认 Unicode 路径，
+// Linux 走 UTF-8 字节路径）。上面的 #ifdef 只切了转码部分，
+// 这一段两边都要能用，所以放在 #endif 之后。
+// ---------------------------------------------------------------------------
+bool writeTextFileUtf8(const QString &path, const QByteArray &utf8)
+{
+    if (path.isEmpty())
+        return false;
+#ifdef Q_OS_WIN
+    FILE *fp = nullptr;
+    const wchar_t *wpath = reinterpret_cast<const wchar_t *>(path.utf16());
+    if (_wfopen_s(&fp, wpath, L"wb") != 0 || !fp)
+        return false;
+#else
+    const QByteArray p = path.toUtf8();
+    FILE *fp = fopen(p.constData(), "wb");
+    if (!fp)
+        return false;
+#endif
+    const bool ok = (utf8.isEmpty())
+                 || (fwrite(utf8.constData(), 1, utf8.size(), fp) == (size_t)utf8.size());
+    fclose(fp);
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
 // ConsoleDevice：跨平台部分（转码与否由 writeConsoleText 决定）
 // ---------------------------------------------------------------------------
 

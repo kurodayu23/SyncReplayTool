@@ -3406,12 +3406,9 @@ int runSelfCheck()
             QTemporaryDir td;
             if (td.isValid()) {
                 const QString path = td.filePath(QStringLiteral("cp.txt"));
-                FILE *fp = nullptr;
-                // 用 fopen 拿到 FILE*，走的是 writeConsoleText 的"非控制台"分支
-                // （文件不是控制台 ⇒ 原样写 UTF-8）。
-                if (fopen_s(&fp, path.toLocal8Bit().constData(), "wb") == 0 && fp) {
-                    writeConsoleText(fp, utf8);
-                    fclose(fp);
+                // 走 writeTextFileUtf8（不是 fopen_s —— 那是 MSVC 专有的，
+                // 麒麟上编译不过，2026-11-05 的麒麟交叉编译就是这么炸的）。
+                if (writeTextFileUtf8(path, utf8)) {
                     QFile f(path);
                     if (f.open(QIODevice::ReadOnly)) {
                         const QByteArray back = f.readAll();

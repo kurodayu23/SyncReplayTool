@@ -50,6 +50,17 @@ QString decodeFromCodePage(const QByteArray &bytes, unsigned int cp);
 // 把一段 UTF-8 字节写到控制台/文件。按上面的口径决定要不要转码。
 void writeConsoleText(FILE *stream, const QByteArray &utf8);
 
+// 把一段 UTF-8 字节写进一个文件（**原样 UTF-8**，不转码 —— 文件不是控制台）。
+//
+// 为什么单独给一个"按路径写"的入口，而不是让调用方自己 fopen：
+//   fopen_s 是 MSVC 专有的，Linux（麒麟）编译不过；
+//   _wfopen / fopen 两侧签名还不一样。
+//   平台差异全部收在这个文件里，调用方（main.cpp 的自检判据）不用关心。
+//
+// 路径支持中文与空格（Windows 走 _wfopen，Linux 走 UTF-8 字节路径）。
+// 返回 false 表示打不开文件（调用方要把它报成 FAIL，不能当通过）。
+bool writeTextFileUtf8(const QString &path, const QByteArray &utf8);
+
 // 一个"只写"的 QIODevice，把 QTextStream 的输出导向 FILE*，
 // 并在写入前按上面的口径决定要不要转码。
 //
