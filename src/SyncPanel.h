@@ -229,7 +229,8 @@ public:
         LaunchNoTool,           // 这一行没配工具 / 取不到 exe
         LaunchSourceMissing,    // 源文件在本机不存在（缺陷：静默失败）
         LaunchToolMissing,      // 工具程序不存在
-        LaunchToolNotExecutable // 工具程序没有执行权限（Linux）
+        LaunchToolNotExecutable, // 工具程序没有执行权限（Linux）
+  LaunchToolNotFile      // 路径存在但是个**文件夹**（客户在选择对话框里手滑选错）
     };
     static LaunchVerdict preflightLaunch(const QString &toolExe, const QString &sourceFile,
                                          bool isExecutable);

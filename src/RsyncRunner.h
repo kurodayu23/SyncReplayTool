@@ -313,6 +313,28 @@ public:
     // 从 stderr 里提取 "SRT_MISSING_ROOT:" 后面的路径；没有就返回空串。
     static QString missingRootFromStderr(const QString &text);
 
+    // 远端"建目录 + 探测 + 写标记"这一整条命令（纯函数，可离线自检）。
+    //
+    // 为什么抽出来：这条命令**一旦引号不闭合，远端 bash 整条都不执行**，
+    // 后果是静默丢数据（界面报"已完成"，远端目录是空的）。
+    // 2026-11-05 真实踩过一次：探测命令多拼了一个单引号，而旧判据只查
+    // contains("test -d")，拼错的命令照样全绿。
+    //
+    // 现在判据直接对这条命令逐项断言（单引号总数为偶数、目录名加引号而
+    // glob 不加引号、标记写读删都指向标记文件本身），
+    // 而且判据调的是**这个函数**，产品改了这里判据一定跟着变。
+    //
+    // 形态：
+    //   test -d '<root>' || echo 'SRT_MISSING_ROOT:<root>' >&2; \
+    //   mkdir -p -- '<dir1>' '<dir2>'; \
+    //   rm -f -- '<dir>'/.srt-verify-*; \
+    //   printf %s '<token>' > '<dir>'/.srt-verify-<token>
+    static QString buildRemoteDirsCommand(const QString &root,
+                                           const QStringList &dirs,
+                                           bool needHomeRoot,
+                                           const QString &token,
+                                           const QString &marker);
+
     // 少数几类错误的专用建议（端口填错 / 远端路径填成文件 / 安全中心拦截）。
     // 空串 = 该用本层的通用建议。同样暴露出来，是为了让自检判据能验到
     // "换了建议"这件事本身，而不只是验到"换了个层名"。

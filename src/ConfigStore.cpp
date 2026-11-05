@@ -8,6 +8,8 @@
 #include <QStandardPaths>
 #include <QCoreApplication>
 #include <QTextCodec>
+#include <QSaveFile>
+#include <QRegExp>
 #include <QSet>
 #include <QDateTime>
 #include <memory>
@@ -124,6 +126,177 @@ std::unique_ptr<QSettings> openSettings()
 // QSettings 按 Latin-1 读出来的键名照样是 host=/port=/user=，
 // 实测主机、端口、账号全部保留（只有中文值会走"还原乱码"那条路）。
 // 把 GBK 也判成"坏文件"就是误伤客户配置。
+// ------------------------------------------------------------------
+// 归一化用的几个小工具（2026-11-05 第二次修）
+//
+// 背景：这份 ini 有两种"读得出来、但读出来是坏的"的形态，
+// 而且**坏掉之后还会被写回磁盘**，客户的配置就此永久损坏：
+//
+//   A. 编码不是 UTF-8（UTF-16、GBK……）
+//      QSettings 的 INI 编解码器被钉成 UTF-8，GBK 里的中文字节不是合法 UTF-8
+//      ⇒ 解成 U+FFFD；repairMojibake() 认不出 U+FFFD（它只认 CJK 区间），
+//      连"尝试还原"都不会尝试。中文值就此变成乱码并被写回。
+//      **键名全是 ASCII，所以只看键名会以为没事** —— 值全毁了而界面毫无提示。
+//      （旧注释说"GBK 读得对，只是别误伤"—— 那是**只看 ASCII 键**得出的结论，
+//        实测中文值会被整串替换掉。结论当时就下错了。）
+//
+//   B. 人手写的 Windows 路径用了**单个**反斜杠
+//      Qt 读 ini 时把单个反斜杠按 C 转义解（只认 a b f n r t v），
+//      别的连反斜杠带字符一起丢掉： C:\keys\id_rsa ⇒ C:eysd_rsa；
+//      而且**行尾的单个反斜杠是续行符**，会把下一行整行吞进自己的值：
+//      localRoot=D:\data\  ⇒  下一行 host=... 被吞，host 变空。
+//      这份 ini 随后被原样写回 ⇒ 客户的本机目录和远端目录一起废掉。
+//
+// 旧实现对 A 的处理是"备份 + 另起一份空配置"：客户能改能存了，
+// 但**原来那份配置读不到**（界面空表单），等于把客户配置扔了。
+// 旧实现对 B 完全没有防护。
+//
+// 现在的做法是**无损归一化**：把文件改成"QSettings 能一字不差读出来"的形态，
+// 客户的 IP/端口/账号/中文/路径全部保住，原文件另存一份备份。
+// ------------------------------------------------------------------
+
+// 这份字节是不是合法的 UTF-8。
+static bool isValidUtf8Bytes(const QByteArray &raw)
+{
+    QTextCodec *c = QTextCodec::codecForName("UTF-8");
+    if (!c)
+        return true;
+    QTextCodec::ConverterState state;
+    c->toUnicode(raw.constData(), raw.size(), &state);
+    return state.invalidChars == 0;
+}
+
+// UTF-16 的 ini（带 BOM 或不带）→ UTF-8 字节。
+static QByteArray decodeUtf16Ini(const QByteArray &raw)
+{
+    bool littleEndian = true;
+    QByteArray body = raw;
+    if (raw.size() >= 2) {
+        const unsigned char b0 = static_cast<unsigned char>(raw.at(0));
+        const unsigned char b1 = static_cast<unsigned char>(raw.at(1));
+        if (b0 == 0xFF && b1 == 0xFE) {
+            littleEndian = true;
+            body = raw.mid(2);
+        } else if (b0 == 0xFE && b1 == 0xFF) {
+            littleEndian = false;
+            body = raw.mid(2);
+        } else {
+            // 没有 BOM：靠"NUL 落在奇数位还是偶数位"判断字节序。
+            int evenZero = 0, oddZero = 0;
+            for (int i = 0; i < body.size(); ++i) {
+                if (body.at(i) != '\0')
+                    continue;
+                if (i % 2 == 0) ++evenZero; else ++oddZero;
+            }
+            littleEndian = (oddZero >= evenZero);
+        }
+    }
+    QString s;
+    for (int i = 0; i + 1 < body.size(); i += 2) {
+        const unsigned char lo = static_cast<unsigned char>(body.at(i));
+        const unsigned char hi = static_cast<unsigned char>(body.at(i + 1));
+        const ushort ch = littleEndian ? ushort(lo | (hi << 8)) : ushort((lo << 8) | hi);
+        s.append(QChar(ch));
+    }
+    return s.toUtf8();
+}
+
+// 每一段连续反斜杠，长度为奇数就补一个。
+//
+// 为什么是"补一个"而不是"补成两倍"：
+//   · 程序自己写出来的 ini 里，每个反斜杠都被 Qt 转义成 **两个**，
+//     所以每段长度都是偶数 ⇒ 这里一处都不动（反向锁：正常文件必须逐字节不变）。
+//   · 人手写的单个反斜杠 ⇒ 变成两个 ⇒ Qt 读出来正好是那个字面反斜杠，
+//     行尾那个也不再是续行符（下一行不会被吞）。
+//   · 代价：值里如果本来就有 Qt 写的换行转义（多行值），会被当成单反斜杠补成两个。
+//     本程序的 ini 里**没有任何多行值**（主机/端口/账号/口令/路径/规则/工具参数
+//     都是单行），所以这个代价不存在。
+static QByteArray fixOddBackslashRuns(const QByteArray &in)
+{
+    QByteArray out;
+    out.reserve(in.size() + 16);
+    int i = 0;
+    while (i < in.size()) {
+        if (in.at(i) != '\\') {
+            out.append(in.at(i));
+            ++i;
+            continue;
+        }
+        int n = 0;
+        while (i + n < in.size() && in.at(i + n) == '\\')
+            ++n;
+        out.append(n, '\\');
+        if (n % 2 == 1)
+            out.append('\\');
+        i += n;
+    }
+    return out;
+}
+
+// **只修值，不碰键名。**
+//
+// 为什么键名不能碰（2026-11-05 实测踩到）：
+//   Qt 自己写出来的 ini，数组键名里就带反斜杠： [syncRules] 1\suffix=spe
+//   而 Qt 读 ini 时**键名是原样取的**（只有值才按 C 转义解）。
+//   所以把键名里的反斜杠也成对化，键就变成了 1\\suffix ⇒ 规则一条都读不出来
+//   （实测：自检的 G4-rules-loaded 直接 rows=0）。
+//
+// 值的部分才是会被 Qt 解转义、会被行尾续行吞掉的地方。
+static QByteArray fixOddBackslashRunsInValues(const QByteArray &in)
+{
+    QByteArray out;
+    out.reserve(in.size() + 16);
+    const int n = in.size();
+    int i = 0;
+    while (i < n) {
+        int eol = in.indexOf('\n', i);
+        const int lineEnd = (eol < 0) ? n : eol + 1;      // 含行尾的 \n
+        const QByteArray line = in.mid(i, lineEnd - i);
+        int eq = -1;
+        for (int k = 0; k < line.size(); ++k) {
+            const char c = line.at(k);
+            if (c == '[')
+                break;                                    // section 头，整行不动
+            if (c == '=') {
+                eq = k;
+                break;
+            }
+        }
+        if (eq < 0) {
+            out.append(line);                             // 没有 '='：注释/空行/裸行
+        } else {
+            out.append(line.left(eq + 1));                // 键名原样
+            out.append(fixOddBackslashRuns(line.mid(eq + 1)));  // 只修值
+        }
+        i = lineEnd;
+    }
+    return out;
+}
+
+// 解码出来的东西看着像不像一份 INI。
+//
+// 不像（例如二进制垃圾文件被按代码页硬解）就不能拿去写回 ——
+// 那会把垃圾固化进配置。这条判据不通过时走"备份 + 另起空配置"的老路。
+static bool looksLikeIniText(const QByteArray &utf8)
+{
+    const QString s = QString::fromUtf8(utf8);
+    if (s.contains(QChar(0)))
+        return false;
+    bool hasSection = false;
+    bool hasKey = false;
+    const QStringList lines = s.split(QRegExp(QStringLiteral("\r\n|\n|\r")));
+    for (const QString &ln : lines) {
+        const QString t = ln.trimmed();
+        if (t.isEmpty() || t.startsWith(QLatin1Char('#')))
+            continue;
+        if (t.startsWith(QLatin1Char('[')) && t.endsWith(QLatin1Char(']')))
+            hasSection = true;
+        else if (t.contains(QLatin1Char('=')))
+            hasKey = true;
+    }
+    return hasSection || hasKey;
+}
+
 static bool looksLikeForeignIniEncoding(const QByteArray &head)
 {
     if (head.isEmpty())
@@ -148,14 +321,9 @@ static void ensureConfigEncodingOk(const QString &path)
 {
     if (path.isEmpty() || g_encodingUnfixable.contains(path))
         return;
-    QFile probe(path);
-    if (!probe.exists())
-        return;                                // 没有文件 = 没问题
-    if (!probe.open(QIODevice::ReadOnly))
-        return;
-    const QByteArray head = probe.read(4096);
-    probe.close();
-    if (!looksLikeForeignIniEncoding(head))
+    // 先只读地判断"要不要归一化"：正常文件一个字节都不碰，
+    // 也不去建备份、不发提示。
+    if (!ConfigStore::configFileNeedsNormalization(path))
         return;
     if (!ConfigStore::ensureConfigEncodingUsable(path, nullptr))
         g_encodingUnfixable.insert(path);
@@ -397,6 +565,95 @@ bool pathLooksCorrupted(const QString &p)
 //   1) 原文件挪成 <ini>.corrupt-<时间戳>（字节原样保留）；
 //   2) 程序用一份新的 UTF-8 配置继续工作（客户能改能存）；
 //   3) 用 notice() 说清楚发生了什么、备份在哪、要做什么。
+// 归一化：把 ini 的原始字节变成"QSettings 能一字不差读出来"的 UTF-8 字节。
+// 返回空 QByteArray = 不需要改（正常文件一个字节都不许碰）。
+static QByteArray normalizedIniBytes(const QByteArray &raw, QString *reason)
+{
+    if (reason)
+        reason->clear();
+    if (raw.isEmpty())
+        return QByteArray();
+
+    QByteArray normalized;
+    QString why;
+    if (looksLikeForeignIniEncoding(raw)) {
+        normalized = decodeUtf16Ini(raw);
+        why = QString::fromUtf8(u8"UTF-16 编码");
+    } else if (!isValidUtf8Bytes(raw)) {
+        // 不是合法 UTF-8 ⇒ 按**本机代码页**解（中文 Windows 是 GBK/CP936）。
+        // 这一条以前没有：GBK 的中文值会被解成 U+FFFD 并写回磁盘（静默毁配置）。
+        QTextCodec *c = QTextCodec::codecForLocale();
+        normalized = c ? c->toUnicode(raw).toUtf8() : raw;
+        why = QString::fromUtf8(u8"非 UTF-8 编码")
+              + (c ? QString::fromLatin1(c->name()) : QString());
+    } else {
+        normalized = raw;
+    }
+
+    // 反斜杠成对化（Qt 读 ini 的转义/续行规则）——**只改值，键名原样**。
+    const QByteArray fixed = fixOddBackslashRunsInValues(normalized);
+    if (fixed != normalized) {
+        normalized = fixed;
+        if (why.isEmpty())
+            why = QString::fromUtf8(u8"Windows 路径里的单反斜杠");
+    }
+
+    if (why.isEmpty())
+        return QByteArray();                   // 正常文件
+    if (reason)
+        *reason = why;
+    return normalized;
+}
+
+// 这份配置文件现在需不需要归一化（只读判断，不改任何东西）。
+bool ConfigStore::configFileNeedsNormalization(const QString &path)
+{
+    if (path.isEmpty())
+        return false;
+    QFile f(path);
+    if (!f.exists() || !f.open(QIODevice::ReadOnly))
+        return false;
+    const QByteArray raw = f.readAll();
+    f.close();
+    return !normalizedIniBytes(raw, nullptr).isEmpty();
+}
+
+// 这里做的是**无损归一化**，而不是直接丢弃：
+//   1) 把文件改成"QSettings 能一字不差读出来"的形态
+//      （UTF-16 / 本机代码页 → UTF-8；人手写的单反斜杠 → 成对）；
+//      客户的 IP、端口、账号、中文、路径**全部保住**，不需要重填；
+//   2) 原文件另存一份 <ini>.corrupt-<时间戳>（字节原样保留）；
+//   3) 用 notice() 说清楚发生了什么、备份在哪。
+//
+// 只有一种情况会退回到"备份 + 另起空配置"：解出来根本不像一份 INI
+// （例如二进制垃圾文件被按代码页硬解）—— 那时写回去只会把垃圾固化进配置。
+static bool backupAndReplaceForeignIni(const QString &path, QString *backupOut)
+{
+    // 备份名带时间戳：多次自愈不能互相覆盖。
+    const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss"));
+    QString backup = path + QStringLiteral(".corrupt-") + stamp;
+    for (int n = 1; QFile::exists(backup); ++n)
+        backup = path + QStringLiteral(".corrupt-") + stamp + QStringLiteral("-%1").arg(n);
+
+    // 挪不动就**不动**：宁可不自愈，也绝不能把客户仅存的那份配置搞没。
+    QFile f(path);
+    if (!f.exists() || !f.rename(backup))
+        return false;
+
+    if (backupOut)
+        *backupOut = backup;
+
+    // 提示走 notice（与"设置没有保存到…"同一个通道）。
+    // 弹框不行：自愈可能发生在关窗路径上，嵌套事件循环会表现为"关不掉"。
+    ConfigStore::notice(QString::fromUtf8(u8"配置文件的编码无法识别（多半是 UTF-16 或二进制），"
+                             u8"已把它原样备份为：%1")
+           .arg(backup)
+           + QString::fromUtf8(u8"\n程序已经新建了一份空配置，可以正常使用了；"
+                                u8"但原来那份配置里的 IP、端口、账号读不到了，"
+                                u8"请到设置里重新填写一遍（原文件仍在备份里，没有丢）。"));
+    return true;
+}
+
 bool ConfigStore::ensureConfigEncodingUsable(const QString &path, QString *backupOut)
 {
     if (backupOut)
@@ -409,33 +666,62 @@ bool ConfigStore::ensureConfigEncodingUsable(const QString &path, QString *backu
         return false;                          // 还没有文件 = 没问题
     if (!f.open(QIODevice::ReadOnly))
         return false;
-    // 只看头 4 KB 就够判：UTF-16 文件的第一个字符后面就跟着 NUL。
-    const QByteArray head = f.read(4096);
+    const QByteArray raw = f.readAll();
     f.close();
-    if (!looksLikeForeignIniEncoding(head))
-        return false;
 
-    // 备份名带时间戳：多次自愈不能互相覆盖。
+    QString reason;
+    const QByteArray normalized = normalizedIniBytes(raw, &reason);
+    if (normalized.isEmpty())
+        return false;                          // 正常文件：一个字节都不动
+
+    // 解出来不像一份 INI ⇒ 不能写回（那会把垃圾固化进配置）。
+    if (!looksLikeIniText(normalized))
+        return backupAndReplaceForeignIni(path, backupOut);
+
+    // ---- 备份（字节原样保留） ----
     const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss"));
     QString backup = path + QStringLiteral(".corrupt-") + stamp;
     for (int n = 1; QFile::exists(backup); ++n)
         backup = path + QStringLiteral(".corrupt-") + stamp + QStringLiteral("-%1").arg(n);
 
-    // 挪不动就**不动**：宁可不自愈，也绝不能把客户仅存的那份配置搞没。
-    if (!f.rename(backup))
-        return false;
+    // 备份不成就不改：没有备份就动客户文件，那是拿他的配置赌。
+    {
+        QFile in(path);
+        if (!in.open(QIODevice::ReadOnly))
+            return false;
+        QFile out(backup);
+        if (!out.open(QIODevice::WriteOnly))
+            return false;
+        out.write(in.readAll());
+        out.close();
+        in.close();
+        if (!QFile::exists(backup))
+            return false;
+    }
+
+    // ---- 原子写回 ----
+    {
+        QSaveFile out(path);
+        if (!out.open(QIODevice::WriteOnly))
+            return false;
+        if (out.write(normalized) != normalized.size()) {
+            out.cancelWriting();
+            return false;
+        }
+        if (!out.commit())
+            return false;
+    }
 
     if (backupOut)
         *backupOut = backup;
 
     // 提示走 notice（与"设置没有保存到…"同一个通道）。
     // 弹框不行：自愈可能发生在关窗路径上，嵌套事件循环会表现为"关不掉"。
-    notice(QString::fromUtf8(u8"配置文件的编码无法识别（多半是 UTF-16 或二进制），"
-                             u8"已把它原样备份为：%1")
-           .arg(backup)
-           + QString::fromUtf8(u8"\n程序已经新建了一份空配置，可以正常使用了；"
-                                u8"但原来那份配置里的 IP、端口、账号读不到了，"
-                                u8"请到设置里重新填写一遍（原文件仍在备份里，没有丢）。"));
+    notice(QString::fromUtf8(u8"配置文件是%1，程序已经自动转成 UTF-8（内容没丢），"
+                             u8"原文件备份为：%2")
+           .arg(reason, backup)
+           + QString::fromUtf8(u8"\n如果界面里的本机目录或远端目录显示异常，"
+                                u8"请到设置里核对一下。"));
     return true;
 }
 

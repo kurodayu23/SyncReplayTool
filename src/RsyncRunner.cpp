@@ -748,8 +748,24 @@ QString RsyncRunner::buildRemoteRootProbe(const QString &root)
         return QString();          // 远端根是 home 根（一定存在，不用问）
     QString e = root;
     e.replace(QLatin1Char('\''), QLatin1String("'\\''"));
+    // 目标形态（一个单引号都不能多）：
+    //     test -d '<root>' || echo 'SRT_MISSING_ROOT:<root>' >&2
+    //
+    // 2026-11-05 实测踩过的坑：这里原来多拼了一个单引号，拼出来的是
+    //     test -d '<root>'' || echo 'SRT_MISSING_ROOT:<root>' >&2
+    // 单引号总数变成**奇数**，远端 bash 解析到后面那个还没闭合的引号就报
+    //     unexpected EOF while looking for matching `''
+    // 整条命令**一行都没执行**（mkdir 没跑、标记没写），退出码 2。
+    // 后果不是"建目录失败"这么轻：
+    //   · 目标目录不存在时，rsync 的 --files-from 不会自己建目录 ⇒ 整轮同步全灭；
+    //   · 防"远端目录被换掉"的标记从没写入 ⇒ 核对环节永远读不回标记，
+    //     而失败又被当成"核对没做成"放行 ⇒ **界面报 10/10 已完成、远端目录是空的**（静默丢数据）；
+    //   · "目标目录原本不存在，已自动创建"这条告警永远不触发（标记压根没写出去）。
+    // 旧判据只查 contains("test -d") 和 contains("SRT_MISSING_ROOT:"),
+    // 这种多一个引号的命令照样全绿 —— 判据太弱，不是运气问题。
+    // 现在判据直接要求拼出来的串与上面那行**逐字相同**（见 main.cpp 的 remote-dirs-command）。
     return QStringLiteral("test -d '") + e + QLatin1Char('\'')
-         + QStringLiteral("' || echo 'SRT_MISSING_ROOT:") + e
+         + QStringLiteral(" || echo 'SRT_MISSING_ROOT:") + e
          + QStringLiteral("' >&2");
 }
 
@@ -764,6 +780,92 @@ QString RsyncRunner::missingRootFromStderr(const QString &text)
     if (eol < 0)
         eol = text.size();
     return text.mid(j, eol - j).trimmed();
+}
+
+// 远端"建目录 + 探测 + 写标记"这一整条命令。
+//
+// 抽成公开静态纯函数，不是为了好看，是为了**让自检能验到真正发出去的那条命令**。
+// 照抄一份实现再判，自检就永远验不到真东西 —— 2026-11-05 那个"多一个单引号"的
+// 静默丢数据缺陷就是这么漏过去的：旧判据只查 contains("test -d")，
+// 而拼错的命令照样含有这两个片段。
+//
+// 目标形态（每一段都必须能被远端 bash 原样解析）：
+//   test -d '<root>' || echo 'SRT_MISSING_ROOT:<root>' >&2; \
+//   mkdir -p -- '<dir1>' '<dir2>'; \
+//   rm -f -- '<dir>'/.srt-verify-*; \
+//   printf %s '<token>' > '<dir>'/.srt-verify-<token>
+//
+// 三处曾经踩过的坑，都固化在这里：
+//   1. 探测命令多一个单引号 ⇒ 整条命令 bash 解析失败、**一行都没执行**；
+//   2. 清旧标记写成 "rm -f -- '<dir>/'.srt-verify-*" ⇒ 引号把结尾斜杠也括进去了，
+//      实际执行的是"删目录 + 在远端 home 里 glob" ⇒ 旧标记永远清不掉（F-10），
+//      而且顺带去删客户的目标目录；
+//   3. 标记被清空后仍去核对 ⇒ "cat -- '<dir>'" 读的是目录、不是标记文件，
+//      "rm -f -- '<dir>'" 删的也是目录 ⇒ 核对必然失败，还要额外发一次 ssh。
+QString RsyncRunner::buildRemoteDirsCommand(const QString &root,
+                                            const QStringList &dirs,
+                                            bool needHomeRoot,
+                                            const QString &token,
+                                            const QString &marker)
+{
+    // 远端命令交给远端 shell 解析，路径里的空格和引号必须自己转义。
+    // remoteDir() 已经把 "~" 开头改写成了等价的相对路径（见 remoteDir 注释），
+    // 所以这里统一用单引号包裹、原样传给远端 shell，落点与 rsync 一致；
+    // 不需要再处理 "$HOME" 展开那种情况。
+    QStringList quoted;
+    for (const QString &d : dirs) {
+        QString e = d;
+        e.replace(QLatin1Char('\''), QLatin1String("'\\''"));
+        quoted << (QLatin1Char('\'') + e + QLatin1Char('\''));
+    }
+
+    // rsync 自己发现不了目标目录被换掉这件事，只能靠传前传后对暗号。
+    //
+    // 踩过的坑：本来记的是目录 inode，实测在 tmpfs/overlayfs 上不可靠——
+    // 目录被 rm -rf 之后 rsync 重建的新目录很可能复用了同一个 inode 号，
+    // 前后一比完全相同，静默丢数据照样漏过去（实测 1200 个文件只剩 379 个，
+    // 界面还报"同步完成"）。改成在目标目录里放一个带随机串的标记文件，
+    // 传完再读回来并删掉：目录被删或被替换，标记一定不在。
+    //
+    // 标记用点开头的名字，不在任何一组的文件清单里，rsync 不会碰它。
+    QStringList statArgs = dirs;
+    if (needHomeRoot)
+        // ssh 登录后的工作目录就是远端 home，"." 就是 home 根
+        statArgs << QStringLiteral(".");
+
+    QStringList drops;
+    for (const QString &p : statArgs) {
+        QString dir = p;
+        dir.replace(QLatin1Char('\''), QLatin1String("'\\''"));
+        // **先把上一轮留下的标记清掉，再写自己这轮的。**
+        //
+        // 标记文件是"传前传后对暗号"用的：正常路径下核对完就删掉了。
+        // 但进程被强杀（Stop-Process / 断电 / 杀软误杀）时收尾代码根本不会跑，
+        // 接收端目录里就长期躺着 .srt-verify-<pid>-<时间戳> ——
+        // 客户在远端看到莫名文件，以为是同步过去的业务文件（台账 F-10）。
+        //
+        // 自己这轮的标记是**最后**才写的，所以"先删旧的、再写新的"不会误删自己。
+        // glob 那一段**不能加引号**（加了引号就变成去删一个名叫
+        // .srt-verify-* 的文件），只有目录名部分加引号。
+        // ⇒ 正确形态： rm -f -- '<dir>'/.srt-verify-*
+        drops << (QStringLiteral("rm -f -- '") + dir + QLatin1String("'/.srt-verify-*"));
+        drops << (QStringLiteral("printf %s '") + token + QLatin1String("' > '")
+                  + dir + QLatin1Char('/') + marker + QLatin1Char('\''));
+    }
+
+    const QString probe = buildRemoteRootProbe(root);
+    QStringList segs;
+    if (!probe.isEmpty())
+        segs << probe;
+    // 没有目录要建时**不能留一个空的 "mkdir -p --"**：
+    // 远端根留空（= home 根）且所有规则都落在 home 根，就是这种情况，
+    // bash 会报 "mkdir: missing operand"（虽然最后一条 printf 的退出码是 0，
+    // 整条命令"看起来成功"，但 stderr 里那条报错会被归因逻辑当成故障）。
+    if (!quoted.isEmpty())
+        segs << (QStringLiteral("mkdir -p -- ") + quoted.join(QLatin1Char(' ')));
+    if (!drops.isEmpty())
+        segs << drops.join(QStringLiteral("; "));
+    return segs.join(QStringLiteral("; "));
 }
 
 // classifyLayer 在上面的匿名命名空间里，没法从外部链进来。
@@ -2306,6 +2408,22 @@ void RsyncRunner::start(const TargetConfig &target,
     m_total = files.size();
     m_failed = false;
     m_cancelRequested = false;
+    // 自动接受主机公钥时，**必须让用户知道这件事**。
+    //
+    // 2026-11-05 实测（子代理 squadH）：把接收端的主机密钥换掉之后，
+    // 因为 StrictHostKeyChecking=no + UserKnownHostsFile=/dev/null，
+    // 程序一声不吭地连上了陌生主机，日志里**零提示**、界面照报"同步完成"。
+    // 主机公钥是识别对端身份的唯一凭据：静默接受 = 中间人可以透明转发，
+    // 客户的数据在中间人眼里一览无余，而界面**没有任何一个字**提示这件事。
+    //
+    // 行为本身是产品决策（内网工具、换机频繁的客户没法手工管 known_hosts），
+    // 但"静默"必须改成"明确告知"：每轮同步在日志里写清楚。
+    if (target.autoAcceptHostKey) {
+        emit logText(QString::fromUtf8(
+            u8"\u26A0 \u672C\u6B21\u8FDE\u63A5\u81EA\u52A8\u63A5\u53D7\u76EE\u6807\u4E3B\u673A\u516C\u94A5"
+            u8"\uFF08\u4E0D\u6821\u9A8C\u4E3B\u673A\u8EAB\u4EFD\uFF09\uFF1A\u5982\u679C\u76EE\u6807"
+            u8"\u673A\u88AB\u66FF\u6362\uFF0C\u7A0B\u5E8F\u4E5F\u770B\u4E0D\u51FA\u6765\u3002"));
+    }
     // 上一轮若因看门狗超时而中止，这一轮必须清掉旗标，
     // 否则第二轮会在 launchNext() 开头直接走收尾分支，一组都不跑。
     m_watchdogAborted = false;
@@ -2838,54 +2956,20 @@ void RsyncRunner::ensureRemoteDirs()
         return;
     }
 
-    // 远端命令交给远端 shell 解析，路径里的空格和引号必须自己转义。
-    // remoteDir() 已经把 "~" 开头改写成了等价的相对路径（见 remoteDir 注释），
-    // 所以这里统一用单引号包裹、原样传给远端 shell，落点与 rsync 一致；
-    // 不需要再处理 "$HOME" 展开那种情况。
-    QStringList quoted;
-    for (const QString &d : dirs) {
-        QString e = d;
-        e.replace(QLatin1Char('\''), QLatin1String("'\\''"));
-        quoted << (QLatin1Char('\'') + e + QLatin1Char('\''));
-    }
-
-    // rsync 自己发现不了目标目录被换掉这件事，只能靠传前传后对暗号。
-    //
-    // 踩过的坑：本来记的是目录 inode，实测在 tmpfs/overlayfs 上不可靠——
-    // 目录被 rm -rf 之后 rsync 重建的新目录很可能复用了同一个 inode 号，
-    // 前后一比完全相同，静默丢数据照样漏过去（实测 1200 个文件只剩 379 个，
-    // 界面还报"同步完成"）。改成在目标目录里放一个带随机串的标记文件，
-    // 传完再读回来并删掉：目录被删或被替换，标记一定不在。
-    //
-    // 标记用点开头的名字，不在任何一组的文件清单里，rsync 不会碰它。
-    QStringList statArgs = dirs;
-    if (needHomeRoot)
-        // ssh 登录后的工作目录就是远端 home，"." 就是 home 根
-        statArgs << QStringLiteral(".");
-
     m_verifyToken = QString::number(QCoreApplication::applicationPid())
                     + QLatin1Char('-') + QString::number(QDateTime::currentMSecsSinceEpoch());
     m_verifyMarker = QStringLiteral(".srt-verify-") + m_verifyToken;
 
-    QStringList drops;
-    for (const QString &p : statArgs) {
-        QString dir = p;
-        dir.replace(QLatin1Char('\''), QLatin1String("'\\''"));
-        // **先把上一轮留下的标记清掉，再写自己这轮的。**
-        //
-        // 标记文件是"传前传后对暗号"用的：正常路径下核对完就删掉了。
-        // 但进程被强杀（Stop-Process / 断电 / 杀软误杀）时收尾代码根本不会跑，
-        // 接收端目录里就长期躺着 .srt-verify-<pid>-<时间戳> ——
-        // 客户在远端看到莫名文件，以为是同步过去的业务文件（台账 F-10）。
-        //
-        // 自己这轮的标记是**最后**才写的，所以"先删旧的、再写新的"不会误删自己。
-        // glob 那一段**不能加引号**（加了引号就变成去删一个名叫
-        // .srt-verify-* 的文件），只有目录名部分加引号。
-        drops << (QStringLiteral("rm -f -- '") + dir + QLatin1Char('/')
-                  + QLatin1String("'.srt-verify-*"));
-        drops << (QStringLiteral("printf %s '") + m_verifyToken + QLatin1String("' > '")
-                  + dir + QLatin1Char('/') + m_verifyMarker + QLatin1Char('\''));
-    }
+    // 远端根用 remoteDir(target, "") 拿 —— 与 mkdir 用的是同一套归一化，
+    // 不能自己再剥一次 "~"（那会变成两处实现，历史上出过错）。
+    QString rootOnly = remoteDir(m_target, QString());
+    if (rootOnly.startsWith(QLatin1Char('\x01')))
+        rootOnly.clear();        // "~user/xxx" 哨兵：start() 会先报错，这里不管
+
+    // 整条远端命令由 buildRemoteDirsCommand 拼（探测 + mkdir + 清旧标记 + 写本轮标记）。
+    // 自检判据验的是**同一个函数**，所以产品改了这里判据一定跟着变。
+    const QString dirsCommand = buildRemoteDirsCommand(rootOnly, dirs, needHomeRoot,
+                                                       m_verifyToken, m_verifyMarker);
 
     m_proc = new QProcess(this);
 #ifdef Q_OS_WIN
@@ -2909,17 +2993,10 @@ void RsyncRunner::ensureRemoteDirs()
     //   目录本来不在 ⇒ 远端往 stderr 打一行 SRT_MISSING_ROOT:<路径>，
     //   界面据此**明确告警**（"目标目录原本不存在，已自动创建，请确认路径没写错"），
     //   而不是让"路径打错 ⇒ 数据传到陌生目录"这件事静默过去。
-    //   根目录用 remoteDir(target, "") 拿 —— 与 mkdir 用的是同一套归一化，
-    //   不能自己再剥一次 "~"（那会变成两处实现，历史上出过错）。
-    QString rootOnly = remoteDir(m_target, QString());
-    if (rootOnly.startsWith(QLatin1Char('\x01')))
-        rootOnly.clear();        // "~user/xxx" 哨兵：start() 会先报错，这里不管
-    const QString probe = buildRemoteRootProbe(rootOnly);
-
-    args << (m_target.user + QLatin1Char('@') + m_target.host)
-         << ((probe.isEmpty() ? QString() : probe + QStringLiteral("; "))
-             + QStringLiteral("mkdir -p -- ") + quoted.join(QLatin1Char(' '))
-             + QStringLiteral("; ") + drops.join(QStringLiteral("; ")));
+    //
+    //   命令本体由 buildRemoteDirsCommand 拼（探测 + mkdir + 清旧标记 + 写本轮标记），
+    //   自检判据验的是同一个函数，不会出现"判据和产品各拼一份"的情况。
+    args << (m_target.user + QLatin1Char('@') + m_target.host) << dirsCommand;
     m_stderrTail.clear();
     m_failedNameHints.clear();
     m_failedRemotePaths.clear();
@@ -3035,6 +3112,17 @@ void RsyncRunner::verifyRemoteDir(const QString &remoteDir)
     }
 
     if (m_verifyToken.isEmpty()) {
+        launchNext();
+        return;
+    }
+
+    // 标记为空 ⇒ 上一段的"建目录"没成功，标记压根没写出去。
+    // 这时候**不能再发一次核对 ssh**：拼出来的命令会变成
+    //     cat -- '<dir>/' 2>/dev/null; rm -f -- '<dir>/'
+    // —— cat 读的是目录（读不到东西）、rm 删的也是目录（客户的目录！）。
+    // 2026-11-05 实测：建目录那步因引号不闭合失败后，这里就是这么把
+    // "rm 客户目录"发过去的。标记为空就直接跳过核对。
+    if (m_verifyMarker.isEmpty()) {
         launchNext();
         return;
     }
@@ -4375,6 +4463,18 @@ void RsyncRunner::reportIncompleteRemoteFiles()
     emit logText(QString::fromUtf8(u8"\u3010\u6CE8\u610F\u3011\u4E0B\u5217\u6587\u4EF6\u672A\u80FD\u5B8C\u6574\u4F20\u8F93\uFF1A%1")
                      .arg(mine.join(QString::fromUtf8(u8"\u3001"))));
     emit logText(QString::fromUtf8(u8"\u672C\u6B21\u4F20\u8F93\u672A\u5B8C\u6210\u7684\u6587\u4EF6\uFF0C\u5176\u5DF2\u4F20\u8F93\u7684\u90E8\u5206\uFF08\u5982\u679C\u6709\uFF09\u7559\u5728\u8FDC\u7AEF\u7684 .srt-partial/ \u76EE\u5F55\u4E0B\uFF0C\u6CA1\u6709\u4EE5\u539F\u6587\u4EF6\u540D\u843D\u76D8\u3002"));
+    // 被**强制中断**（取消/看门狗杀掉 rsync）时还有另一种残留：rsync 正在写的时候
+    // 用的是目标目录里的临时名 .<原名>.<6 位随机>，只有它自己能优雅收尾时才会把
+    // 半截文件挪进 .srt-partial/。进程被 TerminateProcess 掉，那一步来不及做，
+    // 临时文件就留在目标目录里（实测中断一次留下 4.2 GB）。
+    //
+    // 这里**如实说明**，但**不自动删**：那个临时名的形态是 .<原名>.<6 位字母数字>，
+    // 和用户自己的点开头文件区分不开 —— 猜错就是删客户的数据。
+    // 留着它无害（点开头，下游一般不收），下次同步会按原名重传。
+    emit logText(QString::fromUtf8(u8"\u5982\u679C\u8FD9\u6B21\u662F\u88AB\u5F3A\u5236\u4E2D\u65AD\u7684\uFF08\u53D6\u6D88\u6216\u8D85\u65F6\u7EC8\u6B62\uFF09\uFF0C"
+                                  u8"\u8FDC\u7AEF\u76EE\u5F55\u91CC\u8FD8\u53EF\u80FD\u7559\u4E0B\u4E00\u4E2A\u4EE5\u70B9\u5F00\u5934\u7684\u4E34\u65F6\u6587\u4EF6 "
+                                  u8"\uFF08.\u6587\u4EF6\u540D.\u968F\u673A\u4E32\uFF09\uFF1A\u5B83\u4E0D\u662F\u4E1A\u52A1\u6587\u4EF6\uFF0C"
+                                  u8"\u4E0B\u6B21\u540C\u6B65\u4F1A\u6309\u539F\u540D\u91CD\u4F20\uFF0C\u53EF\u4EE5\u624B\u52A8\u5220\u9664\u3002"));
     emit logText(QString::fromUtf8(u8"\u4E0B\u6B21\u540C\u6B65\u4F1A\u56E0\u5927\u5C0F\u4E0D\u4E00\u81F4\u81EA\u52A8\u91CD\u4F20\uFF0C"
                                  u8"\u4E0D\u9700\u8981\u624B\u52A8\u5220\u9664\u3002"));
 }

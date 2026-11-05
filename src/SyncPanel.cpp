@@ -1070,6 +1070,13 @@ SyncPanel::LaunchVerdict SyncPanel::preflightLaunch(const QString &toolExe,
         return LaunchNoTool;
     if (!QFileInfo(toolExe).exists())
         return LaunchToolMissing;
+    // 路径存在但是**文件夹**：客户在"选择程序路径"对话框里手滑点到目录，很常见。
+    // 原来只判 exists()，目录也能过；Windows 上 QFileInfo(目录).isExecutable() 同样是 true，
+    // 于是一路放行到 QProcess，失败后只报含糊的「工具 [X] 进程启动或运行时出错。」——
+    // 客户根本不会想到是自己选错了目录。设置里「工具回放」页用的是 isFile()，那边报得清楚，
+    // 两处口径不一致，这里对齐（2026-11-05）。
+    if (QFileInfo(toolExe).isDir())
+        return LaunchToolNotFile;
     // 无执行权限只在非 Windows 上有意义：Qt 5.9 在 Windows 上对任何存在的
     // 文件都返回 true，这里判了也永远不会命中，白白多一条分支。
     #ifdef Q_OS_WIN
@@ -1088,6 +1095,7 @@ QString SyncPanel::launchVerdictTag(LaunchVerdict v)
 {
     switch (v) {
     case LaunchOk:                return QStringLiteral("ok");
+    case LaunchToolNotFile:       return QStringLiteral("not-a-file");
     case LaunchNoTool:            return QStringLiteral("no-tool");
     case LaunchSourceMissing:     return QStringLiteral("source-missing");
     case LaunchToolMissing:       return QStringLiteral("tool-missing");
@@ -1100,6 +1108,11 @@ QString SyncPanel::preflightMessage(LaunchVerdict v, const QString &toolExe,
                                     const QString &sourceFile, const QString &toolName)
 {
     switch (v) {
+    case LaunchToolNotFile:
+        // 客户在"选择程序路径"对话框里手滑点到文件夹：直接说破，别让他去猜
+        // 「进程启动或运行时出错」到底是谁的错。
+        return QString::fromUtf8(u8"工具路径是一个文件夹，不是程序：%1。请到 设置 → 文件打开工具 → 选程序路径，重新选一个 .exe 程序。")
+            .arg(toolExe);
     case LaunchSourceMissing:
         return QObject::tr("\xE6\xBA\x90\xE6\x96\x87\xE4\xBB\xB6\xE4\xB8\x8D\xE5\xAD\x98\xE5\x9C\xA8\xEF\xBC\x9A%1\xE3\x80\x82")
             .arg(sourceFile);

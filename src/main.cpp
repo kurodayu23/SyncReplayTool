@@ -10,6 +10,7 @@
 #include <QFile>
 #include <QTemporaryDir>
 #include <QSettings>
+#include <QTextCodec>
 #include <QThread>
 #include <QEventLoop>
 #include <QElapsedTimer>
@@ -1742,6 +1743,174 @@ int runSelfCheck()
     }
 
     // ----------------------------------------------------------------
+    // 配置文件**无损归一化**（2026-11-05 第二次修）
+    //
+    // 缺陷（子代理 squadF 实测，我用真实 Qt 5.9.6 复核确认）：
+    //   ① GBK 编码的 ini：中文值被解成 U+FFFD 并**写回磁盘**（键名全是 ASCII，
+    //      所以只看键名会以为没事 —— 值全毁了而界面零提示）。
+    //   ② 人手写的单反斜杠 Windows 路径：Qt 按 C 转义解（吃字符），
+    //      行尾那个单反斜杠还是**续行符**，把下一行整行吞掉 ⇒ host 变空，
+    //      随后又被写回磁盘 ⇒ 客户的配置就此毁掉。
+    //
+    // 判据要锁住"内容没丢"这件事：归一化之后中文值还在、host 还在。
+    // 只验"文件被改过"是不够的 —— 那正好是旧实现的毛病（旧实现把客户配置扔了）。
+    //
+    // 依据（实测 Qt 5.9.6，同一套 msvc2015_64 编译的小程序）：
+    //   localRoot=D:\data\   ⇒ host=[]            localRoot="D:atahost=..."  ← 续行吞行
+    //   localRoot=D:\\data\\ ⇒ host=10.0.0.9      localRoot="D:\data\"      ← 成对化之后完好
+    //   Qt 自己写出来的就是 D:\\data\\            ⇒ 成对化对自家文件是零改动
+    // ----------------------------------------------------------------
+    {
+        bool gbkOk = false, bslashOk = false, untouchedOk = false;
+        const QString savedDir = qgetenv("SRT_CONFIG_DIR");
+        {
+            QTemporaryDir box;
+            // ---- ① GBK：中文值必须一字不差地活下来 ----
+            QTextCodec *gbk = QTextCodec::codecForName("GBK");
+            if (gbk) {
+                const QString dir = box.path() + QStringLiteral("/gbk");
+                QDir().mkpath(dir);
+                const QString iniPath = dir + QStringLiteral("/SyncReplayTool.ini");
+                {
+                    QFile f(iniPath);
+                    f.open(QIODevice::WriteOnly);
+                    f.write(gbk->fromUnicode(QString::fromUtf8(
+                        u8"[target]\r\nhost=10.0.0.9\r\nuser=\x4E2D\x6587\x7528\x6237\r\n")));
+                    f.close();
+                }
+                QString backup;
+                const bool changed = ConfigStore::ensureConfigEncodingUsable(iniPath, &backup);
+                QString back;
+                {
+                    QSettings s(iniPath, QSettings::IniFormat);
+                    s.setIniCodec(QTextCodec::codecForName("UTF-8"));
+                    back = s.value(QStringLiteral("target/user")).toString();
+                }
+                gbkOk = changed
+                        && (back == QString::fromUtf8(u8"\x4E2D\x6587\x7528\x6237"))
+                        && !backup.isEmpty() && QFile::exists(backup);
+            }
+            // ---- ② 单反斜杠 + 行尾续行：host 必须还在，本机目录必须完整 ----
+            {
+                const QString dir = box.path() + QStringLiteral("/bslash");
+                QDir().mkpath(dir);
+                const QString iniPath = dir + QStringLiteral("/SyncReplayTool.ini");
+                {
+                    QFile f(iniPath);
+                    f.open(QIODevice::WriteOnly);
+                    f.write("[target]\r\nlocalRoot=D:\\data\\\r\nhost=10.0.0.9\r\nport=2222\r\n");
+                    f.close();
+                }
+                QString backup;
+                const bool changed = ConfigStore::ensureConfigEncodingUsable(iniPath, &backup);
+                QString host, localRoot;
+                int port = 0;
+                {
+                    QSettings s(iniPath, QSettings::IniFormat);
+                    s.setIniCodec(QTextCodec::codecForName("UTF-8"));
+                    host = s.value(QStringLiteral("target/host")).toString();
+                    localRoot = s.value(QStringLiteral("target/localRoot")).toString();
+                    port = s.value(QStringLiteral("target/port")).toInt();
+                }
+                bslashOk = changed && (host == QStringLiteral("10.0.0.9")) && (port == 2222)
+                           && (localRoot == QStringLiteral("D:\\data\\"))
+                           && !localRoot.contains(QStringLiteral("host="));
+            }
+            // ---- ③ 正常 UTF-8：一个字节都不许动 ----
+            {
+                const QString dir = box.path() + QStringLiteral("/good");
+                QDir().mkpath(dir);
+                const QString iniPath = dir + QStringLiteral("/SyncReplayTool.ini");
+                const QByteArray body = "[target]\r\nhost=10.0.0.9\r\n";
+                {
+                    QFile f(iniPath);
+                    f.open(QIODevice::WriteOnly);
+                    f.write(body);
+                    f.close();
+                }
+                QString backup;
+                const bool changed = ConfigStore::ensureConfigEncodingUsable(iniPath, &backup);
+                QByteArray after;
+                {
+                    QFile f(iniPath);
+                    f.open(QIODevice::ReadOnly);
+                    after = f.readAll();
+                }
+                untouchedOk = !changed && (after == body) && backup.isEmpty();
+            }
+        }
+        if (savedDir.isEmpty())
+            qunsetenv("SRT_CONFIG_DIR");
+        else
+            qputenv("SRT_CONFIG_DIR", savedDir.toLocal8Bit());
+
+        const bool ok = gbkOk && bslashOk && untouchedOk;
+        if (!ok)
+            ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "config-ini-lossless-normalize"
+            << "\tgbk=" << (gbkOk ? 1 : 0) << " bslash=" << (bslashOk ? 1 : 0)
+            << " untouched=" << (untouchedOk ? 1 : 0) << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // 密文解不开时必须提示（子代理 squadI 实测 T04-09 失败）
+    //
+    // 场景：配置里的密文本机解不开（换用户/换机器/换 machine-id）。
+    // 这时 password 是空的，却**不是因为用户没设过**。
+    // 如果界面不作声：用户看到空口令框 + 零解释，理所当然地认为"没配过密码"，
+    // 不会去重填，之后每次同步都在认证这一步失败，
+    // 而报错方向是网络或账号 —— 人会一直查错的地方。
+    //
+    // 判据要验**提示真的发出来了**（接到信号），不是验某个谓词。
+    // ----------------------------------------------------------------
+    {
+        bool noticeOk = false, flagOk = false, noPlaintextOk = false;
+        const QString savedDir = qgetenv("SRT_CONFIG_DIR");
+        {
+            QTemporaryDir box;
+            const QString iniPath = box.path() + QStringLiteral("/SyncReplayTool.ini");
+            {
+                QFile f(iniPath);
+                f.open(QIODevice::WriteOnly);
+                f.write("[target]\r\nhost=10.0.0.9\r\nport=2222\r\nuser=srtuser\r\n"
+                        "password=AAAAbrokenCipherTextBBBB\r\n");
+                f.close();
+            }
+            qputenv("SRT_CONFIG_DIR", box.path().toLocal8Bit());
+
+            QStringList got;
+            QObject::connect(ConfigStore::instance(), &ConfigStore::configNotice,
+                             [&got](const QString &m) { got.append(m); });
+            const TargetConfig t = ConfigStore::loadTarget();
+
+            // ① 提示真的到了（文案里要点名"解密/密文"）
+            bool saw = false;
+            for (int i = 0; i < got.size(); ++i) {
+                const QString m = got.at(i);
+                if (m.contains(QString::fromUtf8(u8"\u89E3\u5BC6"))
+                    || m.contains(QString::fromUtf8(u8"\u5BC6\u6587")))
+                    saw = true;
+            }
+            noticeOk = saw;
+            // ② 标记置上了：界面据此不把原密文删掉
+            flagOk = t.passwordUnreadable && t.password.isEmpty();
+            // ③ 解不开时绝不能把它当成"已配好密码"继续用
+            noPlaintextOk = !t.password.contains(QString::fromUtf8(u8"AAAAbrokenCipherTextBBBB"));
+        }
+        if (savedDir.isEmpty())
+            qunsetenv("SRT_CONFIG_DIR");
+        else
+            qputenv("SRT_CONFIG_DIR", savedDir.toLocal8Bit());
+
+        const bool ok = noticeOk && flagOk && noPlaintextOk;
+        if (!ok)
+            ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "config-password-unreadable-notice"
+            << "\tnotice=" << (noticeOk ? 1 : 0) << " flag=" << (flagOk ? 1 : 0)
+            << " noPlaintext=" << (noPlaintextOk ? 1 : 0) << "\n";
+    }
+
+    // ----------------------------------------------------------------
     // 端口必须是纯 ASCII 十进制：非法写法不许**静默**退回 22
     //
     // 缺陷（2026-10-18 实测，交付包 + 真实点击 + 日志抽屉截图）：
@@ -2382,6 +2551,23 @@ int runSelfCheck()
         const QString toolTag  = SyncPanel::launchVerdictTag(SyncPanel::preflightLaunch(goneExe, goodFile, true));
         const QString permTag  = SyncPanel::launchVerdictTag(SyncPanel::preflightLaunch(goodExe, goodFile, false));
 
+        // 「路径是文件夹」这一档（2026-11-05 加）：客户在"选择程序路径"对话框里
+        // 手滑点到目录很常见，而 Windows 上 QFileInfo(目录).isExecutable() 是 true，
+        // 原来只判 exists() 会让它一路放行到 QProcess，失败后只报含糊的
+        // 「进程启动或运行时出错」。这里锁住"能判出来 + 说破是文件夹 + 给出改法"。
+        // 测试对象直接用 goodFile 的父目录：一定存在、一定是目录，不用另造夹具。
+        const QString dirAsTool = QFileInfo(goodFile).absolutePath();
+        const QString dirTag = SyncPanel::launchVerdictTag(
+            SyncPanel::preflightLaunch(dirAsTool, goodFile, true));
+        const QString msgDir = SyncPanel::preflightMessage(SyncPanel::LaunchToolNotFile,
+                                                           dirAsTool, goodFile, QStringLiteral("t"));
+        // 文(6587) 件(4EF6) 夹(5939)
+        const bool hintIsDir = msgDir.contains(QChar(0x6587)) && msgDir.contains(QChar(0x4EF6))
+                               && msgDir.contains(QChar(0x5939));
+        const bool hintDotExe = msgDir.contains(QLatin1String(".exe"));
+        const bool okDir = (dirTag == QLatin1String("not-a-file")) && hintIsDir
+                           && hintDotExe && msgDir.contains(dirAsTool);
+
         // 文案：CJK 一律按码位查，不在发起进程那侧拼中文字面量。
         const QString msgMissing = SyncPanel::preflightMessage(SyncPanel::LaunchToolMissing,
                                                                goneExe, goodFile, QStringLiteral("t"));
@@ -2416,7 +2602,7 @@ int runSelfCheck()
         // 反向锁 2：两条提示不能是同一句（照抄成一句也会全绿）。
         const bool distinct = (msgMissing != msgPerm) && (msgMissing != msgSrc);
 
-        const bool ok = sceneOk && okVerdict && okPerm && hintSetting && hintProgram
+        const bool ok = sceneOk && okVerdict && okPerm && okDir && hintSetting && hintProgram
                         && hintPath && hintChmod && hintSrcPath && okCode && distinct;
         if (!ok)
             ++bad;
@@ -2425,6 +2611,8 @@ int runSelfCheck()
             << " toolGone=" << toolTag << " noPerm=" << permTag << " (" << permNote << ")"
             << "\thintSetting=" << (hintSetting ? 1 : 0)
             << " hintProgramPath=" << (hintProgram ? 1 : 0)
+            << " dirTag=" << dirTag << " hintIsDir=" << (hintIsDir ? 1 : 0)
+            << " hintDotExe=" << (hintDotExe ? 1 : 0)
             << " hintFullExePath=" << (hintPath ? 1 : 0)
             << " hintChmodCmd=" << (hintChmod ? 1 : 0)
             << " hintFullSrcPath=" << (hintSrcPath ? 1 : 0)
@@ -2737,6 +2925,74 @@ int runSelfCheck()
             << " quoted=" << (quoted ? 1 : 0) << " parsedOk=" << (parsedOk ? 1 : 0)
             << " noneFound=" << (noneFound ? 1 : 0) << " emptyRoot=" << (emptyRoot ? 1 : 0)
             << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // 远端"建目录 + 探测 + 写标记"整条命令（2026-11-05 第二次修）
+    //
+    // 上面那条 remote-root-probe 判据只查 contains("test -d")，
+    // 于是一条**多拼了一个单引号**的探测命令照样全绿 ——
+    // 而那条命令发到远端，bash 解析失败（unexpected EOF）、整条不执行、退出码 2，
+    // 后果是：目录建不出来、标记写不出去、防"远端目录被换掉"的核对整条失效，
+    // 界面报"10/10 已完成"而远端客户目录是空的（**静默丢数据**）。
+    //
+    // 这条判据直接对**产品拼出来的那条命令**逐项断言（判据调的是产品同一个函数，
+    // 不是照抄一份实现）：
+    //   · 探测段逐字等于期望形态（手写字面量，不重算）
+    //   · 不出现 "''"（多拼引号的特征）
+    //   · 单引号总数为偶数 —— 只对**路径里不含单引号**的场合成立
+    //     （含单引号时用的是 '\'' 转义，总数必然是奇数，那是正确的）
+    //   · 清旧标记：目录名加引号、glob 不加引号（否则清的是目录 + 远端 home）
+    //   · 写标记：指向标记文件本身，不是目录
+    //   · 路径里带单引号时，转义形态与期望一致
+    //   · home 根（远端根留空）时不会出现空的 "mkdir -p --"
+    // ----------------------------------------------------------------
+    {
+        const QString token  = QStringLiteral("123-456");
+        const QString marker = QStringLiteral(".srt-verify-123-456");
+        const QString dir    = QStringLiteral("/home/u/in dir/spe");
+        const QString cmd = RsyncRunner::buildRemoteDirsCommand(
+            QStringLiteral("/home/u/in dir"), QStringList() << dir, false, token, marker);
+
+        int quotes = 0;
+        for (int i = 0; i < cmd.size(); ++i)
+            if (cmd.at(i) == QLatin1Char('\''))
+                ++quotes;
+        const bool quotesEven = (quotes % 2 == 0);
+        const bool noEmptyQuote = !cmd.contains(QStringLiteral("''"));
+        // 期望值写成**字面量**：照抄实现的转义写法，判据就等于没判。
+        const bool probeExact = (RsyncRunner::buildRemoteRootProbe(QStringLiteral("/home/u/in dir"))
+                                 == QStringLiteral("test -d '/home/u/in dir' || echo 'SRT_MISSING_ROOT:/home/u/in dir' >&2"));
+        const bool mkdirOk    = cmd.contains(QStringLiteral("mkdir -p -- '/home/u/in dir/spe'"));
+        const bool staleOk    = cmd.contains(QStringLiteral("rm -f -- '/home/u/in dir/spe'/.srt-verify-*"));
+        const bool writeOk    = cmd.contains(QStringLiteral("printf %s '123-456' > '/home/u/in dir/spe/.srt-verify-123-456'"));
+
+        // 路径里带单引号：必须是 '\'' 转义，且探测段逐字等于期望。
+        const QString cmdQ = RsyncRunner::buildRemoteDirsCommand(
+            QStringLiteral("/home/o'brien"), QStringList() << QStringLiteral("/home/o'brien/x"),
+            false, token, marker);
+        const bool escapedOk = (RsyncRunner::buildRemoteRootProbe(QStringLiteral("/home/o'brien"))
+                                == QStringLiteral("test -d '/home/o'\\''brien' || echo 'SRT_MISSING_ROOT:/home/o'\\''brien' >&2"))
+                            && cmdQ.contains(QStringLiteral("mkdir -p -- '/home/o'\\''brien/x'"));
+
+        // home 根：没有远端根、没有目录要建 ⇒ 不能出现空的 "mkdir -p --"。
+        const QString cmdHome = RsyncRunner::buildRemoteDirsCommand(QString(), QStringList(), true,
+                                                                     token, marker);
+        const bool homeOk = !cmdHome.contains(QStringLiteral("test -d"))
+                            && !cmdHome.contains(QStringLiteral("mkdir -p"))
+                            && cmdHome.contains(QStringLiteral("'./.srt-verify-123-456'"));
+
+        const bool ok = quotesEven && noEmptyQuote && probeExact && mkdirOk && staleOk
+                        && writeOk && escapedOk && homeOk;
+        if (!ok)
+            ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "remote-dirs-command"
+            << "\tquotes=" << quotes << " even=" << (quotesEven ? 1 : 0)
+            << " noEmptyQuote=" << (noEmptyQuote ? 1 : 0)
+            << " probeExact=" << (probeExact ? 1 : 0)
+            << " mkdirOk=" << (mkdirOk ? 1 : 0) << " staleOk=" << (staleOk ? 1 : 0)
+            << " writeOk=" << (writeOk ? 1 : 0) << " escapedOk=" << (escapedOk ? 1 : 0)
+            << " homeOk=" << (homeOk ? 1 : 0) << "\n";
     }
 
     // ----------------------------------------------------------------
