@@ -1,4 +1,4 @@
-# concurrent-probe.ps1 - two clients pushing into the SAME receiver directory.
+﻿# concurrent-probe.ps1 - two clients pushing into the SAME receiver directory.
 #
 # This is a normal field setup: a workstation and a PC both sync their data
 # into one folder on the server.

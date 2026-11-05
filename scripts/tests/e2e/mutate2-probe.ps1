@@ -1,4 +1,4 @@
-# mutate2-probe.ps1 - modify a file that is still QUEUED (not yet transferred).
+﻿# mutate2-probe.ps1 - modify a file that is still QUEUED (not yet transferred).
 # 历史背景：产品早期版本对「本轮传输期间被改过的文件」会断言"远端收到的是修改前的内容"。
 # 实测证明那句话有一半是假的（改在 rsync 读到之前 ⇒ 远端拿到新内容）。现在产品改成只说能
 # 确定的部分："程序分不清改在 rsync 读到它之前还是之后，下一轮会按内容重新比对，有差异就补传"，
