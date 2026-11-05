@@ -3989,8 +3989,15 @@ void RsyncRunner::onProcError(QProcess::ProcessError err)
     // 删掉后信号还要沿着 QProcess 内部继续往上抛。
     m_proc->deleteLater();
     m_proc = nullptr;
-    if (wasVerify)
-        ++m_groupIndex;
+    // 无条件推进组号（原来只在 wasVerify 时推进）。
+    //
+    // 同一个死循环陷阱：rsync 连**启动**都没启动（FailedToStart），重试同一组
+    // 只会立刻再失败一次 —— 实测会变成每秒几次的无限重启，而本轮永远不结束
+    // （m_roundActive 一直 true）⇒ 自动同步被永久挡住。启动失败不可能靠重试
+    // 恢复（缺文件 / 被杀软拦 / 权限），跳过这组才是对的；整轮仍然报失败
+    // （m_failed 上面已置位），不会假装成功。
+    Q_UNUSED(wasVerify);
+    ++m_groupIndex;
     // 清单文件也要清。FailedToStart 说明 rsync 连启动都没启动，
     // 不会走 onFinished，而那里有 cleanupListFiles()。
     // 不清的话 .srt-filelist-<pid>.txt 就永久留在用户的本地根目录里
