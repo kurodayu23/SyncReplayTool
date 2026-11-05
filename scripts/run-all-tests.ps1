@@ -124,14 +124,30 @@ if (-not $SkipBuild) {
         if (-not (Test-Path $tc)) {
             Record '麒麟编译' 'FAIL' "找不到 $tc（交叉编译工具链不在）"
         } else {
-            docker run --rm `
-                -v "${tc}:/toolchain:ro" `
-                -v "D:\AP\AP7000\SyncReplayTool:/src:ro" `
             # -v 的值必须先拼成字符串：写成 -v (Join-Path ...)`:/work 时
             # PowerShell 会把它拆成两个参数，docker 报 "invalid reference format"（rc=125）。
+            #
+            # ★ 这两行**必须排在 docker run 之前**（2026-11-05 13:53 实测踩过）：
+            #   写成
+            #       docker run --rm `
+            #           -v "${tc}:/toolchain:ro" `
+            #           -v "D:\...\:ro" `
+            #       $kbWork = Join-Path ...
+            #           New-Item ...
+            #       $kbOut  = Join-Path ...
+            #           -v "${kbWork}:/work" `
+            #           -v "${kbOut}:/out" `
+            #   PowerShell 会在**没有反引号**的那行（$kbWork = ...）把整个命令截断：
+            #   docker 只收到 `run --rm -v ... -v ...`（**没有镜像名**），
+            #   报 "invalid reference format"（rc=125），而后面那两行 -v 变成
+            #   PowerShell 自己的命令（"-v" 不是 cmdlet）直接炸。
+            #   ⇒ 变量先算好，docker 命令写成一条**完整连续**的续行块。
             $kbWork = Join-Path $WorkRoot 'kylin-build'
             New-Item -ItemType Directory -Force -Path $kbWork | Out-Null
             $kbOut  = Join-Path $PackageRoot 'build-kylin'
+            docker run --rm `
+                -v "${tc}:/toolchain:ro" `
+                -v "D:\AP\AP7000\SyncReplayTool:/src:ro" `
                 -v "${kbWork}:/work" `
                 -v "${kbOut}:/out" `
                 --entrypoint /bin/bash kylin-v10-real:latest `
@@ -202,6 +218,30 @@ $pass = (Select-String -Path (Join-Path $logs 'selfcheck.txt') -Pattern '^PASS')
 $fail = (Select-String -Path (Join-Path $logs 'selfcheck.txt') -Pattern '^FAIL').Count
 if ($rc -eq 0 -and $fail -eq 0) { Record '纯逻辑自检' 'PASS' "PASS=$pass FAIL=0" }
 else { Record '纯逻辑自检' 'FAIL' "rc=$rc PASS=$pass FAIL=$fail" }
+
+# ---------------------------------------------------------------- 2b. 源码静态扫描
+#
+# ★ 为什么必须有这一段（2026-11-05 实测）：
+#   scripts/scan_no_cjk_qstringliteral.py 从写下来那天起就写着「防止再漏网的闸门」，
+#   但它**从来没有接进任何一段** —— 于是它要防的东西一次也没真被检查过。
+#   这次接进来立刻抓到一处真 bug：
+#     u8"…\xNN…" 字面量里 \xNN 是**字符**不是字节（Qt 5.9.6 / MSVC2015 /utf-8 实测），
+#     fromUtf8 解出来是 15 个 Latin-1 字符的乱码；
+#     而自检里比对同一句文案的判据**也拿乱码比对** ⇒ 那条判据恒绿，
+#     产品明明打了「复制未成功」，判据却报 failMsg=0 —— 判据自己把 bug 盖住了。
+#   源码层面拦不住这种（字面量里根本没有汉字字节，grep 看不见），
+#   所以必须让这段常驻门禁。
+Write-Host "`n===== 2b. 源码静态扫描（中文字面量 3 条检查）=====" -ForegroundColor Cyan
+$scanTool = 'D:\AP\AP7000\SyncReplayTool\scripts\scan_no_cjk_qstringliteral.py'
+if (-not (Test-Path $scanTool)) {
+    Record '源码扫描' 'FAIL' "找不到 $scanTool"
+} else {
+    $scanOut = Join-Path $logs 'scan-cjk.txt'
+    & python $scanTool 2>&1 | Out-File -FilePath $scanOut -Encoding UTF8
+    $scanRc = $LASTEXITCODE
+    if ($scanRc -eq 0) { Record '源码扫描' 'PASS' '中文字面量 3 条检查全过' }
+    else { Record '源码扫描' 'FAIL' "rc=$scanRc（见 logs\scan-cjk.txt）" }
+}
 
 # ---------------------------------------------------------------- 3. GUI 交互自检
 Write-Host "`n===== 3. --selfcheck-gui =====" -ForegroundColor Cyan

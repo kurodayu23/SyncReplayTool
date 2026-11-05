@@ -163,6 +163,20 @@ public:
     // 日志抽屉的两个按钮：让判据能走真实槽（和用户点按钮同一条路）。
     void copyLogForTest() { copyLog(); }
     void clearLogForTest() { clearLog(); }
+
+    // 剪贴板"读回"的取值口（自检用）。
+    //
+    // 为什么需要它：QClipboard::setText() 返回 void 且**不报任何错**。
+    // 剪贴板被别的程序占住时（Windows 上跨进程 set 返回 <<BUSY>>），
+    // 写入静默失败 —— 剪贴板里还是原来的内容。
+    // 原来的实现无条件写「已复制日志到剪贴板」，用户粘出来却是自己
+    // 上次的内容 = 谎报成功（squadE 2026-11-05 实测复现）。
+    //
+    // 真被占住是**跨进程状态**，自检进程里复现不了；
+    // 所以把"读回"这一步做成可替换的口子：自检换成一个永远返回旧值的
+    // 函数，就等价于复现了"剪贴板被占住"这件事。
+    typedef QString (*ClipboardReadBack)(const QString &expected);
+    static void setClipboardReadBackForTest(ClipboardReadBack fn);
     // 按屏幕可用高调整抽屉高度（小屏降级用；MainWindow 在展开时调）。
     void setLogDrawerHeight(int h);
 
@@ -406,6 +420,9 @@ private slots:
 
 private:
     void buildUi();
+    // 剪贴板读回口（自检可替换，见上面的 ClipboardReadBack 注释）。
+    static QString currentClipboardReadBack(const QString &expected);
+    static QString (*s_clipboardReadBack)(const QString &expected);
     // 复位主按钮。文案、objectName、样式三样都要动，只改文案会让按钮
     // 永远停在"运行中"的红色上 —— 见实现里的说明。
     void setStartButtonIdle();

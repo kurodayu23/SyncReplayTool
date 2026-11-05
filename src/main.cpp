@@ -1,4 +1,4 @@
-﻿#include <QApplication>
+#include <QApplication>
 #include <QClipboard>
 #include <QByteArray>
 #include <QIcon>
@@ -1775,7 +1775,7 @@ int runSelfCheck()
                     QFile f(iniPath);
                     f.open(QIODevice::WriteOnly);
                     f.write(gbk->fromUnicode(QString::fromUtf8(
-                        u8"[target]\r\nhost=10.0.0.9\r\nuser=\x4E2D\x6587\x7528\x6237\r\n")));
+                        u8"[target]\r\nhost=10.0.0.9\r\nuser=\u4E2D\u6587\u7528\u6237\r\n")));
                     f.close();
                 }
                 QString backup;
@@ -1786,9 +1786,19 @@ int runSelfCheck()
                     s.setIniCodec(QTextCodec::codecForName("UTF-8"));
                     back = s.value(QStringLiteral("target/user")).toString();
                 }
+                // GBK 归一化只在 Windows 上有意义：Windows 客户的 ini 可能是记事本
+                // 存成 GBK 的；麒麟/Linux 侧配置文件本来就是 UTF-8，
+                // ensureConfigEncodingUsable() 不会（也不该）改动它 ⇒ changed=false。
+                // 判据缺平台条件时，麒麟版会永远红一条（2026-11-05 实测 FAIL gbk=0）。
+#ifdef Q_OS_WIN
                 gbkOk = changed
-                        && (back == QString::fromUtf8(u8"\x4E2D\x6587\x7528\x6237"))
+                        && (back == QString::fromUtf8(u8"\u4E2D\u6587\u7528\u6237"))
                         && !backup.isEmpty() && QFile::exists(backup);
+#else
+                // 非 Windows：不适用。只要求"没有把文件弄坏"（不该改就别改）。
+                Q_UNUSED(back);
+                gbkOk = !changed;
+#endif
             }
             // ---- ② 单反斜杠 + 行尾续行：host 必须还在，本机目录必须完整 ----
             {
@@ -1850,6 +1860,40 @@ int runSelfCheck()
         out << (ok ? "PASS\t" : "FAIL\t") << "config-ini-lossless-normalize"
             << "\tgbk=" << (gbkOk ? 1 : 0) << " bslash=" << (bslashOk ? 1 : 0)
             << " untouched=" << (untouchedOk ? 1 : 0) << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // u8 字面量里 \xNN 是「字符」不是「字节」—— 写中文必须用 \uXXXX
+    //
+    // 实测（2026-11-05，Qt 5.9.6 / MSVC2015 /utf-8 探针）：
+    //   QString::fromUtf8(u8"\xE5\xA4\x8D\xE5\x88\xB6...")  -> 15 个 Latin-1 字符（乱码）
+    //   QString::fromUtf8(   "\xE5\xA4\x8D\xE5\x88\xB6...")  ->  5 个汉字（对）
+    //   QObject::tr(          "\xE5\xA4\x8D\xE5\x88\xB6...")  ->  5 个汉字（对）
+    //
+    // 危害是**静默**的：字节仍是非 ASCII，交付门禁的「中文齐全」照样过；
+    // 而自检里比对同一句文案的判据也一起错 ⇒ 产品明明打了提示、判据却判 failMsg=0，
+    // **判据自己把 bug 盖住了**（2026-11-05 实测）。
+    //
+    // 源码层面由 scripts/scan_no_cjk_qstringliteral.py 的第 3 条检查兜住；
+    // 这里再钉一条运行时判据：证明两种形式结果**确实不同**，规则写在产品里。
+    // ----------------------------------------------------------------
+    {
+        // ① 字节形式（普通窄字面量）：\xNN 是原始字节 ⇒ 解出 1 个汉字（U+590D）
+        const int byteForm = QString::fromUtf8(QByteArray("\xE5\xA4\x8D", 3)).size();
+        // ② u8 形式：\xNN 是字符 U+00NN，整个字面量按 UTF-8 编码（每个 2 字节）
+        //    ⇒ fromUtf8 解回 3 个 Latin-1 字符（不是 1 个汉字）
+        const QByteArray u8Encoded = QString(QChar(0xE5)).toUtf8()
+                                   + QString(QChar(0xA4)).toUtf8()
+                                   + QString(QChar(0xCD)).toUtf8();
+        const int u8Form = QString::fromUtf8(u8Encoded).size();
+        // ③ 推荐写法：u8 里用 \uXXXX（码位）⇒ 编译出来就是 U+590D 的 UTF-8 字节
+        const int codePointForm = QString::fromUtf8(QString(QChar(0x590D)).toUtf8()).size();
+        const bool ok = (byteForm == 1) && (u8Form == 3) && (codePointForm == 1);
+        if (!ok)
+            ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "utf8-literal-escape-rule"
+            << "\tbyte=" << byteForm << " u8hex=" << u8Form
+            << " cp=" << codePointForm << "\n";
     }
 
     // ----------------------------------------------------------------
@@ -1930,7 +1974,7 @@ int runSelfCheck()
     // 正向 4 条 + 反向锁 3 条。反向锁的作用是证明判据测得到「放行」这一侧：
     // 一个把所有输入都判成非法、把正常端口也拦掉的实现同样能让 4 条正向通过。
     {
-        const QString fullW = QString::fromUtf8(u8"\xEF\xBC\x92\xEF\xBC\x92\xEF\xBC\x92\xEF\xBC\x96"); // ２２２６
+        const QString fullW = QString::fromUtf8(u8"\uFF12\uFF12\uFF12\uFF16"); // ２２２６
         const bool okPlain    =  ConfigStore::isPlainPortText(QStringLiteral("2226"));
         const bool okMin      =  ConfigStore::isPlainPortText(QStringLiteral("1"));
         const bool okMax      =  ConfigStore::isPlainPortText(QStringLiteral("65535"));
@@ -4544,6 +4588,60 @@ int runGuiSelfCheck()
             check("G31-log-copy-to-clipboard", false, copyDetail);
             check("G32-log-clear-empties", false, clearDetail);
         }
+    }
+
+    // ---- G31b：剪贴板被别的程序占住时，**不能**谎报「已复制」
+    //
+    // 缺陷（squadE 2026-11-05 实测复现）：QClipboard::setText() 返回 void
+    // 且不报错 —— 剪贴板被占住时（Windows 上跨进程 set 返回 <<BUSY>>）
+    // 写入静默失败，剪贴板里还是原来的内容。而界面无条件写
+    // 「已复制日志到剪贴板」，用户粘出来是自己上次的旧内容。
+    //
+    // 真被占住是**跨进程状态**，自检进程里复现不了 ⇒ 把"读回"这一步
+    // 换成永远返回旧值的函数，等价于模拟「写不进去」。
+    //
+    // 反向锁：必须同时断言"出现了失败提示"**且**"没有出现成功提示"。
+    // 只查失败提示的话，一个永远只写失败提示的实现也能过。
+    {
+        SyncPanel *panel = w.syncPanelForTest();
+        bool ok = false;
+        QString detail = QStringLiteral("no-panel");
+        if (panel) {
+            panel->clearLogForTest();
+            QApplication::processEvents();
+            panel->appendLogLinesForTest(5);
+            // 读回永远返回旧内容 = 剪贴板被占住、写入没生效
+            SyncPanel::setClipboardReadBackForTest([](const QString &) {
+                return QStringLiteral("<<BUSY>>");
+            });
+            // 只看"这次 copyLog 之后新增"的记录：logRecords 里可能还留着更早用例的行
+            // （clearLog 清的是界面视图；这里的 m_logRecords 是内部明细）。
+            // 拿全量去判会让上一条用例的 INFO「已复制日志」把本项判成 falseOk=1。
+            const int baseRec = panel->logRecordsForTest().size();
+            panel->copyLogForTest();
+            SyncPanel::setClipboardReadBackForTest(nullptr);
+
+            const QStringList recs = panel->logRecordsForTest();
+            bool sawFail = false, sawFalseOk = false;
+            // 只看**最后一条**：copyLog() 一次只打一行（成功 INFO 或失败 WARN）。
+            // 遍历 baseRec..end 会让更早用例残留的记录混进来（2026-11-05 实测：
+            // 上一条用例的 INFO「已复制日志」把本项判成 falseOk=1，怎么调起点都不稳）。
+            const QString last = recs.isEmpty() ? QString() : recs.last();
+            // 复(590D) 制(5236) 未(672A) 成(6210) 功(529F)
+            const bool isFailMsg = last.contains(QChar(0x590D)) && last.contains(QChar(0x5236))
+                                   && last.contains(QChar(0x672A)) && last.contains(QChar(0x6210))
+                                   && last.contains(QChar(0x529F));
+            sawFail = last.startsWith(QStringLiteral("WARN")) && isFailMsg;
+            sawFalseOk = last.startsWith(QStringLiteral("INFO"));
+            ok = sawFail && !sawFalseOk;
+            QStringList tail;
+            for (int i = qMax(0, recs.size() - 4); i < recs.size(); ++i)
+                tail << recs.at(i).left(40).toLatin1();
+            detail = QStringLiteral("records=%1 failMsg=%2 falseOk=%3 tail=%4")
+                         .arg(recs.size()).arg(sawFail ? 1 : 0).arg(sawFalseOk ? 1 : 0)
+                         .arg(tail.join(QStringLiteral(" | ")));
+        }
+        check("G31b-clipboard-busy-no-false-ok", ok, detail);
     }
 
     // ---- G30：本机目录不存在时状态栏必须说明（2026-10-31 修）----

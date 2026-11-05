@@ -157,6 +157,81 @@ def scan_bad_words(root):
     return hits
 
 
+def strip_line_comment(line):
+    """去掉行注释，但不动字符串里的内容。
+
+    为什么需要（2026-11-05 实测）：检查 3 要在源码里找 u8"\\xNN" 这种形态，
+    而**注释里恰恰要写这个形态当例子**（说明「这么写是错的」）。
+    不去掉注释的话，扫描器会把自己写的说明当成违规 —— 实测就撞上了：
+    判据的注释里写了 u8"\\xE5\\xA4\\x8D..."，构建前门禁直接红了。
+
+    实现要点：逐字符扫，跟踪引号状态，只有**不在字符串里**的 // 才是注释起点。
+    这样 URL（"http://…"）不会被误截断。
+    """
+    out = []
+    i = 0
+    n = len(line)
+    quote = None
+    while i < n:
+        c = line[i]
+        if quote:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(line[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            out.append(c)
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and line[i + 1] == "/":
+            break
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def scan_u8_hex_escapes(root):
+    """检查 3：u8"..." 字面量里不许用 \\xNN 字节转义写中文。
+
+    为什么（2026-11-05 实测，Qt 5.9.6 / MSVC2015 /utf-8 探针）：
+      QString::fromUtf8(u8"\\xE5\\xA4\\x8D\\xE5\\x88\\xB6...")  -> 15 个 Latin-1 字符（乱码）
+      QString::fromUtf8(   "\\xE5\\xA4\\x8D\\xE5\\x88\\xB6...")  ->  5 个汉字（对）
+      QObject::tr(          "\\xE5\\xA4\\x8D\\xE5\\x88\\xB6...") ->  5 个汉字（对）
+
+    原因：u8 字面量里 \\xNN 表示**字符** U+00NN，整个字面量的字节是这些字符的
+    UTF-8 编码（每个 2 字节）；而普通窄字面量里 \\xNN 直接是原始字节。
+    ⇒ u8 字面量里写中文只能用 \\uXXXX（码位），用 \\xNN 一定解成乱码。
+
+    危害是**静默**的：字节还是非 ASCII，交付门禁的「中文字符串齐全」照样过，
+    但运行时界面上是乱码；而自检里比对同一句文案的判据也跟着一起错，
+    于是「产品确实打了提示、判据却判 failMsg=0」——判据自己把 bug 盖住了。
+
+    这条检查不依赖字面量里有没有汉字（那里根本没有汉字字节），所以必须扫源码。
+    """
+    hits = []
+    pat = re.compile(r'u8"((?:[^"\\]|\\.)*)"')
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in (".git", "build", "release", "debug")]
+        for fn in sorted(filenames):
+            if not fn.endswith((".cpp", ".h", ".hpp", ".cc")):
+                continue
+            p = os.path.join(dirpath, fn)
+            txt = io.open(p, "r", encoding="utf-8-sig", newline="").read()
+            for ln, line in enumerate(txt.split("\n"), 1):
+                code = strip_line_comment(line)
+                for m in pat.finditer(code):
+                    s = m.group(1)
+                    if re.search(r'\\x[0-9A-Fa-f]{2}', s):
+                        hits.append((p, ln, s))
+    return hits
+
+
 def main():
     root = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
@@ -187,7 +262,20 @@ def main():
     else:
         print("OK：%s 下没有「转义里写错字节」的中文" % root)
 
-    return 1 if (hits or bad) else 0
+    u8hits = scan_u8_hex_escapes(root)
+    if u8hits:
+        print()
+        print("FAIL：发现 %d 处「u8 字面量里用 \\xNN 字节转义写中文」" % len(u8hits))
+        for p, ln, s in u8hits:
+            print("  %s:%d  %s" % (p, ln, s))
+        print()
+        print("改法：u8\"\\xNN...\"  ->  u8\"\\uNNNN...\"（码位，不是字节）")
+        print("      实测：fromUtf8(u8\"\\xE5\\xA4\\x8D\") 解成 3 个 Latin-1 字符（乱码），")
+        print("            fromUtf8(\"\\xE5\\xA4\\x8D\") 与 tr(\"\\xE5\\xA4\\x8D\") 都解成「复」。")
+    else:
+        print("OK：%s 下没有「u8 字面量里用 \\xNN 写中文」" % root)
+
+    return 1 if (hits or bad or u8hits) else 0
 
 
 if __name__ == "__main__":

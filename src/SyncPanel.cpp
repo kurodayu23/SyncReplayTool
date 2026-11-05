@@ -1549,9 +1549,22 @@ void SyncPanel::copyLog()
     // 原来只有 selectAll()，看着像"复制"其实一个字符都没进剪贴板 ——
     // 用户点完再去粘贴，粘到的是他自己之前的内容。
     // 复制的是 toPlainText()：去掉徽标底色和 <span>，粘到记事本里是干净的纯文本。
-    QApplication::clipboard()->setText(m_logView->toPlainText());
-    appendLogLine(QStringLiteral("INFO"),
-                  QObject::tr("\xE5\xB7\xB2\xE5\xA4\x8D\xE5\x88\xB6\xE6\x97\xA5\xE5\xBF\x97\xE5\x88\xB0\xE5\x89\xAA\xE8\xB4\xB4\xE6\x9D\xBF"), 0);
+    const QString plain = m_logView->toPlainText();
+    QApplication::clipboard()->setText(plain);
+
+    // ★ 必须读回来核对，否则就是在**谎报成功**（squadE 2026-11-05 实测）。
+    //   QClipboard::setText() 返回 void 且不报错：剪贴板被别的程序占住时
+    //   （Windows 上跨进程 set 返回 <<BUSY>>）写入静默失败，
+    //   剪贴板里还是原来的内容 —— 而界面照样写「已复制日志到剪贴板」，
+    //   用户粘出来是自己上次的旧内容，还以为日志复制对了。
+    const QString readBack = currentClipboardReadBack(plain);
+    if (readBack == plain) {
+        appendLogLine(QStringLiteral("INFO"),
+                      QObject::tr("\xE5\xB7\xB2\xE5\xA4\x8D\xE5\x88\xB6\xE6\x97\xA5\xE5\xBF\x97\xE5\x88\xB0\xE5\x89\xAA\xE8\xB4\xB4\xE6\x9D\xBF"), 0);
+    } else {
+        appendLogLine(QStringLiteral("WARN"),
+                      QObject::tr("\xE5\xA4\x8D\xE5\x88\xB6\xE6\x9C\xAA\xE6\x88\x90\xE5\x8A\x9F\xEF\xBC\x9A\xE5\x89\xAA\xE8\xB4\xB4\xE6\x9D\xBF\xE8\xA2\xAB\xE5\x85\xB6\xE5\xAE\x83\xE7\xA8\x8B\xE5\xBA\x8F\xE5\x8D\xA0\xE7\x94\xA8\xEF\xBC\x8C\xE5\x86\x85\xE5\xAE\xB9\xE6\xB2\xA1\xE6\x9C\x89\xE5\x86\x99\xE8\xBF\x9B\xE5\x8E\xBB\xE3\x80\x82\xE8\xAF\xB7\xE7\xA8\x8D\xE5\x90\x8E\xE9\x87\x8D\xE8\xAF\x95\xEF\xBC\x8C\xE6\x88\x96\xE6\x89\x8B\xE5\x8A\xA8\xE5\x85\xA8\xE9\x80\x89\xE5\xA4\x8D\xE5\x88\xB6\xE3\x80\x82"), 3);
+    }
     // 日志区上限 2000 块（document()->setMaximumBlockCount(2000)），超了从最早的开始淘汰。
     // 实测 2000 文件规模下每轮 12 行 → 大约 166 轮（36 分钟）之后，早先的轮次就没了，
     // 而界面上没有任何提示 → 用户回头查半小时前的日志发现没了，以为根本没记。
@@ -1561,10 +1574,31 @@ void SyncPanel::copyLog()
     }
 }
 
+// 剪贴板读回口（自检可替换）。默认读真剪贴板。
+QString (*SyncPanel::s_clipboardReadBack)(const QString &) = nullptr;
+
+void SyncPanel::setClipboardReadBackForTest(ClipboardReadBack fn)
+{
+    s_clipboardReadBack = fn;
+}
+
+QString SyncPanel::currentClipboardReadBack(const QString &expected)
+{
+    if (s_clipboardReadBack)
+        return s_clipboardReadBack(expected);
+    return QApplication::clipboard()->text();
+}
+
 void SyncPanel::clearLog()
 {
     if (m_logView)
         m_logView->clear();
+    // 内部记录也要清：原来只清显示，m_logRecords 里还留着清空前的行。
+    // 后果一：判据读 logRecordsForTest() 会看到"已经被清掉"的记录，用例之间互相污染
+    //         （2026-11-05 实测：G32 报 blocks 10->1；G31b 被上一条用例留下的
+    //         INFO「已复制日志」干扰，判成 falseOk=1）。
+    // 后果二：m_logRecords 与界面显示不一致 —— 用户点了"清空"，内部还留一份。
+    m_logRecords.clear();
 }
 
 // ---------------------------------------------------------------- 状态 / 进度
