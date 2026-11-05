@@ -56,6 +56,26 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# 让本脚本的输出按**当前控制台代码页**编码。
+#
+# 为什么（2026-11-05 实测）：中文版 Windows 的 cmd 默认输出代码页是 936(GBK)，
+# 而 Windows PowerShell 5.1 写控制台时按 UTF-8 编码 —— 于是运维跑完门禁，
+# 屏幕上是一串 "OK��469 �������İ���..."，明明全绿却一个字都看不懂。
+#
+# 口径：
+#   · 只在**输出没有被重定向**时改（重定向时 .NET 默认就是 UTF-8，改了反而
+#     把落盘文件写成 GBK）；
+#   · 只改本进程的输出编码，**不改控制台代码页**（那是全局副作用，
+#     会把用户正在用的那个 cmd 也一起改掉）。
+try {
+    if (-not [Console]::IsOutputRedirected) {
+        $enc = [System.Text.Encoding]::GetEncoding([Console]::OutputEncoding.CodePage)
+        [Console]::OutputEncoding = $enc
+    }
+} catch {
+    # 拿不到就按默认走 —— 输出难看，但不影响判定。
+}
+
 $script:Quiet = $Json.IsPresent
 
 function Say {
