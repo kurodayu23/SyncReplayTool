@@ -1229,6 +1229,31 @@ QString RsyncRunner::locateTool(const QString &name)
 //
 // 所以这里返回**全部**合格候选，由 createAskpass() 挨个试：写不进去就换下一个，
 // Low 环境下会回落到程序目录（同为 Low，写得进去）。
+//
+// ------------------------------------------------------------------
+// 候选目录**不再**要求"无空格、纯 ASCII"（2026-11-05 实测推翻）：
+//
+// 原筛选把带空格或含非 ASCII 的目录全部否掉，于是
+//   · 程序装在 "D:\My Tools\数据同步工具"（很常见）⇒ 程序目录被否掉
+//   · 用户名是中文 ⇒ %LOCALAPPDATA% / %TEMP% / home 全被否掉
+// ⇒ 低完整性环境下**一个候选都不剩**，MIC 缺陷原样存在。
+//
+// 实测（随包 ssh.exe 对着容器接收端，8 组对照）：
+//   目录名            .bat 内嵌绝对路径    .bat 用 %~dp0 自引用
+//   srtask            OK                   OK
+//   srt ask           失败                 失败   ← 空格是硬约束
+//   srt口令            失败                 OK
+//   srt 口令          失败                 失败
+// 失败信息原文：'D:\...\askpass-exp\srt' is not recognized as an internal or external command
+//
+// 由此得到两条事实：
+//   ① **空格是硬约束**：Windows OpenSSH 用 CreateProcess 跑 SSH_ASKPASS，
+//      路径被拆成两段 ⇒ 认证必然失败。绕法：同目录的 8.3 短路径里没有空格
+//      （见 askpassPathForSsh()）。
+//   ② **中文不是约束**：原先失败是因为 .bat 里内嵌了口令文件的绝对路径，
+//      那条路径用 toLocal8Bit()（ANSI 代码页）写进去，非 ASCII 变成 "????"。
+//      改成用 %~dp0 引自身目录后，.bat 内容保持纯 ASCII，中文目录完全可用。
+// ⇒ 筛选条件回到「存在 + 看着可写」，真正的判据交给"写不写得进去"。
 QStringList RsyncRunner::askpassDirCandidates()
 {
     static const QStringList dirs = []() -> QStringList {
@@ -1267,18 +1292,15 @@ QStringList RsyncRunner::askpassDirCandidates()
             const QDir probe(candidate);
             if (!probe.exists() || !QFileInfo(probe.absolutePath()).isWritable())
                 continue;
+            // 网络盘（UNC）一律不选。
+            //
+            // 为什么：那里的 ACL 由服务器决定，本机改不了，
+            // "同机其他用户读不到"这个前提不成立 —— 明文口令落到共享目录
+            // 等于对所有能访问该共享的人公开。
             const QString native = QDir::toNativeSeparators(probe.absolutePath());
-            bool clean = true;
-            for (const QChar &ch : native) {
-                // 空格会被 CreateProcess 拆开；非 ASCII 要经过系统代码页，
-                // 中文用户目录下写 .bat 本身就不可靠，一并排除。
-                if (ch == QLatin1Char(' ') || ch.unicode() > 0x7F) {
-                    clean = false;
-                    break;
-                }
-            }
-            if (clean)
-                out << probe.absolutePath();
+            if (native.startsWith(QLatin1String("\\\\")))
+                continue;
+            out << probe.absolutePath();
         }
         if (out.isEmpty())
             out << QDir::tempPath();     // 全都不合格时只能退回原行为
@@ -1287,25 +1309,30 @@ QStringList RsyncRunner::askpassDirCandidates()
     return dirs;
 }
 
-QString RsyncRunner::askpassDir()
+// 给 SSH_ASKPASS 用的脚本路径（可能与"落盘路径"不同）。
+//
+// Windows OpenSSH 用 CreateProcess 跑 SSH_ASKPASS 指向的那个文件，
+// **路径带空格会被拆成两段** ⇒ 认证必然失败。实测报错原文：
+//   'D:\...\askpass-exp\srt' is not recognized as an internal or external command
+//
+// 绕法：同一目录的 8.3 短路径里没有空格，而且指向同一个文件。
+// 短名由卷维护（卷上可以关掉 8.3 生成），拿不到就退回原路径 ——
+// 那时带空格的路径仍然会失败，但不会比原来更糟。
+QString RsyncRunner::askpassPathForSsh(const QString &askpassPath)
 {
-    // Windows OpenSSH 直接 CreateProcess 跑 SSH_ASKPASS 指向的那个 .bat，
-    // 路径带空格时会被当成"程序名 + 参数"拆开：
-    //   'C:\Users\<用户名>\AppData\Local\Temp\srt' is not recognized ...
-    // 然后 ssh 拿不到口令，认证必然失败（255）。实测对照：同样内容放
-    // %TEMP%\srt 密码测试\ 下必然失败，放 %TEMP%\srt_askpass_xxx.bat 下成功。
-    //
-    // 触发条件不是罕见配置：Windows 用户名可以带空格（John Smith、
-    // 张三 测试），而 QDir::tempPath() 就在用户目录下。密码认证（同步 +
-    // 测试连接）会整体不可用，私钥模式不受影响。
-    //
-    // 所以 askpass 脚本必须挑一个"没有空格、纯 ASCII"的目录。
-    // 口令文件（srt_pass_*）不用挪：bat 里 type 的路径是带引号的，
-    // cmd 解析得对，含空格无碍。
-    //
-    // 这里返回的是**首选**目录；真正落盘时由 createAskpass() 挨个候选试，
-    // 写不进去就换下一个（低完整性环境靠这个回落）。
-    return askpassDirCandidates().value(0);
+#ifdef Q_OS_WIN
+    if (askpassPath.isEmpty() || !askpassPath.contains(QLatin1Char(' ')))
+        return askpassPath;              // 没有空格就不折腾短路径
+    wchar_t buf[MAX_PATH * 4] = {0};
+    const DWORD n = GetShortPathNameW(reinterpret_cast<const wchar_t *>(askpassPath.utf16()),
+                                      buf, DWORD(sizeof(buf) / sizeof(buf[0])));
+    if (n > 0 && n < sizeof(buf) / sizeof(buf[0])) {
+        const QString shortPath = QString::fromWCharArray(buf, int(n));
+        if (!shortPath.isEmpty() && !shortPath.contains(QLatin1Char(' ')))
+            return shortPath;
+    }
+#endif
+    return askpassPath;
 }
 
 // 在候选目录列表里，把内容写进**第一个写得进去**的目录。
@@ -1347,6 +1374,16 @@ bool RsyncRunner::createSecretFileIn(const QStringList &dirs, const QString &nam
 }
 
 QString RsyncRunner::createAskpass(const TargetConfig &target, QString *askpassPath, QString *passFilePath)
+{
+    return createAskpassIn(askpassDirCandidates(), target, askpassPath, passFilePath);
+}
+
+// 候选目录由外面传进来，是为了能被 --selfcheck 直接判**生产接线**：
+// createAskpass() 只是把真实候选表塞进来而已，逻辑全在这里。
+// 判据要是只测 createSecretFileIn()，把生产改回"一次挑死"照样全绿 ——
+// 低完整性(MIC)缺陷就是这么复活过的。
+QString RsyncRunner::createAskpassIn(const QStringList &candidates, const TargetConfig &target,
+                                     QString *askpassPath, QString *passFilePath)
 {
     // 临时文件名里必须带 pid：cleanupStaleSecrets() 靠它精确判断
     // "这份残留是不是还活着的进程写的"。
@@ -1416,54 +1453,68 @@ QString RsyncRunner::createAskpass(const TargetConfig &target, QString *askpassP
     //   ERR   同步失败，详见上方日志条
     // ⇒ 低完整性环境下**口令认证整个不可用**，同步功能等于没有。
     //
-    // 现在挨个试：Low 环境下会回落到程序目录（同为 Low，写得进去），
-    // 同步恢复可用；口令文件仍然是 0600 且用完即清。
+    // 现在挨个试：Low 环境下会回落到程序目录（同为 Low，写得进去）。
+    //
+    // 口令文件的保护强度 = **所在目录的 ACL**：
+    // QFile::setPermissions(ReadOwner|WriteOwner) 在 Windows 上只切只读属性、
+    // 改不了 NTFS ACL，在 Linux 上才等价于 0600。
+    // 所以候选顺序刻意把"用户私有目录"排在前面（%LOCALAPPDATA% / %TEMP%），
+    // 兜底的程序目录/home 目录保护强度取决于它们自己的 ACL。
     // ----------------------------------------------------------------
-    const QStringList candidates = askpassDirCandidates();
-    QString secretDir;
-    if (!createSecretFileIn(candidates,
-                            QStringLiteral("srt_pass_") + pidTag + QStringLiteral("_XXXXXX"),
-                            target.password.toUtf8(), passFilePath, &secretDir)) {
-        return QString::fromUtf8(u8"\u65E0\u6CD5\u5199\u5165\u4E34\u65F6\u53E3\u4EE4\u6587\u4EF6\uFF1A%1")
-                   .arg(candidates.join(QStringLiteral(" / ")));
+    // 口令文件与脚本**必须同目录**，而且**要么一起成、要么一起换下一个**：
+    //   · 脚本用 "%~dp0<文件名>"（Windows）/ "$(dirname "$0")/<文件名>"（Linux）
+    //     引口令文件 —— 脚本内容因此保持**纯 ASCII**，目录里有没有中文都无所谓
+    //     （实测：中文目录 + %~dp0 ⇒ 认证成功；内嵌绝对路径 ⇒ 失败，
+    //      因为那条路径走 ANSI 代码页会变成 "????"）。
+    //   · 脚本落盘失败（目录能建文件但写不进去）时必须换下一个候选，
+    //     否则回落只做了一半：口令文件有了、脚本没有 ⇒ 整次同步失败。
+    // ----------------------------------------------------------------
+    const QString passTemplate = QStringLiteral("srt_pass_") + pidTag + QStringLiteral("_XXXXXX");
+#ifdef _WIN32
+    const QString scriptTemplate = QStringLiteral("srt_askpass_") + pidTag + QStringLiteral("_XXXXXX.bat");
+#else
+    const QString scriptTemplate = QStringLiteral("srt_askpass_") + pidTag + QStringLiteral("_XXXXXX.sh");
+#endif
+
+    for (int i = 0; i < candidates.size(); ++i) {
+        const QString dir = candidates.at(i);
+
+        QString passPath;
+        if (!createSecretFileIn(QStringList() << dir, passTemplate,
+                                target.password.toUtf8(), &passPath, nullptr))
+            continue;
+
+        // 口令文件名：srt_pass_<pid>_<6 位随机>，纯 ASCII。
+        const QString passName = QFileInfo(passPath).fileName();
+        QByteArray scriptContent;
+#ifdef _WIN32
+        // %~dp0 = 脚本自身所在目录（带尾分隔符）。
+        // 内容全 ASCII ⇒ 那个目录里有没有中文，cmd 都能正确读。
+        scriptContent = "@echo off\r\ntype \"%~dp0" + passName.toLatin1() + "\"\r\n";
+#else
+        // 同理：$(dirname "$0") 引自身目录；双引号保住含空格的路径，
+        // 单引号的问题也一并消失（原来 cat '<path>' 遇到路径里有单引号就破）。
+        scriptContent = "#!/bin/sh\ncat \"$(dirname \"$0\")/" + passName.toLatin1() + "\"\n";
+#endif
+
+        QString scriptPath;
+        if (!createSecretFileIn(QStringList() << dir, scriptTemplate, scriptContent, &scriptPath, nullptr)) {
+            // 脚本没成 ⇒ 口令文件也不能留（明文落盘必须有人负责清）。
+            QFile::remove(passPath);
+            continue;
+        }
+#ifndef _WIN32
+        // createSecretFileIn() 只给了 0600；脚本还得能执行。
+        QFile::setPermissions(scriptPath, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+#endif
+        *askpassPath = scriptPath;
+        *passFilePath = passPath;
+        return QString();
     }
 
-    // 明文口令文件一旦落盘就必须有人负责清掉。下面每条失败路径都直接删，
-    // 否则脚本写失败时调用方会带着错误串 return，
-    // 没人再回头删这个文件，明文口令就留在磁盘上了。
-    //
-    // 脚本与口令文件**必须同目录**（理由见上面那段注释），所以脚本也建在
-    // secretDir 里。Linux 上原来的脚本固定建在 QDir::tempPath()，
-    // 那是"首选目录恰好就是 tempPath"时才成立的巧合 ——
-    // 一旦回落到别的目录，脚本与口令文件就分家了。
-#ifdef _WIN32
-    QTemporaryFile script(secretDir + QStringLiteral("/srt_askpass_") + pidTag
-                          + QStringLiteral("_XXXXXX.bat"));
-    script.setAutoRemove(false);
-    if (!script.open()) {
-        QFile::remove(*passFilePath);
-        passFilePath->clear();
-        return QString::fromUtf8(u8"\u65E0\u6CD5\u5199\u5165\u4E34\u65F6 askpass \u811A\u672C");
-    }
-    *askpassPath = script.fileName();
-    // 全 ASCII，cmd 按 ANSI 读，路径加引号防空格
-    script.write("@echo off\r\ntype \"" + QDir::toNativeSeparators(*passFilePath).toLocal8Bit() + "\"\r\n");
-    script.close();
-#else
-    QTemporaryFile script(secretDir + QStringLiteral("/srt_askpass_") + pidTag
-                          + QStringLiteral("_XXXXXX.sh"));
-    script.setAutoRemove(false);
-    if (!script.open()) {
-        QFile::remove(*passFilePath);
-        passFilePath->clear();
-        return QString::fromUtf8(u8"\u65E0\u6CD5\u5199\u5165\u4E34\u65F6 askpass \u811A\u672C");
-    }
-    *askpassPath = script.fileName();
-    script.write("#!/bin/sh\ncat '" + passFilePath->toUtf8() + "'\n");
-    script.close();
-    script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
-#endif
-    return QString();
+    // 一个候选都没成：报清楚"在哪些目录试过"，别让客户猜。
+    return QString::fromUtf8(u8"\u65E0\u6CD5\u5199\u5165\u4E34\u65F6\u53E3\u4EE4\u6587\u4EF6\uFF1A%1")
+               .arg(candidates.join(QStringLiteral(" / ")));
 }
 
 void RsyncRunner::cleanupStaleSecrets()
@@ -1479,16 +1530,27 @@ void RsyncRunner::cleanupStaleSecrets()
     // pid 复用时会把文件误判成"还活着"而留下 —— 这是安全的方向
     // （多留一个文件，不会误删正在用的）。
     const QString self = QString::number(QCoreApplication::applicationPid());
-    // askpass 不一定写在 tempPath()（含空格时要挪走，见 askpassDir()），
-    // 所以这里把两个目录都扫一遍，否则挪走之后残留反而永远清不掉。
+    // askpass 不一定写在 tempPath()（低完整性环境下会回落到程序目录），
+    // 所以这里把**所有**候选目录都扫一遍，
+    // 否则回落之后残留反而永远清不掉。
     QStringList dirs;
     dirs << QDir::tempPath();
-    // askpass 不一定写在 tempPath()（含空格时要挪走；低完整性环境下还会
-    // 回落到程序目录），所以这里把**所有**候选目录都扫一遍，
-    // 否则挪走/回落之后残留反而永远清不掉。
     foreach (const QString &d, askpassDirCandidates())
         if (!dirs.contains(d))
             dirs << d;
+
+    // "只有本用户能看"的目录：%TEMP% 与 %LOCALAPPDATA% 由 Windows 按用户隔离，
+    // 同机其他用户读不到。程序目录 / home 目录**不一定是**
+    //（程序装在共享位置时别的用户也能读）。
+    //
+    // 为什么还要分这个：下面"名字不符合命名契约 ⇒ 不是本产品的文件 ⇒ 删掉"
+    // 这条规则，在私有目录里成立；在其它目录里不成立 ——
+    // 用户自己存了个 srt_pass_backup.txt 不该被程序删掉（2026-11-05 审查指出）。
+    QStringList privateDirs;
+    privateDirs << QDir::toNativeSeparators(QDir::tempPath());
+#ifdef Q_OS_WIN
+    privateDirs << QDir::toNativeSeparators(QDir::homePath() + QStringLiteral("/AppData/Local"));
+#endif
 
     QStringList names;
     QStringList nameDirs;      // 与 names 一一对应：同名的文件可能落在不同目录
@@ -1503,14 +1565,19 @@ void RsyncRunner::cleanupStaleSecrets()
     }
     for (int i = 0; i < names.size(); ++i) {
         const QString &name = names.at(i);
-        const QString full = nameDirs.at(i) + QLatin1Char('/') + name;
+        const QString &dir = nameDirs.at(i);
+        const QString full = dir + QLatin1Char('/') + name;
+        // 私有目录里可以按命名契约"清理一切不像本产品的"；
+        // 其它目录只清契约成立、且写它的进程已经死了的那些。
+        const bool isPrivate = privateDirs.contains(QDir::toNativeSeparators(dir));
         const QStringList parts = name.split(QLatin1Char('_'));
         // 连 3 段都凑不齐的（srt_pass_x / srt_askpass_x）同样不是本产品
         // 任何版本的产物：契约里 pid 永远在第 3 段。
         // 原先是 `if (parts.size() < 3) continue;`，和解析失败一样静默放过 ——
         // 清扫"有保留地跳过"在这种场景下就等于"不工作"，而且永不报错。
         if (parts.size() < 3) {
-            QFile::remove(full);
+            if (isPrivate)
+                QFile::remove(full);
             continue;
         }
         // The pid segment carries the extension in the legacy naming:
@@ -1550,9 +1617,12 @@ void RsyncRunner::cleanupStaleSecrets()
         //
         // 唯一还保留的保护是"自己正在用的那一份"：自己 pid 的文件必须留下，
         // 否则本进程同步中途启动清扫会把自己的口令文件删掉。
-        if (!ok || pid <= 0)
-            QFile::remove(full);
-        else if (pid == QCoreApplication::applicationPid())
+        if (!ok || pid <= 0) {
+            // 私有目录：契约不成立 ⇒ 一定不是本产品的文件 ⇒ 删。
+            // 其它目录：留着。用户自己可能有同名文件，程序不该替他删。
+            if (isPrivate)
+                QFile::remove(full);
+        } else if (pid == QCoreApplication::applicationPid())
             continue;
         else if (!processAlive(pid))
             QFile::remove(full);
@@ -1616,7 +1686,9 @@ void RsyncRunner::applyAskpassEnv(QProcess *proc, const QString &askpassPath)
 {
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     if (!askpassPath.isEmpty()) {
-        env.insert(QStringLiteral("SSH_ASKPASS"), askpassPath);
+        // 传出去的可能是 8.3 短路径（路径含空格时 ssh 的 CreateProcess 会把它拆开，
+        // 详见 askpassPathForSsh()）。短路径指向同一个文件。
+        env.insert(QStringLiteral("SSH_ASKPASS"), askpassPathForSsh(askpassPath));
         env.insert(QStringLiteral("SSH_ASKPASS_REQUIRE"), QStringLiteral("force"));
         // DISPLAY 只是 OpenSSH 判断"能不能用 askpass"的开关，它并不会真的
         // 连那个 X server 去显示窗口。所以这里只做兜底：**已经在的时候一律保留**。

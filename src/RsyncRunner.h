@@ -81,12 +81,16 @@ public:
     // 口令登录时 ssh 没有终端可输密码，必须靠 SSH_ASKPASS。
     // createAskpass 返回空串表示成功，调用方负责事后 remove() 掉两个临时文件。
     static QString createAskpass(const TargetConfig &target, QString *askpassPath, QString *passFilePath);
-    static void    applyAskpassEnv(QProcess *proc, const QString &askpassPath);
 
-    // askpass .bat 落在哪个目录。Windows OpenSSH 直接 CreateProcess 跑这个
-    // 路径，带空格会被拆成两段导致认证必然失败，所以要挑无空格目录；
-    // cleanupStaleSecrets() 也跟着扫这里，否则挪走之后残留清不掉。
-    static QString askpassDir();
+    // 同上，但候选目录由外面给。
+    //
+    // 为什么留这个缝：--selfcheck 必须能测**生产接线**，
+    // 而生产用的是真实候选表（没法在测试里制造"第一个不可写"）。
+    // createAskpass() 只是把 askpassDirCandidates() 塞进来，逻辑全在这。
+    // 判据要是只测 createSecretFileIn()，把生产改回"一次挑死"照样全绿。
+    static QString createAskpassIn(const QStringList &dirs, const TargetConfig &target,
+                                   QString *askpassPath, QString *passFilePath);
+    static void    applyAskpassEnv(QProcess *proc, const QString &askpassPath);
 
     // askpass 口令文件/脚本的**全部**候选目录，按优先级排列。
     //
@@ -94,7 +98,17 @@ public:
     // 程序在 Low 完整性下写不进 Medium 的 %LOCALAPPDATA% / %TEMP%。
     // 一次挑死 = 口令认证整个不可用（实测 2026-11-04）。
     // createAskpass() 挨个试，写不进去就换下一个。
+    //
+    // 筛选条件只有「存在 + 看着可写」，**不再**要求"无空格、纯 ASCII"：
+    // 那条旧规则会把"装在带空格/中文路径下"的程序目录直接否掉，
+    // 于是低完整性环境下一个候选都不剩（2026-11-05 实测推翻，详见 .cpp 的注释）。
     static QStringList askpassDirCandidates();
+
+    // 放进 SSH_ASKPASS 的脚本路径（可能与落盘路径不同）。
+    //
+    // Windows OpenSSH 用 CreateProcess 跑这个路径，**带空格会被拆成两段**
+    // ⇒ 认证必然失败；同目录的 8.3 短路径里没有空格，指向同一个文件。
+    static QString askpassPathForSsh(const QString &askpassPath);
 
     // 在候选目录列表里，把内容写进**第一个写得进去**的目录。
     // 全部失败返回 false。抽成独立函数是为了能被 --selfcheck 直接判：
@@ -215,8 +229,6 @@ public:
     { return remoteDir(t, subDir); }
     QString remoteSpecForTest(const TargetConfig &t, const QString &subDir) const
     { return remoteSpec(t, subDir); }
-    QString askpassDirForTest() const
-    { return askpassDir(); }
 
     // ---- rsync 命令行的「生产装配层」（2026-11-02 新增）----
     //

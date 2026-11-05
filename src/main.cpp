@@ -592,6 +592,11 @@ int runSelfCheck()
         // Windows 上目录的只读位被系统忽略，必须用 ACL；而 ACL 能不能挡住
         // 取决于当前用户是不是管理员 —— 所以**先验一下**它到底写不写得进去，
         // 写得进去就跳过这一档，而不是让判据变成"看运气"。
+        //
+        // 2026-11-05 审查修正：原来这个 blocked 目录**算完从来没用过**
+        // （候选表里只有 missing 和 usable），于是"ACL 档"是死的，
+        // 输出里的 aclCaseSkipped 报告的是一个从未执行过的档位。
+        // 现在：挡得住就把它**放进候选表**，并断言落点跳过它。
         const QString blocked = root + QStringLiteral("/blocked");
         QDir().mkpath(blocked);
         bool aclBlocked = false;
@@ -608,8 +613,17 @@ int runSelfCheck()
         }
 
         QString landed, landedDir;
+        // 候选表：① 目录不存在（所有平台都成立）
+        //        ② ACL 档（真的挡得住时才放进来 —— 挡不住就跳过，不能靠运气）
+        //        ③ 可写目录
+        // 落点必须是 ③。
+        QStringList fallCands;
+        fallCands << missing;
+        if (aclBlocked)
+            fallCands << blocked;
+        fallCands << usable;
         const bool fellBack = RsyncRunner::createSecretFileIn(
-                    QStringList() << missing << usable,
+                    fallCands,
                     QStringLiteral("srt_pass_selfcheck_XXXXXX"),
                     QByteArray("probe"), &landed, &landedDir);
         const bool landedInSecond = fellBack && (landedDir == usable)
@@ -628,14 +642,96 @@ int runSelfCheck()
         if (stayedFirst)
             QFile::remove(landed2);
 
-        const bool ok = landedInSecond && stayedFirst;
+        // ----------------------------------------------------------------
+        // 生产接线：createAskpassIn() —— 与生产同一个函数，只是候选表由外面给。
+        //
+        // 为什么必须测这一层（2026-11-05 审查）：
+        // 上面两条只验了辅助函数 createSecretFileIn()。
+        // 把生产改回"一次挑死"（QTemporaryFile 直接写 askpassDir()），
+        // 辅助函数原封不动地留着，上面两条照样全绿 —— 而 MIC 缺陷 100% 复活。
+        //
+        // 这里断言三件事：
+        //   ① 第一个候选不可写时，**口令文件与脚本都**落在第二个候选里；
+        //   ② 脚本内容是**纯 ASCII**，且用 "%~dp0<口令文件名>"（Windows）
+        //      / "$(dirname "$0")/<口令文件名>"（Linux）引口令文件
+        //      —— 这条锁住了"脚本内容不能内嵌路径"这条硬约束：
+        //      内嵌路径会走 ANSI 代码页，目录名里有中文就变成 "????"，
+        //      口令永远送不出去（实测：中文目录 + 内嵌路径 = 认证失败）。
+        //   ③ 真实候选表里**没有网络盘**（UNC），且首选目录不是程序目录。
+        // ----------------------------------------------------------------
+        TargetConfig probeTarget;
+        probeTarget.host = QStringLiteral("127.0.0.1");
+        probeTarget.port = 22;
+        probeTarget.user = QStringLiteral("probe");
+        probeTarget.password = QStringLiteral("probe-password");
+        QString prodAskpass, prodPass, prodErr;
+        prodErr = RsyncRunner::createAskpassIn(
+                    QStringList() << missing << usable, probeTarget, &prodAskpass, &prodPass);
+        const bool prodOk = prodErr.isEmpty();        bool prodLandedRight = false;
+        bool prodScriptAscii = false;
+        bool prodScriptSelfRef = false;
+        if (prodOk) {
+            // 注意：比较目录要用 QDir(...).absolutePath()。
+            // QFileInfo(dir).absolutePath() 返回的是"包含 dir 的目录"，
+            // 把目录本身当成文件名了 ⇒ 永远差一级 ⇒ 断言恒假。
+            const QString wantDir = QDir(usable).absolutePath();
+            prodLandedRight = QFileInfo(prodPass).exists()
+                           && QFileInfo(prodAskpass).exists()
+                           && QFileInfo(prodPass).absolutePath() == wantDir
+                           && QFileInfo(prodAskpass).absolutePath() == wantDir;
+            QFile sf(prodAskpass);
+            if (sf.open(QIODevice::ReadOnly)) {
+                const QByteArray content = sf.readAll();
+                sf.close();
+                // 纯 ASCII：任何 >0x7F 的字节都意味着目录名/内容走了非 ASCII 路径。
+                prodScriptAscii = true;
+                for (int i = 0; i < content.size(); ++i) {
+                    if (static_cast<unsigned char>(content.at(i)) > 0x7F) {
+                        prodScriptAscii = false;
+                        break;
+                    }
+                }
+                const QString passName = QFileInfo(prodPass).fileName();
+                prodScriptSelfRef = content.contains("%~dp0") || content.contains("$(dirname");
+                prodScriptSelfRef = prodScriptSelfRef && content.contains(passName.toLatin1());
+            }
+            QFile::remove(prodAskpass);
+            QFile::remove(prodPass);
+        }
+
+        // 真实候选表：不能有网络盘；首选目录必须是"用户私有"而不是程序目录。
+        const QStringList realCands = RsyncRunner::askpassDirCandidates();
+        bool candNoUnc = true;
+        bool candFirstIsUserPrivate = true;
+        for (const QString &d : realCands) {
+            if (QDir::toNativeSeparators(d).startsWith(QLatin1String("\\\\")))
+                candNoUnc = false;
+        }
+        if (!realCands.isEmpty()) {
+            const QString first = QDir::toNativeSeparators(realCands.first());
+            const QString appDir = QDir::toNativeSeparators(QCoreApplication::applicationDirPath());
+            if (first.compare(appDir, Qt::CaseInsensitive) == 0)
+                candFirstIsUserPrivate = false;
+        }
+
+        const bool ok = landedInSecond && stayedFirst
+                     && prodLandedRight && prodScriptAscii && prodScriptSelfRef
+                     && candNoUnc && candFirstIsUserPrivate;
         if (!ok)
             ++bad;
         out << (ok ? "PASS\t" : "FAIL\t") << "askpass-dir-fallback"
-            << "\tcands=" << RsyncRunner::askpassDirCandidates().size()
+            << "\tcands=" << realCands.size()
             << "\tfallbackTo2nd=" << (landedInSecond ? 1 : 0)
             << "\tstayedOn1st=" << (stayedFirst ? 1 : 0)
-            << "\taclCaseSkipped=" << (aclBlocked ? 0 : 1)
+            << "\taclCaseUsed=" << (aclBlocked ? 1 : 0)
+            << "\tprodLandedRight=" << (prodLandedRight ? 1 : 0)
+            << "\tprodScriptAscii=" << (prodScriptAscii ? 1 : 0)
+            << "\tprodScriptSelfRef=" << (prodScriptSelfRef ? 1 : 0)
+            << "\tcandNoUnc=" << (candNoUnc ? 1 : 0)
+            << "\tcandFirstUserPrivate=" << (candFirstIsUserPrivate ? 1 : 0)
+            << "\tprodErr=[" << prodErr.toLocal8Bit() << "]"
+            << "\tpassDir=[" << QFileInfo(prodPass).absolutePath() << "]"
+            << "\twantDir=[" << QDir(usable).absolutePath() << "]"
             << "\n";
     }
 
@@ -3807,8 +3903,14 @@ struct SecretCheck
     QStringList leftovers() const
     {
         QStringList found;
+        // 必须扫**全部**候选目录，不能只看 tempPath + 首选目录：
+        // 低完整性环境下口令文件会回落到别的候选（程序目录等），
+        // 探测不到那些目录 = 真有泄漏也报"干净"（测试盲区）。
         QStringList dirs;
-        dirs << QDir::tempPath() << RsyncRunner::askpassDir();
+        dirs << QDir::tempPath();
+        foreach (const QString &d, RsyncRunner::askpassDirCandidates())
+            if (!dirs.contains(d))
+                dirs << d;
         for (const QString &d : dirs) {
             // 注意 nameFilters 是**通配符**，不是前缀。
             // 写成 "srt_pass_"（少了星号）只会匹配名字正好等于它的文件，
@@ -3864,7 +3966,12 @@ struct SecretCheck
             rf.write("\n--- temp snapshot ---\n");
             // 全量列出（不限 pid、不限大小）。判据只看"本进程名下的"，
             // 一旦判据说干净而这里其实有东西，说明过滤条件本身错了。
-            const QStringList probeDirs = QStringList() << QDir::tempPath() << RsyncRunner::askpassDir();
+            // 目录同样是**全部候选**（低完整性回落时口令落在别的目录）。
+            QStringList probeDirs;
+            probeDirs << QDir::tempPath();
+            foreach (const QString &d, RsyncRunner::askpassDirCandidates())
+                if (!probeDirs.contains(d))
+                    probeDirs << d;
             for (const QString &d : probeDirs) {
                 const QStringList names = QDir(d).entryList(QStringList()
                                                            << QStringLiteral("srt_pass_*")
@@ -3966,14 +4073,50 @@ static int runSecretCheck(QApplication &app, int rounds)
     }
 
     sc.self = QString::number(QCoreApplication::applicationPid());
-    sc.srcDir = QDir::tempPath() + QStringLiteral("/srt-sc-src-") + sc.self;
-    const bool mkOk = QDir().mkpath(sc.srcDir);
-    QFile f(sc.srcDir + QLatin1String("/probe.spe"));
-    const bool probeOk = f.open(QIODevice::WriteOnly);
-    if (probeOk) {
-        f.write("srt-selfcheck", 14);
-        f.close();
+
+    // 探针目录也要能**回落**。
+    //
+    // 为什么（2026-11-05 实测）：程序放在带 `Mandatory Label\Low` 的目录里时，
+    // 进程是 Low 完整性，往 Medium 的 %TEMP% 写文件被内核拒绝：
+    //   INFO  selfcheck-src  mkpath=1  probeWritten=0
+    // 探针文件落不了地 → 扫不到文件 → 整轮自检空转（SECRETS_CHECK_BROKEN）。
+    // 而这正是"低完整性环境下口令认证能不能救回来"最该验的场景 ——
+    // 自检却因为自己的探针目录建不出来，永远给不出结论。
+    //
+    // 候选与口令文件同一套（%TEMP% → %LOCALAPPDATA% → 程序目录 → home）：
+    // Low 环境下会落到程序目录（同为 Low，写得进去），
+    // 于是自检能真正跑起来、给出"能用/不能用"的结论。
+    QStringList probeRoots;
+    probeRoots << QDir::tempPath();
+    foreach (const QString &d, RsyncRunner::askpassDirCandidates())
+        if (!probeRoots.contains(d))
+            probeRoots << d;
+
+    bool mkOk = false;
+    bool probeOk = false;
+    QString probeRootUsed;
+    foreach (const QString &root, probeRoots) {
+        const QString dir = root + QStringLiteral("/srt-sc-src-") + sc.self;
+        if (QDir().mkpath(dir)) {
+            sc.srcDir = dir;
+            mkOk = true;
+            probeRootUsed = root;
+            QFile pf(dir + QLatin1String("/probe.spe"));
+            if (pf.open(QIODevice::WriteOnly)) {
+                pf.write("srt-selfcheck", 14);
+                pf.close();
+                probeOk = true;
+                break;              // 探针文件也写进去了，这轮才有意义
+            }
+        }
+        // 目录建得出来、文件写不进去（Low 完整性）→ 换下一个候选
     }
+    if (!probeOk && !sc.srcDir.isEmpty()) {
+        // 保留最后一次尝试的目录，失败信息里要用
+        sc.srcDir = probeRoots.last() + QStringLiteral("/srt-sc-src-") + sc.self;
+    }
+    if (probeRootUsed.isEmpty())
+        probeRootUsed = QDir::tempPath();
     // 这行必须打出来：后面「没扫到文件」的失败只有一条原因链 ——
     // 探针文件没落地 -> 扫不到文件 -> 口令链路一次都没跑。
     // 不把「目录 / mkpath 结果 / 探针写入结果」三个值打出来，
@@ -3982,6 +4125,7 @@ static int runSecretCheck(QApplication &app, int rounds)
     sc.out << "INFO\tselfcheck-src\tdir=" << sc.srcDir
            << "\tmkpath=" << (mkOk ? 1 : 0)
            << "\tprobeWritten=" << (probeOk ? 1 : 0)
+           << "\tprobeRoot=" << probeRootUsed
            << "\ttempPath=" << QDir::tempPath()
            << "\n";
 
@@ -4032,11 +4176,23 @@ static int runSecretCheck(QApplication &app, int rounds)
             }
             // 失败时把面板日志一起打出来：光说"没扫到文件"没法定位
             // （扫的是哪个目录？被什么规则过滤了？目录是不是压根不存在？）。
-            sc.out << "FAIL\tno-files-scanned\t自检空转：没扫到文件，口令链路不会执行" << "\n";
+            //
+            // 判定词必须是 CHECK_BROKEN 而不是 LEAKED：
+            // 这一条说明的是「**没测到**」（探针文件没落地 / 扫描没跑起来），
+            // 不是「测出了泄漏」。两者混用会把"自检环境不具备"
+            // 说成"程序有安全缺陷" —— 客户照着查安全，其实该查的是环境。
+            //
+            // 实测（2026-11-05，程序放在带 `Mandatory Label\Low` 的目录里）：
+            //   INFO  selfcheck-src  mkpath=1  probeWritten=0
+            //   FAIL  no-files-scanned
+            //   SECRETS_LEAKED          ← 改之前（假红）
+            // 探针目录建得出来、探针文件写不进去，是 Low 完整性的典型形态：
+            // 进程被降级后只能建目录、不能写文件。
+            sc.out << "FAIL\tno-files-scanned\t自检空转：没扫到文件，口令链路不会执行（没测到，不等于测出泄漏）" << "\n";
             const QStringList tail = sc.panel->logTailForTest(12);
             for (int i = 0; i < tail.size(); ++i)
                 sc.out << "INFO\tpanel-log\t" << tail.at(i) << "\n";
-            sc.out << "SECRETS_LEAKED" << "\n";
+            sc.out << "SECRETS_CHECK_BROKEN" << "\n";
             poll->stop();
             QCoreApplication::exit(1);
             return;
@@ -4078,6 +4234,38 @@ int main(int argc, char *argv[])
     // 必须在 QApplication 构造之前设置。Qt 5.9 默认关闭，Qt 6 才默认开启。
     QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling, true);
     QCoreApplication::setAttribute(Qt::AA_UseHighDpiPixmaps, true);
+
+    // ----------------------------------------------------------------
+    // 无图形环境上跑 --selfcheck 必须能起来
+    //
+    // 事实（2026-11-05 实测）：麒麟 V10 容器里不带 DISPLAY 直接跑
+    //     ./SyncReplayTool --selfcheck
+    // 会在 QApplication 构造那一刻直接 abort：
+    //     qt.qpa.screen: QXcbConnection: Could not connect to display
+    //     Could not connect to any X display.
+    // stdout 一行都没有，退出码 1 —— 客户只会看到一句英文，看不出是"没有桌面"。
+    //
+    // 而这段代码自己的注释承诺的是"在没有任何 X/桌面环境的机器上也能跑"。
+    //
+    // 修法：探测到 --selfcheck 且没有显示环境时，切 offscreen 平台。
+    // 客户按包内 自检.sh 走本来就是 offscreen，这里只是让"直接敲命令"也能跑。
+    //
+    // 只对 --selfcheck 生效：--selfcheck-gui 要测**真实几何**，
+    // offscreen 的虚拟屏幕会把尺寸判据全带偏。
+    {
+        bool wantsSelfCheck = false;
+        for (int i = 1; i < argc; ++i) {
+            const QByteArray a = QByteArray(argv[i]);
+            if (a == "--selfcheck")
+                wantsSelfCheck = true;
+        }
+        if (wantsSelfCheck
+            && qgetenv("DISPLAY").isEmpty()
+            && qgetenv("WAYLAND_DISPLAY").isEmpty()
+            && qgetenv("QT_QPA_PLATFORM").isEmpty()) {
+            qputenv("QT_QPA_PLATFORM", "offscreen");
+        }
+    }
 
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("SyncReplayTool"));
@@ -4141,7 +4329,26 @@ int main(int argc, char *argv[])
     // 直接报错退出（"Unknown option 'help'."）—— 交付给客户机的命令行程序
     // 连用法都打不出来。子代理 B 在麒麟 V10 容器里实测抓到的。
     parser.addHelpOption();
-    parser.process(app);
+    // --help **不能弹模态框**。
+    //
+    // QCommandLineParser 默认在 GUI 程序里用 QMessageBox 显示帮助：
+    // 客户在运维命令行敲 --help，会被一个"确定"按钮挡住 —— 在无头/远程会话里
+    // 根本点不到，看起来就像程序卡死（实测 2026-11-05，交付包里的 exe）。
+    //
+    // 改成往 stdout 打文本、正常退出（退出码 0）。
+    // 这里用 parse() 而不是 process()：parse() 不退出，我们自己决定怎么打印。
+    if (!parser.parse(QCoreApplication::arguments())) {
+        const QByteArray err = parser.errorText().toUtf8();
+        const QByteArray help = parser.helpText().toUtf8();
+        fprintf(stderr, "%s\n", err.constData());
+        fprintf(stdout, "%s\n", help.constData());
+        return 2;
+    }
+    if (parser.isSet(QStringLiteral("help"))) {
+        const QByteArray help = parser.helpText().toUtf8();
+        fprintf(stdout, "%s\n", help.constData());
+        return 0;
+    }
 
     // 自启项自愈：用户勾了「开机自启」，但包被挪到别的目录、或升级到新目录之后，
     // 注册表里那条还指着旧路径 —— 开机根本不会启动，而设置界面依旧显示"已开启"。
