@@ -18,6 +18,12 @@
 #  include <windows.h>
 #endif
 
+#ifdef Q_OS_UNIX
+// lstat / S_ISLNK —— 判"断链"要用（见 isLinkEntry）。
+#  include <sys/stat.h>
+#  include <unistd.h>
+#endif
+
 // QFile::Permissions 在下面判断"目录读不读得了"时要用，
 // 两个平台都要 —— 原来的 #ifdef Q_OS_LINUX 让 Windows 上编不过这一段。
 #include <QFile>
@@ -118,7 +124,17 @@ int pathLengthLimit()
 bool exceedsPathLimit(const QString &path)
 {
     const int limit = pathLengthLimit();
-    return limit > 0 && path.length() > limit;
+    // 用 >=，不是 >。
+    //
+    // 2026-11-05 实测（边界压测）：Windows 上 259 字符的路径正常、
+    // **260 字符必须带 \\?\ 前缀**才打得开、261 明显超限。
+    // 原来写 `> 260` ⇒ 260 这一档被判成"没超长"，于是绕到权限判断上，
+    // 而权限探测又不带 \\?\ ⇒ 好端端的目录被判成"读不了（请检查访问权限）"，
+    // 子树静默丢失，**排查方向还被带偏**（客户会去折腾 ACL，真因根本不在那儿）。
+    //
+    // Linux 同理：PATH_MAX = 4096 是含结尾 NUL 的缓冲区长度，
+    // 路径字符串最多 4095 个字符，4096 那个内核根本建不出来。
+    return limit > 0 && path.length() >= limit;
 }
 
 // 往"跳过清单"里加一条，并累加总数。
@@ -160,10 +176,38 @@ void resetSkipNotes()
 bool hasReadPermission(const QString &path)
 {
 #if defined(_WIN32)
-    const std::wstring w = QDir::toNativeSeparators(path).toStdWString();
-    const HANDLE h = CreateFileW(w.c_str(), GENERIC_READ,
-                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                 NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    // Windows 长路径必须带 \\?\ 前缀，否则 MAX_PATH 以上的目录一律打不开。
+    //
+    // 2026-11-05 实测：路径**恰好 260 字符**时，不带前缀的 CreateFileW 失败、
+    // 带前缀的成功 ⇒ 原来这个探测会把好端端的目录判成"读不了"，
+    // 子树静默丢失、原因还写成"请检查访问权限"。
+    //
+    // \\?\ 前缀有两条硬规矩，这里都照顾到了：
+    //   ① 只对**绝对路径**有效（相对路径要自己先转绝对）；
+    //   ② UNC 路径要写成 \\?\UNC\server\share\...（不是 \\?\server\share\...）。
+    // 另外 \\?\ 之后**不做路径规范化**（. 与 .. 不再被消解），
+    // 所以必须先 cleanPath()，否则 QDir 里残留的 ".." 会让打开直接失败。
+    QString p = QDir::cleanPath(QDir::toNativeSeparators(path));
+    if (!p.startsWith(QLatin1String("\\\\?\\"))) {
+        if (p.startsWith(QLatin1String("\\\\"))) {
+            p = QLatin1String("\\\\?\\UNC\\") + p.mid(2);
+        } else {
+            p = QLatin1String("\\\\?\\") + p;
+        }
+    }
+    const std::wstring w = p.toStdWString();
+    HANDLE h = CreateFileW(w.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        // 退回到**不带前缀**的路径再试一次。
+        // 有些重定向器（网络盘、部分虚拟盘）不认 \\?\，
+        // 只试带前缀的会把好目录判成读不了 —— 那比原来更糟。
+        const std::wstring w2 = QDir::toNativeSeparators(path).toStdWString();
+        h = CreateFileW(w2.c_str(), GENERIC_READ,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    }
     if (h == INVALID_HANDLE_VALUE)
         return false;
     CloseHandle(h);
@@ -182,8 +226,34 @@ bool hasReadPermission(const QString &path)
 #endif
 }
 
-// 判断一个子目录是不是"链接出去的目录"，是就整棵跳过。
+// 这个路径是不是一个"链接"（符号链接 / junction / reparse point）。
 //
+// 为什么必须走原生接口（2026-11-05 实测）：
+//   Qt 的 QFileInfo 靠 stat 填元数据，而**断链**（指向不存在的目标）
+//   stat 必然失败 ⇒ 元数据是空的 ⇒ isSymLink() 返回**假**。
+//   结果断链被**完全静默**地丢掉：既不进清单、也不进任何计数、日志里一个字都没有。
+//   实测（麒麟容器）：4 个软链里那个断链，三个计数一个都不进。
+//
+// Windows 侧：GetFileAttributesW + FILE_ATTRIBUTE_REPARSE_POINT
+//   （与 isLinkedDir 同一口径）。
+// Unix 侧：lstat + S_ISLNK（lstat 不跟随链接，所以断链也拿得到）。
+bool isLinkEntry(const QString &path)
+{
+#if defined(_WIN32)
+    const DWORD attr = GetFileAttributesW(reinterpret_cast<LPCWSTR>(path.utf16()));
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_REPARSE_POINT);
+#elif defined(Q_OS_UNIX)
+    struct stat st;
+    if (::lstat(path.toLocal8Bit().constData(), &st) != 0)
+        return false;
+    return S_ISLNK(st.st_mode);
+#else
+    Q_UNUSED(path);
+    return false;
+#endif
+}
+
+// 判断一个子目录是不是"链接出去的目录"，是就整棵跳过。
 // 实测（本轮文件系统边界压测，组 8）：
 //   本地数据根目录下放一个指向外部目录的 junction，外部目录里有 500 个 .spe，
 //   扫描直接把 FILECOUNT 扫成 501，整棵外部目录被复制到远端（远端共 501 个文件）。
@@ -287,6 +357,29 @@ QSet<QString> linuxMountPoints()
     return s_points;
 }
 
+// 解析软链后的**真实路径**。
+//
+// 为什么必须有（2026-11-05 实测，数据泄漏）：
+//   内核 /proc/self/mountinfo 里记的挂载点是**已解析**的真实路径
+//   （实测：/tmp/bmtest/root/inner），
+//   而 QDir::absolutePath() 给的是**没解析**的路径
+//   （数据根是软链时是 /tmp/bmtest/rootlink/inner）——
+//   两者永远对不上 ⇒ crossesMountPoint() 恒 false ⇒ 整条 bind mount 防护形同虚设。
+//
+//   实测后果：数据根是软链（/data/current -> /data/2026-11-05 这种很常见）
+//   且根下有 bind mount 时，**外部的 5 个文件进了清单**、零提示 ——
+//   那些文件随后会被 rsync 传到远端。**这是数据泄漏。**
+//
+// 解析不出来（目录不存在 / 无权限）就退回 absolutePath()，
+// 判据宁可松一点，也不要把正常的目录判成"越过数据根"。
+QString resolvedPath(const QString &p)
+{
+    const QString canon = QFileInfo(p).canonicalFilePath();
+    if (!canon.isEmpty())
+        return QDir::fromNativeSeparators(QDir(canon).absolutePath());
+    return QDir::fromNativeSeparators(QDir(p).absolutePath());
+}
+
 // 这个目录是不是"越过数据根、进入了另一个挂载点"。
 //
 // 精确匹配挂载点，不做前缀匹配：用户把 /data 整个选为数据根时，
@@ -294,8 +387,12 @@ QSet<QString> linuxMountPoints()
 // 前缀匹配会把 /data 本身也挡掉，界面上表现为"配了目录却一个文件都扫不到"。
 bool crossesMountPoint(const QString &dirPath, const QString &basePath)
 {
-    const QString norm = QDir::fromNativeSeparators(QDir(dirPath).absolutePath());
-    const QString base = QDir::fromNativeSeparators(QDir(basePath).absolutePath());
+    // 必须用**解析后**的路径比（见 resolvedPath 的说明）——
+    // 用没解析的路径比，mountinfo 里的真实挂载点永远对不上。
+    const QString norm = resolvedPath(dirPath);
+    const QString base = resolvedPath(basePath);
+    if (norm.isEmpty() || base.isEmpty())
+        return false;
     if (norm == base)
         return false;
     return linuxMountPoints().contains(norm);
@@ -322,6 +419,24 @@ bool shouldSkipDir(const QString &dirPath, const QString &basePath)
 QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suffixes)
 {
     QVector<FileItem> items;
+
+    // 计数器必须在这里就清零（2026-11-05 修）。
+    //
+    // 原来清零在"根目录存在"的检查**之后** —— 根不存在 / 为空时直接 return，
+    // 于是**上一轮**的跳过清单和计数被当成本轮的：
+    //   实测（同一进程连续两趟）：第一趟 NOTES=1 / SKIPPED_TOTAL=1；
+    //   第二趟换成不存在的根，读出来还是 NOTES=1 / SKIPPED_TOTAL=1。
+    // 上层（RsyncRunner 直接读 skippedNotes()/skippedCount() 做播报）
+    // 会把上一轮的跳过原因当成这一轮的报出去。
+    //
+    // 口径：scan() 的这些静态量只反映**这一次**调用。
+    g_truncated.storeRelease(0);
+    g_skippedLinks.storeRelease(0);
+    g_skippedLinkDirs.storeRelease(0);
+    g_unreadableDirs.storeRelease(0);
+    g_skippedBySuffix.storeRelease(0);
+    // 跳过清单每次扫描重新算（"跳过必须留痕"，见上面的说明）。
+    resetSkipNotes();
 
     // 空串必须直接拒掉，不能交给 QDir。
     //
@@ -359,13 +474,7 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
     const QString basePath = base.absolutePath();
 
     // 每次扫描开头清一次，标志只反映**本次**扫描有没有触顶。
-    g_truncated.storeRelease(0);
-    g_skippedLinks.storeRelease(0);
-    g_skippedLinkDirs.storeRelease(0);
-    g_unreadableDirs.storeRelease(0);
-    g_skippedBySuffix.storeRelease(0);
-    // 跳过清单每次扫描重新算（"跳过必须留痕"，见上面的说明）。
-    resetSkipNotes();
+    // （计数器已在函数开头清过，这里只补 scanGeneration。）
     g_scanGeneration.fetchAndAddOrdered(1);
 
     // 手动深度优先。栈元素 = (目录绝对路径, 相对 basePath 的深度)。
@@ -389,23 +498,16 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
     const int kMaxDepth = 64;
     const int kMaxEntries = 2000000;
     bool stopAll = false;
+    // 扫过的**文件**总数（不管有没有命中规则）。
+    // 条目上限按它算，与 detectSuffixes() 完全对齐 ——
+    // 两边口径不同的话，同一个目录会出现
+    // "识别出 5 种后缀、按规则扫只出来 3 种"这种对不上的界面（产品自己担心的那个）。
+    int fileTotal = 0;
 
     while (!stack.isEmpty() && !stopAll) {
         const QPair<QString, int> top = stack.takeLast();
         const QString dir = top.first;
         const int depth = top.second;
-        // 数据根本身就超长（用户把目录选在一个很深的路径下）：整棵都列不出来。
-        // 子目录的超长在下面的"条目循环"里判（那里的路径才是完整路径）。
-        if (exceedsPathLimit(dir)) {
-            // 目录路径超长 → 列目录的接口一定失败（枚举本身就有长度限制），
-            // 这一棵子树整个看不见。跳过 + 留痕，不让它变成"静默少了一棵树"。
-            g_skippedLongPaths.fetchAndAddOrdered(1);
-            addSkipNote(QString::fromUtf8(
-                u8"因路径过长跳过：%1（路径长度上限 %2 字符，该路径 %3 字符；该目录整棵列不出来）")
-                .arg(dir).arg(pathLengthLimit()).arg(dir.length()));
-            setTruncated();
-            continue;
-        }
         if (depth > kMaxDepth) {
             // 到顶了：**跳过这一棵子树**，但**继续扫别的分支**。
             //
@@ -425,15 +527,69 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
         }
         const QDir d(dir);
 
-        // 当前用户**读不了**的目录：整棵跳过，里面的文件不会进清单。
+        // 先列一次。
         //
-        // 不报出来的话，客户看到的是「同步完成，共 N 个文件」，
-        // 实际少了一整棵目录 —— 静默丢数据。
+        // 2026-11-05 重写。原来这里是「路径超长就整棵跳过」的一刀切，
+        // 而实测 Qt 5.9.6 **列得出** 261/270/300 字符的目录（entryInfoList 有内容），
+        // 一刀切等于**白丢一棵列得出来的子树** ——
+        // 而同一棵树里 >260 的**文件**却能进清单（文件侧早就改成
+        // "先问操作系统，问得到就正常处理"），两边口径不一致。
         //
-        // 判据要"权限位上没有读" **且** "列不出任何条目" 同时成立：
-        // 只看列不出条目 → 正常的**空目录**会被误判；
-        // 只看权限位 → Windows 上 Qt 对目录权限位不可信，会把能读的目录也误判。
-        if (!hasReadPermission(dir) && d.isEmpty(QDir::NoDotAndDotDot)) {
+        // 现在：目录侧与文件侧同一思路 —— **先问操作系统，问得到就正常处理**。
+        //
+        // QDir::System 是为了**断链**（2026-11-05 修）。
+        // Qt 列举目录时按"目标是什么"分类条目：**断链**（指向不存在的目标）
+        // 既不是 Files 也不是 Dirs，于是**根本不会出现在列表里** ——
+        // 原来它被完全静默地丢掉：不进清单、不进任何计数、日志里一个字都没有。
+        // 实测（麒麟容器，同一个目录）：
+        //   Files|Dirs|Hidden        -> 3 条（断链不见了）
+        //   Files|Dirs|Hidden|System -> 4 条（断链出现了）✔
+        // Windows 上加不加 System **完全一样**（实测 .lnk 快捷方式本来就不在
+        // Qt 5.9.6 的列表里），所以这一改在 Windows 侧零风险。
+        const QFileInfoList entries = d.entryInfoList(
+            QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+            QDir::Name);
+
+        // 条目上限：在这个目录开始处理之前就判。
+        //
+        // 原来上限只写在下面"逆序入栈子目录"的循环里 —— 而**扁平目录**
+        // （一个子目录都没有）那个循环一次都不执行 ⇒ 上限**从未运行**。
+        // 实测（2026-11-05）：210 万个空文件放一个扁平目录 ⇒
+        //   ITEMS=2100000（超上限一倍）、TRUNCATED=0（界面不提示结果不完整）、
+        //   峰值常驻 2.52 GB、耗时 158 秒。
+        // 客户机 8 GB 内存，这样跑一遍就吃掉三分之一，而且用户毫无察觉。
+        //
+        // 这里数的是**文件**个数（entryInfoList 已经把元数据取回来了，
+        // 这里只是内存里数一下，不额外碰磁盘）。
+        int filesHere = 0;
+        for (const QFileInfo &fi : entries) {
+            if (fi.isFile() || fi.isSymLink())
+                ++filesHere;
+        }
+        if (fileTotal + filesHere > kMaxEntries) {
+            setTruncated();
+            addSkipNote(QString::fromUtf8(
+                u8"条目数超过上限 %1，已中止扫描（结果不完整；请缩小数据目录，或分批同步）")
+                .arg(kMaxEntries));
+            stopAll = true;
+            break;
+        }
+
+        // 列不出任何条目时，才去问"为什么"：读不了（权限 / 路径太长），
+        // 还是本来就是个空目录。
+        //
+        // 原来的判据 `!hasReadPermission(dir) && d.isEmpty(QDir::NoDotAndDotDot)`
+        // 有两个错（2026-11-05 实测）：
+        //   ① `QDir::isEmpty(QDir::NoDotAndDotDot)` 在 Qt 5.9.6 上**恒为 true**
+        //      （只带 NoDotAndDotDot、不带 Files|Dirs 类型位 ⇒ 选中 0 个条目），
+        //      所以注释里说的"只看列不出条目 → 正常的空目录会被误判"那道保险
+        //      **从来不存在**，判据实际只看权限；
+        //   ② hasReadPermission() 用的是不带 \\?\ 前缀的 CreateFileW，
+        //      路径恰好 260 字符时必然失败 ⇒ 好端端的目录被判成"读不了"，
+        //      子树静默丢失，原因还写成"请检查访问权限"，把排查方向带偏。
+        // 现在权限探测带 \\?\ 前缀（见 hasReadPermission），
+        // 路径长度不再是误判的主因；真的读不了时，再按长度分因。
+        if (entries.isEmpty() && !hasReadPermission(dir)) {
             ++g_unreadableDirs;
             if (exceedsPathLimit(dir)) {
                 // 权限位读不到**也可能**是因为路径太长（打不开这个目录）。
@@ -442,17 +598,13 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
                 addSkipNote(QString::fromUtf8(
                     u8"因路径过长跳过：%1（路径长度上限 %2 字符，该路径 %3 字符；该目录整棵列不出来）")
                     .arg(dir).arg(pathLengthLimit()).arg(dir.length()));
+                setTruncated();
             } else {
                 addSkipNote(QString::fromUtf8(
                     u8"因目录读不了跳过：%1（请检查访问权限）").arg(dir));
             }
             continue;
         }
-
-        // 一次 entryInfoList 拿全，比 QDirIterator 少很多 stat 调用；
-        // QDir::Name 排序保证遍历顺序稳定（推送时逆序，弹出时就是字典序）。
-        const QFileInfoList entries = d.entryInfoList(
-            QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden, QDir::Name);
 
         QStringList subDirs;
         subDirs.reserve(entries.size());
@@ -529,10 +681,41 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
             // 这里处理的是指向文件的、以及指向不存在目标的（断链）。
             if (fi.isSymLink()) {
                 ++g_skippedLinks;
+                // 链接文件也必须**留痕**（2026-11-05 修）。
+                //
+                // 原来这里只加计数、不写 note ⇒ 跳过清单的**总数**与**条数**对不上
+                // （实测 SKIPPED_LINKS=3 而 SKIPPED_TOTAL=2 / NOTES=2），
+                // 而且**断链**（指向不存在的目标）三个计数一个都不进 ——
+                // 客户完全看不见它。界面那句"扫描阶段跳过 N 个条目"于是少算。
+                addSkipNote(QString::fromUtf8(
+                    u8"因是符号链接跳过：%1（链接不是数据）").arg(fi.absoluteFilePath()));
                 continue;
             }
-            if (!fi.isFile())
+            if (!fi.isFile()) {
+                // 既不是文件也不是目录 —— 典型的就是**断链**。
+                // Qt 在这里给不出任何信息（stat 失败 ⇒ 元数据为空 ⇒
+                // isSymLink() 是假），所以原来它被**完全静默**地丢掉：
+                // 不进清单、不进任何计数、日志里一个字都没有。
+                // 用原生接口补判一次：断链也是"链接不是数据"，必须计数、必须留痕。
+                if (isLinkEntry(entryPath)) {
+                    ++g_skippedLinks;
+                    addSkipNote(QString::fromUtf8(
+                        u8"因是符号链接跳过：%1（链接不是数据，且目标不存在）").arg(entryPath));
+                }
                 continue;
+            }
+
+            // 扫过的文件总数（不管后面命不命中规则）——
+            // 条目上限按它算，与 detectSuffixes() 对齐。
+            ++fileTotal;
+            if (fileTotal > kMaxEntries) {
+                setTruncated();
+                addSkipNote(QString::fromUtf8(
+                    u8"条目数超过上限 %1，已中止扫描（结果不完整；请缩小数据目录，或分批同步）")
+                    .arg(kMaxEntries));
+                stopAll = true;
+                break;
+            }
 
             // 同步期间 rsync 会把临时文件清单写在本地根目录内、以
             // .srt-filelist- 开头。它不是用户数据：不排除的话，规则后缀命中
@@ -630,6 +813,10 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
             items.append(item);
         }
 
+        // 触顶中止时不要再往栈里塞目录（栈里的东西这趟不会再处理）。
+        if (stopAll)
+            break;
+
         // 逆序入栈，配合 QDir::Name 排序，最终弹出顺序与字典序一致
         for (int i = subDirs.size() - 1; i >= 0; --i) {
             const QString sub = subDirs.at(i);
@@ -671,8 +858,20 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
 //     与用户在 Windows 上看到的"只有一个"对不上
 //
 // 实测（Windows，NTFS）：写入 A.spe 再写 a.spe，磁盘上只剩 A.spe 一个，
-// 内容被后者替换，全程没有任何提示。程序在扫描时检出并报出来，
-// 用户至少知道"这两个名字在 Windows 上是同一个文件"。
+// 内容被后者替换，全程没有任何提示。
+//
+// ⚠ 2026-11-05 更正（边界压测实测）：这里原来写着
+//   "程序在扫描时检出并报出来，用户至少知道这两个名字在 Windows 上是同一个文件"
+//   —— **这句话是错的**。
+//   实测：Windows 上先写 A.spe(AAA) 再写 a.spe(BBB)，磁盘上只剩 **1 个 A.spe**
+//   （内容是 BBB）⇒ 扫描只拿到 1 个条目，COLLISIONS = 0。
+//   数据在**被拷进磁盘的那一刻**就已经没了，扫描器无从得知。
+//
+// 所以在 Windows 发送端上这个函数是**死代码**（大小写不敏感的盘上，
+// 两个只差大小写的文件根本不会共存）。它真正的价值在：
+//   · 接收端是 Linux（大小写敏感），而清单来自别处 —— 那时两个文件会真的都传过去；
+//   · Linux 发送端（实测 COLLISIONS=1 ✔）。
+// 保留它，不删：跨平台同步时清单可能来自大小写敏感的那一侧。
 //
 // 判据：同一目录内，文件名忽略大小写后相同。跨目录不算 ——
 // Linux 上 "a/f.spe" 和 "b/f.spe" 是两个不同路径，本来就该都传。
@@ -760,8 +959,32 @@ QVector<SuffixStat> FileScanner::detectSuffixes(const QString &root)
         }
         const QDir d(dir);
 
+        // 过滤组合必须与 scan() **完全一致**（含 QDir::System ——
+        // 那是断链能被看见的唯一办法，见 scan() 里的说明）。
+        // 两边口径不同 → 同一个目录在"识别后缀"和"按规则扫描"里条目数对不上，
+        // 而界面上没有任何报错。
         const QFileInfoList entries = d.entryInfoList(
-            QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden, QDir::Name);
+            QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+            QDir::Name);
+
+        // 条目上限：**与 scan() 同一口径、同一位置**（2026-11-05 修）。
+        //
+        // 原来只在下面处理完一个文件之后才判 ⇒ 这个目录的 QFileInfoList
+        // 已经建好了（210 万条目 = 2.5 GB 常驻），判完也已经晚了。
+        // 现在在处理之前就数一遍，超了直接停。
+        int filesHere = 0;
+        for (const QFileInfo &fi : entries) {
+            if (fi.isFile() || fi.isSymLink())
+                ++filesHere;
+        }
+        if (fileTotal + filesHere > kMaxEntries) {
+            setTruncated();
+            addSkipNote(QString::fromUtf8(
+                u8"条目数超过上限 %1，已中止扫描（结果不完整；请缩小数据目录，或分批同步）")
+                .arg(kMaxEntries));
+            stopAll = true;
+            break;
+        }
 
         QStringList subDirs;
         subDirs.reserve(entries.size());
