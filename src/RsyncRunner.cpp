@@ -3176,6 +3176,7 @@ void RsyncRunner::verifyRemoteDir(const QString &remoteDir)
     }
 
     if (m_verifyToken.isEmpty()) {
+        ++m_groupIndex;
         launchNext();
         return;
     }
@@ -3187,12 +3188,14 @@ void RsyncRunner::verifyRemoteDir(const QString &remoteDir)
     // 2026-11-05 实测：建目录那步因引号不闭合失败后，这里就是这么把
     // "rm 客户目录"发过去的。标记为空就直接跳过核对。
     if (m_verifyMarker.isEmpty()) {
+        ++m_groupIndex;
         launchNext();
         return;
     }
 
     const QString sshBin = locateTool(QStringLiteral("ssh"));
     if (sshBin.isEmpty()) {
+        ++m_groupIndex;
         launchNext();
         return;
     }
@@ -3267,8 +3270,8 @@ void RsyncRunner::onVerifyFinished(int exitCode, QProcess::ExitStatus status)
 
     m_proc->deleteLater();
     m_proc = nullptr;
-    ++m_groupIndex;
-    launchNext();
+        ++m_groupIndex;
+        launchNext();
 }
 
 // 收尾清理的**唯一次序来源**：先远端标记、后口令文件。
@@ -4194,8 +4197,8 @@ void RsyncRunner::onFinished(int exitCode, QProcess::ExitStatus status)
         return;
     }
 
-    ++m_groupIndex;
-    launchNext();
+        ++m_groupIndex;
+        launchNext();
 }
 
 void RsyncRunner::cancel()
