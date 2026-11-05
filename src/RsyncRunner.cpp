@@ -372,6 +372,25 @@ const char *kLayerAdvice[] = {
     u8"\u8BF7\u5230\u76EE\u6807\u7535\u8111\u4E0A\u628A\u90A3\u4E2A\u6321\u8DEF\u7684\u540C\u540D\u76EE\u5F55\u6539\u540D\u6216\u5220\u6389\uFF08\u76EE\u5F55\u91CC\u6709\u6587\u4EF6\u7684\u5148\u79FB\u8D70\uFF09\uFF0C\u518D\u91CD\u8DD1\u4E00\u6B21\uFF1B\u4E5F\u53EF\u4EE5\u5728\u8BBE\u7F6E\u91CC\u7ED9\u8FD9\u4E00\u7EC4\u6362\u4E00\u4E2A\u8FDC\u7AEF\u5B50\u76EE\u5F55\u3002\u8FD9\u4E00\u6B65\u4E0D\u9700\u8981 ping \u76EE\u6807 IP\uFF0C\u4E5F\u4E0D\u9700\u8981\u67E5\u9632\u706B\u5899\u3002",
 };
 
+// 「测试网络连接」结果标签用的**极简层名**（≤ 10 字）。
+//
+// 为什么单独一份：kLayerName 带括号解释（「网络链路问题（未连通）」），
+// 拼上"连接失败：<ssh 原文>"和 kLayerAdvice 那句 45~110 字的操作指引之后，
+// 整条约 125 字 —— 而设置弹窗那个标签是 11px 单行、没有 wordWrap，
+// 客户只能看到前面一小截（2026-11-05 客户反馈「原因没有完全显示」）。
+//
+// 现在分成两级：标签只给结论（这一份），完整原因 + 怎么改写进同步日志
+// （kLayerAdvice），客户点开日志就能照着做。
+const char *kLayerShort[] = {
+    u8"\u672C\u673A\u73AF\u5883\u6709\u95EE\u9898",
+    u8"\u7F51\u7EDC\u4E0D\u901A",
+    u8"\u8D26\u53F7\u6216\u5BC6\u7801\u4E0D\u5BF9",
+    u8"\u76EE\u6807\u7535\u8111\u76EE\u5F55\u6216\u6743\u9650\u6709\u95EE\u9898",
+    u8"\u539F\u56E0\u672A\u8BC6\u522B",
+    u8"\u76EE\u6807\u7535\u8111 SSH \u670D\u52A1\u6CA1\u5F00",
+    u8"\u76EE\u6807\u7535\u8111\u4E0A\u5DF2\u6709\u540C\u540D\u76EE\u5F55",
+};
+
 
 // "子进程被卡住"专用的建议。
 //
@@ -662,8 +681,21 @@ QString failureKeyLines(const QString &text, int maxLines = 3)
 //
 // 这个出口和同步日志不是一回事：结果直接显示在设置弹窗的一个标签上，
 // 不能拆成三段行，所以这里只给"哪一层 + 接下来做什么"。
-// 原始报错由调用点自己带出去（那边本来就在返回 ssh 的最后一行）。
+// 极简版（给设置弹窗那个单行标签用）：只有结论，不带操作指引。
 QString probeLayerDetail(const QString &raw, int forceLayer = -1)
+{
+    const int layer = (forceLayer >= 0) ? forceLayer : classifyLayer(raw);
+    return QString::fromUtf8(u8"\u3010\u5F52\u56E0\u3011")
+           + QString::fromUtf8(kLayerShort[layer]);
+}
+
+// 完整版（给同步日志用）：层名 + 这一层是什么意思 + 接下来该怎么做。
+//
+// 客户在标签上只看到「【归因】网络不通」（一行放得下），点开日志能看到
+// 「【归因】网络链路问题（未连通）：请在本机 ping 目标 IP、核对端口号 …」。
+// 原来两样都塞进标签，约 125 字、11px 单行没 wordWrap ⇒ 客户只能看到一截
+// （2026-11-05 客户原话：「后面的原因没有完全显示」）。
+QString probeLayerAdvice(const QString &raw, int forceLayer = -1)
 {
     const int layer = (forceLayer >= 0) ? forceLayer : classifyLayer(raw);
     return QString::fromUtf8(u8"\u3010\u5F52\u56E0\u3011")
@@ -2188,6 +2220,9 @@ bool RsyncRunner::probeConnection(const TargetConfig &target, QString *detail, i
         // Permission denied (publickey,password) 三种原话方向完全不同，
         // 光把原文回显出去还是要用户自己猜，这里直接判到层并给下一步。
         *detail += QStringLiteral("  ") + probeLayerDetail(err);
+        // 标签放不下的那部分（这一层是什么意思 + 该怎么改）写进日志，
+        // 否则客户只看到「网络不通」，下一步做什么还得自己猜。
+        qWarning("%s", qPrintable(probeLayerAdvice(err)));
     }
     return false;
 }
