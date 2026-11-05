@@ -1,6 +1,9 @@
 # mutate2-probe.ps1 - modify a file that is still QUEUED (not yet transferred).
-# The product says "the receiver got the pre-change content" for any file whose
-# size/mtime changed during the round. Is that statement true for a queued file?
+# 历史背景：产品早期版本对「本轮传输期间被改过的文件」会断言"远端收到的是修改前的内容"。
+# 实测证明那句话有一半是假的（改在 rsync 读到之前 ⇒ 远端拿到新内容）。现在产品改成只说能
+# 确定的部分："程序分不清改在 rsync 读到它之前还是之后，下一轮会按内容重新比对，有差异就补传"，
+# 并且**保留判失败**（宁可多报一次失败，也不让远端留旧内容时界面显示完成）。
+# 本探针的任务：坐实远端到底拿到了新内容还是旧内容。
 # ASCII only.
 param(
   [int]$Port = 2264,
@@ -100,9 +103,9 @@ Say '=== what is actually on the receiver? ==='
 $remoteTxt = DQ @('exec', $Container, 'sh', '-lc', "cd /home/$User/srt-in/mut2 2>/dev/null && cat zzz-queued.spe 2>/dev/null; echo")
 Say ("remote zzz-queued.spe = '{0}'" -f $remoteTxt.Trim())
 if ($remoteTxt.Trim() -eq $newText) {
-  Say 'VERDICT = the receiver got the NEW content => the product''s claim "the receiver got the pre-change content" is FALSE'
+  Say 'VERDICT = 远端拿到的是【新内容】 ⇒ 证实产品早期那句「拿到修改前的内容」是错的；现在产品改为「分不清、下轮补传」并判失败，方向安全'
 } elseif ($remoteTxt.Trim() -eq $origText) {
-  Say 'VERDICT = the receiver got the OLD content => the product''s claim is TRUE'
+  Say 'VERDICT = 远端拿到的是【旧内容】 ⇒ 此时判失败是必要的（否则界面会显示完成而远端是旧的）'
 } else {
   Say ('VERDICT = unexpected content: ' + $remoteTxt)
 }

@@ -363,8 +363,15 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     netLay->addWidget(mkLabel(kTxtSourceDir, "settingLabel"));
     QHBoxLayout *srcRow = new QHBoxLayout;
     srcRow->setSpacing(8);
-    m_sourceDir = mkInput("settingSourceDir", QString(),
-                          QString::fromUtf8("\xE4\xBE\x8B\xE5\xA6\x82\xEF\xBC\x9A/home/\xE7\x94\xA8\xE6\x88\xB7\xE5\x90\x8D/\xE6\x95\xB0\xE6\x8D\xAE \xE6\x88\x96 ~/data"));  // 例如: /home/用户名/数据 或 ~/data
+    // 示例按**本机**平台给：本机是 Windows 就给 Windows 路径，是麒麟就给 Linux 路径。
+    // 原来两端都写死成 Linux 风格，占多数的 Windows 客户看到的示例照抄不了。
+    QString sourceDirHint;
+    #ifdef Q_OS_WIN
+    sourceDirHint = QString::fromUtf8("\xE4\xBE\x8B\xE5\xA6\x82\xEF\xBC\x9A\x44:/Data");          // 例如: D:/Data
+    #else
+    sourceDirHint = QString::fromUtf8("\xE4\xBE\x8B\xE5\xA6\x82\xEF\xBC\x9A~/srt-data");       // 例如: ~/srt-data
+    #endif
+    m_sourceDir = mkInput("settingSourceDir", QString(), sourceDirHint);
     QPushButton *browse = new QPushButton(QString::fromUtf8(kTxtBrowse));
     browse->setObjectName(QStringLiteral("btnBrowse"));
     browse->setFixedHeight(28);
@@ -405,8 +412,15 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     g3->setSpacing(10);
     g3->addWidget(mkLabel(kTxtRemoteRoot, "settingLabel"), 0, 0);
     g3->addWidget(mkLabel(kTxtUser, "settingLabel"), 0, 1);
-    m_remoteRoot = mkInput("settingRemoteRoot", QString(),
-                           QString::fromUtf8("\xE4\xBE\x8B\xE5\xA6\x82\xEF\xBC\x9A\x44:/Data"));  // 例如: D:/Data
+    // 远端示例同理按平台给：远端是麒麟给 Linux 路径，远端是 Windows 给 D:/ 路径。
+    // 「远端」和「本机」是两台不同系统的机器，示例必须各按各的来，不能一刀切。
+    QString remoteRootHint;
+    #ifdef Q_OS_WIN
+    remoteRootHint = QString::fromUtf8("~\xE6\x95\xB0\xE6\x8D\xAE\xE5\x90\x8C\xE6\xAD\xA5");   // 例如: ~/数据同步
+    #else
+    remoteRootHint = QString::fromUtf8("\xE4\xBE\x8B\xE5\xA6\x82\xEF\xBC\x9A\x44:/Data");                    // 例如: D:/Data
+    #endif
+    m_remoteRoot = mkInput("settingRemoteRoot", QString(), remoteRootHint);
     m_user = mkInput("settingUser", QString(),
                      QString::fromUtf8("\xE4\xBE\x8B\xE5\xA6\x82\xEF\xBC\x9A\x41\x64ministrator"));  // 例如: Administrator
     g3->addWidget(m_remoteRoot, 1, 0);
