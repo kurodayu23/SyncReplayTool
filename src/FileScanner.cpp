@@ -789,7 +789,18 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
             QString rel = fi.absoluteFilePath();
             if (rel.startsWith(basePath))
                 rel.remove(0, basePath.length());
+#ifdef _WIN32
+            // **只在 Windows 上换**。麒麟/Linux 上反斜杠是**合法的文件名字符**，
+            // 把它换成正斜杠等于把用户指向了另一个路径：目录里有个叫
+            // `a\b.spe` 的文件，相对路径会被改写成 `a/b.spe` ——
+            // rsync 去找的是子目录 a 里的 b.spe，那个文件要么不存在（传不过去，
+            // 组退出码 23），要么**恰好存在另一个同名文件**（传的是另一个文件，
+            // 界面却标成「已同步」）。
+            //
+            // 产品自己在 ConfigStore::normalizePathForStore 里就按平台区分处理
+            // 这件事（理由与这里完全相同），扫描侧原来漏了。
             rel.replace(QLatin1Char('\\'), QLatin1Char('/'));
+#endif
             while (rel.startsWith(QLatin1Char('/')))
                 rel.remove(0, 1);
 
@@ -1048,7 +1059,18 @@ QVector<SuffixStat> FileScanner::detectSuffixes(const QString &root)
             QString rel = fi.absoluteFilePath();
             if (rel.startsWith(basePath))
                 rel.remove(0, basePath.length());
+#ifdef _WIN32
+            // **只在 Windows 上换**。麒麟/Linux 上反斜杠是**合法的文件名字符**，
+            // 把它换成正斜杠等于把用户指向了另一个路径：目录里有个叫
+            // `a\b.spe` 的文件，相对路径会被改写成 `a/b.spe` ——
+            // rsync 去找的是子目录 a 里的 b.spe，那个文件要么不存在（传不过去，
+            // 组退出码 23），要么**恰好存在另一个同名文件**（传的是另一个文件，
+            // 界面却标成「已同步」）。
+            //
+            // 产品自己在 ConfigStore::normalizePathForStore 里就按平台区分处理
+            // 这件事（理由与这里完全相同），扫描侧原来漏了。
             rel.replace(QLatin1Char('\\'), QLatin1Char('/'));
+#endif
             while (rel.startsWith(QLatin1Char('/')))
                 rel.remove(0, 1);
 

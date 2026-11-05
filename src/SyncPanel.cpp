@@ -2073,6 +2073,48 @@ void SyncPanel::onScanFinished(const QVector<FileItem> &files)
 
     QVector<FileItem> displayFiles = files;
 
+    // 规则定下来之后，清单必须按**最终规则**重新过滤一遍。
+    //
+    // 为什么必须过滤：扫描时用的是"当时"的规则，传输用的是"现在"的规则，
+    // 两个口径不一致时，文件就会留在清单里、却一个字节都传不出去。
+    //
+    // 真实发生的路径（2026-11-05 实测，本机真容器 + 真 rsync + 真私钥）：
+    //   目录里 5 个文件 a.spe / b.spe / notes.txt / README / Makefile；
+    //   首次扫描时用户还没配规则 ⇒ 扫描侧"没有规则就一个都不排掉" ⇒ 5 个全进清单；
+    //   扫完之后程序自动识别出规则 spe、txt（**无后缀文件不生成规则**，
+    //   见上面那段注释：把一堆 README、Makefile 自动纳入同步范围是替用户做决定）；
+    //   而传输侧按规则分组 ⇒ 无后缀文件**不进任何一组** ⇒ rsync 根本没见到它们。
+    // 结果：界面报「5 / 5 个文件 · 同步完成」、5 行全是「✓ 已完成」，
+    // 日志还写「其中 2 个文件远端已是最新、本次未传输」——
+    // 而这两个文件**从来没传过**，远端也从来就没有过它们。
+    // 客户据此认为数据全部上机 ⇒ 静默丢数据。
+    //
+    // 现在：清单与传输用同一份规则口径，多出来的文件当场报出来（复用
+    // g_scanSkippedBySuffix，让"另有 N 个文件…"那句话只有一处出处）。
+    // 显式配了规则时扫描侧已经排掉过了，这一段是空操作。
+    {
+        QSet<QString> wanted;
+        for (int i = 0; i < m_syncRules.size(); ++i) {
+            const QString s = ToolRunner::normSuffix(m_syncRules.at(i).suffix);
+            if (!s.isEmpty())
+                wanted.insert(s);
+        }
+        if (!wanted.isEmpty()) {
+            QVector<FileItem> kept;
+            int dropped = 0;
+            for (int i = 0; i < files.size(); ++i) {
+                if (wanted.contains(ToolRunner::normSuffix(files.at(i).suffix)))
+                    kept.append(files.at(i));
+                else
+                    ++dropped;
+            }
+            if (dropped > 0) {
+                g_scanSkippedBySuffix += dropped;
+                displayFiles = kept;
+            }
+        }
+    }
+
     // 工具规则要单独喂给模型，操作列才有按钮可画。
     //
     // 这里原来是无差别地把 m_toolRules 全塞进去，于是**只要配过就画按钮**，
@@ -2223,7 +2265,10 @@ void SyncPanel::onScanFinished(const QVector<FileItem> &files)
     } else {
         appendLogLine(QStringLiteral("SCAN"),
                       QObject::tr("\xE6\xB7\xB1\xE5\xBA\xA6\xE9\x81\x8D\xE5\x8E\x86\xE7\x9B\xAE\xE5\xBD\x95\xE5\xAE\x8C\xE6\x88\x90\xEF\xBC\x8C\xE5\x8F\x91\xE7\x8E\xB0 %1 \xE4\xB8\xAA\xE5\xBE\x85\xE5\x90\x8C\xE6\xAD\xA5\xE6\x96\x87\xE4\xBB\xB6")
-                          .arg(files.size()), 0);
+                          // 数的是**真正会进清单**的文件，不是扫出来的全部文件。
+                          // 两者不等时（自动识别规则把无后缀文件排除在外），
+                          // 报"发现 5 个"而清单里只有 3 个，客户会以为还有 2 个在排队。
+                          .arg(displayFiles.size()), 0);
     }
 
     // 因后缀不符合同步规则被跳过的文件 —— 必须说一句。

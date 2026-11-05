@@ -2698,6 +2698,37 @@ void RsyncRunner::start(const TargetConfig &target,
             m_groups.append(g);
     }
 
+    // 匹配不上任何一条规则的文件：**必须报出来**，不能静默丢掉。
+    //
+    // 界面侧已经按最终规则过滤过清单（SyncPanel::onScanFinished 里那段
+    // 「规则定下来之后，清单必须按最终规则重新过滤一遍」），正常情况下
+    // 这里不该剩下东西。但传输侧是**独立的一道闸门**：万一以后哪条路径
+    // 又把没匹配上的文件递进来，静默丢掉就是静默丢数据。
+    //
+    // 实测（2026-11-05，本机真容器 + 真 rsync）：无后缀文件（README、Makefile）
+    // 在"自动识别规则"下既不在任何一组里，界面却标成「✓ 已完成」，
+    // 远端一个都没有，日志还说"远端已是最新、本次未传输"。
+    {
+        QSet<QString> grouped;
+        for (int i = 0; i < m_groups.size(); ++i) {
+            const QStringList &gf = m_groups.at(i).files;
+            for (int j = 0; j < gf.size(); ++j)
+                grouped.insert(gf.at(j));
+        }
+        int unmatched = 0;
+        for (int i = 0; i < files.size(); ++i) {
+            if (!grouped.contains(files.at(i).relativePath))
+                ++unmatched;
+        }
+        if (unmatched > 0) {
+            emit logText(QString::fromUtf8(
+                u8"\u53E6\u6709 %1 \u4E2A\u6587\u4EF6\u7684\u540E\u7F00\u4E0D\u5728\u4EFB\u4F55\u4E00\u6761\u540C\u6B65\u89C4\u5219\u91CC\uFF0C"
+                u8"\u672C\u6B21\u6CA1\u6709\u4F20\u8F93\u5B83\u4EEC"
+                u8"\uFF08\u5982\u9700\u8981\u8BF7\u5728\u300C\u8BBE\u7F6E\u300D\u91CC\u8865\u4E00\u6761\u5BF9\u5E94\u540E\u7F00\u7684\u89C4\u5219\uFF09\u3002")
+                .arg(unmatched));
+        }
+    }
+
     if (m_groups.isEmpty()) {
         // **有文件、一条规则都没匹配上 —— 这是失败，不能报成功。**
         //
@@ -4136,7 +4167,26 @@ void RsyncRunner::onFinished(int exitCode, QProcess::ExitStatus status)
             groupProblem = true;
             emit logText(QString::fromUtf8(u8"\u3010\u6CE8\u610F\u3011\u4EE5\u4E0B\u6587\u4EF6\u5728\u4F20\u8F93\u8FC7\u7A0B\u4E2D\u88AB\u4FEE\u6539\uFF1A%1")
                              .arg(mutated.join(QString::fromUtf8(u8"\u3001"))));
-            emit logText(QString::fromUtf8(u8"\u8FDC\u7AEF\u6536\u5230\u7684\u662F\u4FEE\u6539\u524D\u7684\u5185\u5BB9\uFF08\u672C\u6B21\u4F20\u8F93\u53D7\u5F71\u54CD\uFF09\u3002"));
+            // **不能说"远端收到的是修改前的内容"** —— 这句话有一半是假的。
+            //
+            // 实测（2026-11-05，本机真容器 + 真 rsync + 限速 2MB/s）：
+            // 一个 120MB 的文件在传，同一批里排队的另一个文件被改写。
+            // 改写发生在 rsync **读到它之前** ⇒ 远端拿到的是**改后**的新内容，
+            // 而原话写的是"修改前的内容"，方向说反了；界面上整轮还因此判了
+            // 「同步失败」，而远端每一个字节都是对的。
+            //
+            // 判据只能看出"大小或修改时间变了"，看不出"改在 rsync 读到它之前
+            // 还是之后"—— 两种情况的区别只有远端知道，而本产品这一轮**没有**
+            // 去问远端。所以这里只说能确定的那部分。
+            //
+            // 判失败保留：宁可多报一次失败，也不能在远端真的留着旧内容时
+            // 让界面显示「同步完成」。下一轮 rsync 会按内容重新比对，
+            // 真有差异就会补传。
+            emit logText(QString::fromUtf8(
+                u8"\u8FD9\u4E9B\u6587\u4EF6\u5728\u672C\u8F6E\u4F20\u8F93\u671F\u95F4\u88AB\u6539\u8FC7\u3002"
+                u8"\u7A0B\u5E8F\u5206\u4E0D\u6E05\u6539\u5B58\u5728 rsync \u8BFB\u5230\u5B83\u4E4B\u524D\u8FD8\u662F\u4E4B\u540E"
+                u8"\uFF08\u8FD9\u4E24\u79CD\u60C5\u51B5\u8FDC\u7AEF\u62FF\u5230\u7684\u5185\u5BB9\u4E0D\u540C\uFF09\u3002"
+                u8"\u4E0B\u4E00\u8F6E\u4F1A\u6309\u5185\u5BB9\u91CD\u65B0\u6BD4\u5BF9\uFF0C\u6709\u5DEE\u5F02\u5C31\u4F1A\u8865\u4F20\u3002"));
         }
         // 增量同步时 rsync 不会输出任何文件名（文件本来就一致），靠退出码判定成功
         //
