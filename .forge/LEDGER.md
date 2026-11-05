@@ -65,3 +65,49 @@ P4 测试矩阵 / P5 审查 —— 矩阵 21 项：通过 20 / 失败 0 / 未执
 - 210 万文件峰值内存 1446.7 MB（距 1.5 GB 上限 53 MB）
 - 远端可能残留 `.srt-verify-<pid>-<时间戳>` / `.<name>.XXXXXX`（仅下次完整同步时清）
 - `QFile::setPermissions` 改不了 NTFS ACL（口令文件安全性仅靠目录私有性）
+
+## 第九轮更新（2026-11-05 18:55，用户打游戏期间进行，全程 headless）
+
+### 本轮新增修复
+
+| 编号 | 问题 | 提交 | 验证 |
+|---|---|---|---|
+| 台架-1 | 探针判"扫描结束"要求 `fileCount>0` ⇒ 空目录永远判不出完成，只能等 300 秒超时，被误判成"产品在空目录上挂死" | 79745a3 | 修复前空目录 20 秒不退出；修复后 2 秒内退出、`SCAN files=0 rules=[spe] states=[]`、rc=0 |
+
+### 本地（无容器、零弹窗）断言矩阵 —— 5/5 PASS
+
+隔离夹具 + 每用例独立 SRT_CONFIG_DIR：
+- `--rules spe` → 3 个 .spe（`.txt` 被排除）
+- `--rules spe,txt` → 4 个
+- 空目录 → `files=0` 且正常退出
+- 大写 `.SPE` → 3 个（后缀匹配不区分大小写）
+- 无后缀 `README`/`Makefile` → 不进列表，只剩 1 个 .spe
+
+### 当前 HEAD 验证（headless）
+
+- `--selfcheck`：**78 PASS / 0 FAIL / 0 SKIP**（Windows；麒麟因平台分支多一条是 79）
+- `--selfcheck-gui`（offscreen）：**40 PASS / 0 FAIL**
+- 当前 exe：`C35A3AF0D4468654`，18:51:40
+
+### 新阻塞：交付包已过期，且暂时打不出来
+
+- 最后一次包 `交付包-20261105-175952` 里的 exe 是 `99B85CE059D793F6`，
+  当前构建是 `C35A3AF0D4468654` —— **不一致**
+- 原因：MiniMax 17:57 又提交了产品修复 `cefeaf5`（无后缀文件静默漏传），
+  之后源码变化，包没跟上
+- **打不出来**：Docker 引擎已停止（`dockerDesktopLinuxEngine` 连不上，只剩 `wslservice`），
+  而麒麟二进制交叉编译依赖 Docker；起 Docker Desktop 会启 WSL 虚拟机、吃几 GB 内存，
+  用户正在打游戏 ⇒ **推迟**
+- 用户结束游戏后的收尾顺序：起 Docker → 交叉编译麒麟 → 打包 → 三门禁 → 七段回归
+
+### 依赖 Docker 而暂缓的项
+
+`scripts/tests/e2e/` 里 6 个端到端台架（netcut / onlynew / special / edge / lock / mutate2）
+都需要 Docker 起接收端。本轮跑过一次，全部因引擎不可用而失败 —— **那批结果不算数**，
+不能当通过也不能当失败。其中 netcut 那条虽然打了 `NETCUT DONE`，但 `docker pause`
+没执行、探针打的是不存在的接收端，**不构成 P0 验证**；P0 的证据仍以 16:0x 那次
+真实 `docker stop/start` 的实测为准（17→12→3→1 归零、lastRunAt 持续推进）。
+
+### 仍未执行（1 项，矩阵第 17 行）
+
+真实麒麟桌面 GUI 点击 —— 见「阻塞」第 1 条，理由不变。
