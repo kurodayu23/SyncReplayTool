@@ -1879,8 +1879,13 @@ int runSelfCheck()
             qputenv("SRT_CONFIG_DIR", box.path().toLocal8Bit());
 
             QStringList got;
+            // **必须给 context 对象**：ConfigStore 是进程内静态单例，连接会一直活着；
+            // 而 got 是块内局部变量，块一结束就没了。lambda 捕获它却不带 context ⇒
+            // 后面任何一条提示都会写进已析构的 QStringList ⇒ 访问违例（实测整个自检崩掉）。
+            // ctx 与 got 同寿命，连接随 ctx 一起消失。
+            QObject ctx;
             QObject::connect(ConfigStore::instance(), &ConfigStore::configNotice,
-                             [&got](const QString &m) { got.append(m); });
+                             &ctx, [&got](const QString &m) { got.append(m); });
             const TargetConfig t = ConfigStore::loadTarget();
 
             // ① 提示真的到了（文案里要点名"解密/密文"）
