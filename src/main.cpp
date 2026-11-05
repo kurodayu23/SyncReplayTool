@@ -5075,7 +5075,12 @@ int main(int argc, char *argv[])
             if (n > 0 && n == st->last) ++st->stable; else st->stable = 0;
             st->last = n;
             const qint64 ms = QDateTime::currentMSecsSinceEpoch() - st->t0;
-            const bool done = (st->stable >= 3 && n > 0) || (n == 0 && ms > 2000) || ms > 25000;
+            // 判扫完没必须看 m_scanning，不能只看文件数：扫描结果要先经
+            // deliverScanResult 投递到模型，大目录下 fileCount 会长时间停在 0。
+            // 原来那条「空目录 2 秒放行」正好在这个窗口里放行，截出 files=0 的空表、
+            // rc 还是 0（2026-11-05 实测 50k/100k 全是假绿）。
+            const bool stillScanning = sp && sp->isScanningForTest();
+            const bool done = (!stillScanning && st->stable >= 2) || ms > 25000;
             if (!done)
                 return;
             poll->stop();

@@ -55,6 +55,7 @@ public:
     // 只给自动化测试用。
     TargetConfig effectiveTarget() const { return m_target; }
     int fileCountForTest() const;
+    bool isScanningForTest() const;  // 扫描还在飞？截图探针靠它判断扫完没
     void setLocalRootForTest(const QString &v);
     void setHostForTest(const QString &v);
     void setUserForTest(const QString &v);

@@ -1918,6 +1918,11 @@ void SyncPanel::scanFiles()
     startScanAsync();
 }
 
+bool SyncPanel::isScanningForTest() const
+{
+    return m_scanning;
+}
+
 void SyncPanel::startScanAsync()
 {
     // 已经在扫就别再拉一个。理由见 SyncPanel.h 里 m_scanning 的注释：
