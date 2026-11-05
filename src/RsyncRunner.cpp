@@ -8,6 +8,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <algorithm>
 #include <QFile>
 #include <QFileInfo>
 #include <QProcessEnvironment>
@@ -1304,6 +1305,23 @@ QStringList RsyncRunner::askpassDirCandidates()
         }
         if (out.isEmpty())
             out << QDir::tempPath();     // 全都不合格时只能退回原行为
+
+        // 稳定排序：**无空格的目录排前面**。
+        //
+        // 为什么不是过滤而是排序：过滤（删掉带空格的）会把"中文+空格用户名"
+        // 和"装在 Program Files"这两类场景整片否掉 —— 那正是上一版改成
+        // "不筛空格 + 8.3 短路径"要救的场景，不能倒退。
+        //
+        // 但也不能完全不管：无空格路径**不依赖 8.3 短路径**（客户系统上
+        // `fsutil 8dot3name` 可能被关掉，那时 GetShortPathNameW 原样返回带空格的
+        // 长路径 ⇒ SSH_ASKPASS 被 CreateProcess 拆成两段 ⇒ 口令认证直接不可用）。
+        // 所以：能选无空格的先选无空格的，实在没有才靠短路径兜底。
+        std::stable_sort(out.begin(), out.end(),
+                         [](const QString &a, const QString &b) {
+                             const bool sa = a.contains(QLatin1Char(' '));
+                             const bool sb = b.contains(QLatin1Char(' '));
+                             return int(sa) < int(sb);
+                         });
         return out;
     }();
     return dirs;
