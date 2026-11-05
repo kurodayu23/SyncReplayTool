@@ -574,12 +574,17 @@ void SyncPanel::buildUi()
     m_table->setColumnWidth(FileTableModel::ColTool,     156);
     // 表格吃掉卡片内所有多余高度（配合上面的 setMinimumHeight），页签和分隔线保持固定高度贴顶。
     cardLay->addWidget(m_table, 1);
-    // 清单卡片**不**占满窗口剩余高度：定稿图里清单卡片是"内容多高就多高"，
-    // 卡片下方留一段窗口底色，然后才是进度区和底部条。
-    // 原来这里是 addWidget(card, 1) —— 卡片一路顶到进度区，和定稿图对不上。
-    root->addWidget(card, 0);
-    // 这段留白就是定稿图里清单卡片和进度区之间的那一条空档。
-    root->addStretch(1);
+    // 清单卡片**吃掉**窗口剩余高度。
+    //
+    // 历史：原来是 addWidget(card, 0) + addStretch(1) —— 卡片按"内容多高就多高"，
+    // 多余高度全给那段 stretch。这在 460 高的定稿窗口里没问题（没有多余高度），
+    // 但**最大化后**（1920x1080 实测窗口 991 高）多出来的 ~570px 全成了纯背景空白，
+    // 表格仍是 235px、只占窗口 1/5，客户原话「空白太多、分配不均匀」。
+    //
+    // 现在：卡片吃弹性（stretch=1），多余的给表格（cardLay 里 m_table 已经是 stretch=1，
+    // 且有 setMinimumHeight(235) 兜底），卡片与进度区之间仍保留 root spacing 的 12px。
+    // 460 高时表格会到 ~290px（比定稿图 235 略高，能看到更多文件，不算退步）。
+    root->addWidget(card, 1);
 
     connect(m_refresh, SIGNAL(clicked()), this, SLOT(refreshScanClicked()));
     connect(m_toolDelegate, SIGNAL(toolButtonClicked(int,int)),
