@@ -538,7 +538,10 @@ void SyncPanel::buildUi()
     //
     // 改成「最小高度 + stretch=1」：多余高度全部给表格，表格紧贴页签下方铺开，
     // 大屏不再浪费；小窗口仍保底 235px，手册 §2 的数值不变。
-    m_table->setMinimumHeight(235);
+    //
+    // 235 这个值放在 ScreenFit.h（唯一真源）—— 日志抽屉开着时它会被临时降低
+    // （见 setLogDrawerHeight），两处必须用同一个常量。
+    m_table->setMinimumHeight(ScreenFit::kTableMinNormal);
     m_table->horizontalHeader()->setHighlightSections(false);
     m_table->verticalHeader()->setVisible(false);
     // 原型 td padding 6px + 按钮 23px = 行高 35px。
@@ -1328,13 +1331,30 @@ void SyncPanel::onToolError(QProcess::ProcessError)
 // ---------------------------------------------------------------- 日志抽屉
 
 // 小屏降级：把抽屉压到「窗口能长出来的那部分」，避免它去挤清单卡片/进度区。
-// 高度为 0 时说明这块屏连 12px 间距都腾不出来，此时展开也没有可视区域，
-// 但布局仍然稳定（进度条不会被推走），比原来"越出窗口压住进度卡"好。
+//
+// 2026-11-05 改：抽屉高度为 0 的问题在 ScreenFit::logDrawerHeight() 里解决了
+// （那里给了正下限 kLogDrawerMin），但**多出来的那部分要有地方让** ——
+// 矮屏上窗口长不高，抽屉占的高度只能从**表格**借。
+//
+// 所以这里同时把表格的最小高度降下来（ScreenFit::kTableMinWithLog）：
+//   · 抽屉关着（h=0）→ 表格恢复 235（手册 §2 的值）；
+//   · 抽屉开着      → 表格降到 60（≈1.7 行），空间够时它照样铺满
+//     （表格 stretch=1，多余高度全给它），不够时它先让。
+//
+// 为什么表格先让、底栏不让：底栏是**按钮**（开始同步 / 取消），
+// 被挤出去 = 用户够不着按钮 = 功能不可用；表格是可滚动的，少几行只是少看几行。
 void SyncPanel::setLogDrawerHeight(int h)
 {
     const int nh = qMax(0, h);
     if (m_logDrawer && m_logDrawer->height() != nh)
         m_logDrawer->setFixedHeight(nh);
+
+    if (m_table) {
+        const int want = (nh > 0) ? ScreenFit::kTableMinWithLog
+                                  : ScreenFit::kTableMinNormal;
+        if (m_table->minimumHeight() != want)
+            m_table->setMinimumHeight(want);
+    }
 }
 void SyncPanel::toggleLogDrawer()
 {

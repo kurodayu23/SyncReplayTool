@@ -3013,7 +3013,17 @@ int runSelfCheck()
                                   ? (mainShut.width() == ScreenFit::kMainWidth &&
                                      mainShut.height() == ScreenFit::kMainHeight)
                                   : true;
-            const bool ok = fits && aboveMin && noShrink && inside;
+            // 日志抽屉在**这块屏**上能开多高。
+            //
+            // 为什么必须验（2026-11-05 修）：抽屉高度原先是「窗口能长出来的那部分」，
+            // 矮屏上那一部分是 **0** ⇒ 抽屉 0px ⇒ 用户点「同步日志」，
+            // 按钮文案变了、**但日志一个字都看不见**（看起来像按钮坏了）。
+            // 而 853×480@150% 这档**就在这张矩阵里**（可用高 440）——
+            // 当时的判据只验"窗口不越界"，没验"抽屉是不是看得见"，所以没人发现。
+            const int drawer = ScreenFit::logDrawerHeight(sc.h);
+            const bool drawerVisible = (drawer >= ScreenFit::kLogDrawerMin)
+                                       && (drawer <= ScreenFit::kLogDrawerHeight);
+            const bool ok = fits && aboveMin && noShrink && inside && drawerVisible;
             if (!ok) {
                 ++matrixBad;
                 ++bad;
@@ -3021,15 +3031,58 @@ int runSelfCheck()
             out << (ok ? "PASS\t" : "FAIL\t") << "screen-matrix-" << sc.name
                 << "\tfit=" << fits << " aboveMin=" << aboveMin
                 << " noShrink=" << noShrink << " inside=" << inside
+                << " drawerVisible=" << drawerVisible
                 << " main=" << mainShut.width() << "x" << mainShut.height()
                 << " open=" << mainOpen.width() << "x" << mainOpen.height()
                 << " dlg=" << dlg.width() << "x" << dlg.height()
+                << " drawer=" << drawer
                 << "\tscreen=" << sc.w << "x" << sc.h << "\n";
         }
         out.flush();
         if (matrixBad && matrixDetail.isEmpty())
             matrixDetail = QStringLiteral("%1 screens failed").arg(matrixBad);
         Q_UNUSED(matrixDetail);
+    }
+
+    // ----------------------------------------------------------------
+    // 日志抽屉在任何可用高下都必须**看得见**（2026-11-05 修）。
+    //
+    // 判据：把 320..2000 的每一个可用高都过一遍，
+    //   ① 抽屉高度 ≥ kLogDrawerMin（永远不是 0）；
+    //   ② 抽屉高度 ≤ kLogDrawerHeight（不超过名义值）；
+    //   ③ 展开后窗口仍然装得下（mainWindow 的展开高度 ≤ 可用高）。
+    //
+    // 为什么必须单独一条（不能只靠上面那张屏幕矩阵）：
+    //   矩阵只有 6 档，而"矮屏"是一个**连续区间** ——
+    //   可用高 ≤ 471 时抽屉高度原先是 0（用户点「同步日志」什么都不会发生）。
+    //   6 档里只碰巧有一档落在这个区间里；逐值扫才能把**整个区间**锁住。
+    // ----------------------------------------------------------------
+    {
+        int badH = 0;
+        int worstDrawer = 0;
+        int worstAtH = 0;
+        for (int h = 320; h <= 2000; ++h) {
+            const int d = ScreenFit::logDrawerHeight(h);
+            const QSize openSz = ScreenFit::mainWindow(1280, h, true);
+            const bool oneOk = (d >= ScreenFit::kLogDrawerMin)
+                               && (d <= ScreenFit::kLogDrawerHeight)
+                               && (openSz.height() <= h);
+            if (!oneOk) {
+                ++badH;
+                if (d < worstDrawer) {
+                    worstDrawer = d;
+                    worstAtH = h;
+                }
+            }
+        }
+        const bool ok = (badH == 0);
+        if (!ok)
+            ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "log-drawer-visible"
+            << "\trange=320..2000" << "\tbad=" << badH
+            << "\tminDrawer=" << ScreenFit::kLogDrawerMin
+            << "\tmaxDrawer=" << ScreenFit::kLogDrawerHeight
+            << "\tworstDrawer=" << worstDrawer << "@h=" << worstAtH << "\n";
     }
 
     // ----------------------------------------------------------------
@@ -3574,14 +3627,23 @@ int runGuiSelfCheck()
               QStringLiteral("height=%1 expected=%2 open=%3").arg(w.height()).arg(expectH).arg((int)nowOpen));
 
         const int progYAfter = progCard ? progCard->mapTo(&w, QPoint(0, 0)).y() : -1;
-        // 屏幕物理放不下「收起内容 + 抽屉」时，这条判据没有意义：窗口被可用高
-        // 钳死、抽屉 175px 必须占位，布局只能压缩清单卡片 —— "进度条不动"做不到，
-        // 属环境限制而非产品缺陷。实测麒麟 offscreen(avail=460)：listCard 137→270、
-        // progressCard 207→355。真实桌面 availH≥647（768p 笔记本 728）不触发。
+        // 屏幕物理放不下「收起内容 + 抽屉」时，"进度条不动"**物理上做不到**：
+        // 窗口被可用高钳死、长不高，抽屉只能从清单卡片那块借高度 ⇒ 进度区必然上移。
+        // 那是**环境限制**，不是产品缺陷 —— 所以这条判据只在"窗口确实能长高"时生效。
+        //
+        // 2026-11-05 补上这个前提：原来没有它，矮屏（可用高 < 647）必然判 FAIL。
+        // 而矮屏上真正的缺陷是**日志看不见**（抽屉高度 0，见 ScreenFit::logDrawerHeight
+        // 与自检 log-drawer-visible）。这两件事必须一起看：
+        //   · 抽屉高度 > 0 ⇒ 日志看得见（log-drawer-visible 判据管这条）
+        //   · 窗口能长高   ⇒ 进度区不动（本条判据管这条）
+        // 矮屏上抽屉有了正下限（kLogDrawerMin）之后，它就要占位 ⇒ 进度区会动一点 ——
+        // 那是"少看几行文件"换"能看见日志"，划得来。
+        const bool canGrow = (hOpen > hShut);
         check("G18b-log-open-keeps-progress-position",
-              progYBefore >= 0 && progYBefore == progYAfter,
-              QStringLiteral("before=%1 after=%2 | %3 | %4")
-                  .arg(progYBefore).arg(progYAfter).arg(dumpBefore).arg(geomDump("after")));
+              !canGrow || (progYBefore >= 0 && progYBefore == progYAfter),
+              QStringLiteral("before=%1 after=%2 canGrow=%3 | %4 | %5")
+                  .arg(progYBefore).arg(progYAfter).arg((int)canGrow)
+                  .arg(dumpBefore).arg(geomDump("after")));
 
         w.syncPanelForTest()->toggleLogDrawer();
         QApplication::processEvents();
@@ -3594,6 +3656,36 @@ int runGuiSelfCheck()
         check("G19b-log-close-keeps-progress-position",
               progYBefore >= 0 && progYBefore == progYBack,
               QStringLiteral("before=%1 back=%2").arg(progYBefore).arg(progYBack));
+
+        // 抽屉必须**看得见**（2026-11-05 修）。
+        //
+        // 原来 logDrawerHeight() 在可用高 ≤ 471 时返回 **0** ⇒ 抽屉 0px ⇒
+        // 用户点「同步日志」，按钮文案变了、**日志一个字都看不见**（像按钮坏了）。
+        // 这条判据直接量抽屉控件的**实际高度**，不看任何推算。
+        QWidget *drawerW = w.syncPanelForTest()->findChild<QWidget *>(QStringLiteral("logDrawer"));
+        const int drawerH = drawerW ? drawerW->height() : -1;
+        check("G18c-log-drawer-is-visible", drawerH >= ScreenFit::kLogDrawerMin,
+              QStringLiteral("drawerH=%1 min=%2 | %3")
+                  .arg(drawerH).arg(ScreenFit::kLogDrawerMin).arg(geomDump("after")));
+
+        // 抽屉占位之后，**底栏按钮必须还在窗口里**（用户够得着）。
+        //
+        // 为什么必须单独判：矮屏上抽屉要从清单卡片那块借高度，
+        // 借多了会把底栏（开始同步 / 取消）挤出窗口 ⇒ 功能不可用。
+        // 表格让位就是为了保证这一条（见 ScreenFit::kTableMinWithLog）。
+        QWidget *startBtn = w.syncPanelForTest()->findChild<QWidget *>(QStringLiteral("btnStartSync"));
+        int btnTop = -1, btnBottom = -1;
+        bool btnFound = false;
+        if (startBtn) {
+            btnFound = true;
+            btnTop = startBtn->mapTo(&w, QPoint(0, 0)).y();
+            btnBottom = btnTop + startBtn->height();
+        }
+        check("G18d-start-button-still-reachable",
+              btnFound && btnTop >= 0 && btnBottom <= w.height(),
+              QStringLiteral("found=%1 top=%2 bottom=%3 winH=%4 | %5")
+                  .arg((int)btnFound).arg(btnTop).arg(btnBottom).arg(w.height())
+                  .arg(geomDump("after")));
     }
 
     // 设置弹窗高度**固定**：min(560, 屏幕限高)。

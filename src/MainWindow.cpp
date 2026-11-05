@@ -375,8 +375,12 @@ void MainWindow::onLogDrawerToggled(bool open)
     // 小屏降级：屏幕装不下「460 + 175 + 12」时，把抽屉压到窗口能长出来的高度，
     // 否则它会去挤清单卡片/进度区 —— 客户看到的「点日志后进度条位置变了」。
     // 大屏上 logDrawerHeight() 返回 175，与原来完全一致。
-    if (open)
-        m_syncPanel->setLogDrawerHeight(ScreenFit::logDrawerHeight(avail.height()));
+    //
+    // 2026-11-05 改：**收起时也要调**（传 0）。
+    // 原来只在 open 时调 ⇒ 抽屉关掉后表格的最小高度**停在降级后的值**
+    // （60）不再恢复 235 —— 收起态的表格会一直只剩 1.7 行。
+    // setLogDrawerHeight(0) 里会把表格恢复成 kTableMinNormal。
+    m_syncPanel->setLogDrawerHeight(open ? ScreenFit::logDrawerHeight(avail.height()) : 0);
 
     // ★**位置也要跟着收敛**（2026-10-28 缺陷 1）：
     // 只 setFixedHeight 不挪位置，窗口加高后**底边会掉出屏幕**。

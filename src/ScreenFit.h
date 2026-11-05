@@ -43,6 +43,25 @@ const int kMainWidth         = 980;
 const int kMainHeight        = 460;
 // 日志抽屉的高度（**唯一真源**：SyncPanel 建抽屉时用同一个值）。
 const int kLogDrawerHeight   = 175;
+// 日志抽屉的**正下限**（2026-11-05 修）。
+//
+// 为什么必须有下限：抽屉高度原先是「窗口能长出来的那部分」，
+// 在**矮屏**上（可用高 ≤ 471）那一部分是 0 ⇒ 抽屉高度 0px ⇒
+// 用户点「同步日志」，按钮文案变了、**但日志一个字都看不见** ——
+// 看起来像按钮坏了。
+//
+// 96 = 27px 标题栏 + 69px 正文区（够看几行）。
+// 代价由**表格**让：抽屉开着时表格的最小高度降到 kTableMinWithLog，
+// 空间够的话表格照样铺满（它 stretch=1），不够时它先让。
+const int kLogDrawerMin      = 96;
+// 表格区的最小高度（手册 §2 的 235，收起态）。
+const int kTableMinNormal    = 235;
+// 表格区的最小高度（**抽屉开着**时）：抽屉占的那部分从表格这里借。
+//
+// 为什么不能一直是 235：矮屏上窗口长不高，抽屉只能从表格这块借高度 ——
+// 表格是可滚动的，少显示几行远比"日志点了看不见"强。
+// 60 ≈ 1.7 行，保证表格区域本身还在、用户知道东西还在那儿。
+const int kTableMinWithLog   = 60;
 // 面板竖向间距（SyncPanel 的 root 布局，**唯一真源**）。
 //
 // 为什么它要算进窗口高度：日志抽屉默认是**隐藏**的，而 QBoxLayout 不给
@@ -88,12 +107,21 @@ const int kMargin = 40;
 // （实测 availH=600 移 47px = 187-140；availH=460 移 148px 且抽屉越出窗口
 // 压住进度卡）。这不是"环境限制"，是产品该降级的地方。
 // 规则：抽屉最多占「窗口比收起态多出来的那部分」减去间距，其余保持不动。
+//
+// 2026-11-05 修：加了**正下限** kLogDrawerMin。
+// 原来这里是 `qMax(0, ...)` ⇒ 可用高 ≤ 471 时返回 **0** ⇒
+// 抽屉 0px ⇒ 用户点「同步日志」**什么都不会发生**。
+// 那个区间在自检的屏幕矩阵里就有（853×480@150%，可用高 440）——
+// 自检当时只判"窗口不越界"，没判"抽屉是不是看得见"，所以没人发现。
+//
+// 现在：抽屉至少 kLogDrawerMin 高，多出来的那部分从**表格**那里借
+// （见 kTableMinWithLog 与 SyncPanel::setLogDrawerHeight）。
 inline int logDrawerHeight(int availH)
 {
     const int shut  = qMax(kMainHeightMin, qMin(kMainHeight, availH));
     const int open  = qMax(kMainHeightMin, qMin(kMainHeightLogOpen, availH));
     const int extra = qMax(0, open - shut);          // 窗口能长多高
-    return qMax(0, qMin(kLogDrawerHeight, extra - kPanelSpacing));
+    return qMax(kLogDrawerMin, qMin(kLogDrawerHeight, extra - kPanelSpacing));
 }
 inline QSize mainWindow(int availW, int availH, bool logOpen)
 {
