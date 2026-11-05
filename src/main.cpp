@@ -5058,7 +5058,33 @@ int main(int argc, char *argv[])
             }
         }
         w.show();
-        QTimer::singleShot(600, [&w, shotPath] {
+        // 等扫描**真完成**再截，别再用固定 600ms。
+        //
+        // 2026-11-05 实测：10 万文件扫描要 9.7 秒、210 万要 12.2 秒，而原来固定
+        // 600ms 就 render —— 大目录截出来的是一张**空表**（17049 B），
+        // 截图探针等于什么都没验，却照样 rc=0。判据于是长期假绿。
+        //
+        // 判定：文件数连续 3 次（每 200ms 采样）不变即视为扫完；空目录 2 秒后放行；
+        // 兜底 25 秒（超过就照截，并在 stderr 记一行，免得永远挂着）。
+        struct ShotState { int last; int stable; qint64 t0; };
+        ShotState *st = new ShotState{ -1, 0, QDateTime::currentMSecsSinceEpoch() };
+        QTimer *poll = new QTimer(&w);
+        QObject::connect(poll, &QTimer::timeout, [&w, shotPath, poll, st] {
+            SyncPanel *sp = w.syncPanelForTest();
+            const int n = sp ? sp->fileCountForTest() : 0;
+            if (n > 0 && n == st->last) ++st->stable; else st->stable = 0;
+            st->last = n;
+            const qint64 ms = QDateTime::currentMSecsSinceEpoch() - st->t0;
+            const bool done = (st->stable >= 3 && n > 0) || (n == 0 && ms > 2000) || ms > 25000;
+            if (!done)
+                return;
+            poll->stop();
+            // 无论成功/超时都打一行「扫到多少文件」：截图看不出行数，
+            // 没有这个数字就无法判断这张图到底是"真有数据"还是"空表"
+            // （2026-11-05 实测：10 万文件与 0 文件都截出 16.6 KB，肉眼分不出）。
+            fprintf(stderr, "%s files=%d elapsedMs=%lld\n",
+                    (ms > 25000) ? "SRT_SHOT_TIMEOUT" : "SRT_SHOT_FILES",
+                    n, (long long)ms);
             QApplication::processEvents();
             QImage img(w.width(), w.height(), QImage::Format_ARGB32_Premultiplied);
             img.fill(QColor(0x1e, 0x25, 0x30)); // 模拟深色桌面背景
@@ -5066,8 +5092,11 @@ int main(int argc, char *argv[])
             w.render(&p);
             p.end();
             img.save(shotPath);
+            delete st;
+            poll->deleteLater();
             QCoreApplication::quit();
         });
+        poll->start(200);
         return app.exec();
     }
 
