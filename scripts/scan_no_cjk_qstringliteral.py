@@ -232,6 +232,68 @@ def scan_u8_hex_escapes(root):
     return hits
 
 
+def _iter_escapes(s):
+    """逐个吐出字符串字面量里的转义序列，正确处理 \\\\ （转义的反斜杠）。
+
+    为什么必须处理 \\\\：字面量里的 "\\\\Users" 会被正则当成"\\U"开头的 UCN，
+    而 "U" 后面跟的是 "sers"（不是十六进制）⇒ 误报。
+    转义的反斜杠要整对跳过，后面的 u/U 只是普通字母。
+    """
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c == "\\" and i + 1 < n:
+            yield (i, s[i + 1])
+            i += 2
+            continue
+        i += 1
+
+
+def scan_broken_ucn(root):
+    """检查 4：字符串字面量里的 \\uXXXX / \\UXXXXXXXX 必须是**完整**的。
+
+    为什么（2026-11-05 实测）：把一段中文拆成多个相邻字面量时，很容易在
+    \\uXXXX 的中间断开，例如：
+
+        u8"\\u8FD9\\u628A\\u94"      <- 只剩 2 位十六进制
+        u8"A5\\u5319..."            <- 上一行的 \\u94 和这里的 A5 原本是一个 UCN
+
+    后果分两种编译器：
+      · GCC（麒麟交叉编译用的就是它）直接报错：
+        error: incomplete universal character name \\u94
+        ⇒ 麒麟版**编译不出来**，交付包里的二进制是旧的。
+      · MSVC 2015 **照收不误**，Windows 版照编照过 ⇒ 只有编麒麟才炸。
+
+    也就是说：只跑 Windows 编译的话，这个错会被完全放过；必须靠扫描器
+    在 Windows 上就拦下来（或者每轮门禁都真编麒麟）。
+    """
+    hits = []
+    # 匹配所有窄字面量（含 u8"..." / L"..." / "..."），u8 前缀在引号外面，
+    # 落在字面量内容之外，不影响内容检查。
+    pat = re.compile(r'"((?:[^"\\]|\\.)*)"')
+    hexd = set("0123456789abcdefABCDEF")
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in (".git", "build", "release", "debug")]
+        for fn in sorted(filenames):
+            if not fn.endswith((".cpp", ".h", ".hpp", ".cc")):
+                continue
+            p = os.path.join(dirpath, fn)
+            txt = io.open(p, "r", encoding="utf-8-sig", newline="").read()
+            for ln, line in enumerate(txt.split("\n"), 1):
+                code = strip_line_comment(line)
+                for m in pat.finditer(code):
+                    s = m.group(1)
+                    for pos, nxt in _iter_escapes(s):
+                        if nxt not in ("u", "U"):
+                            continue
+                        need = 4 if nxt == "u" else 8
+                        tail = s[pos + 2: pos + 2 + need]
+                        if len(tail) < need or any(ch not in hexd for ch in tail):
+                            hits.append((p, ln, "\\%s%s" % (nxt, tail)))
+    return hits
+
+
 def main():
     root = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
@@ -275,7 +337,20 @@ def main():
     else:
         print("OK：%s 下没有「u8 字面量里用 \\xNN 写中文」" % root)
 
-    return 1 if (hits or bad or u8hits) else 0
+    ucn = scan_broken_ucn(root)
+    if ucn:
+        print()
+        print("FAIL：发现 %d 处「被截断的 \\uXXXX / \\UXXXXXXXX」" % len(ucn))
+        for p, ln, s in ucn:
+            print("  %s:%d  %s" % (p, ln, s))
+        print()
+        print("改法：转义序列不能跨行断开 —— 一个 \\uXXXX 必须 4 位十六进制写在**同一个**字面量里。")
+        print("      GCC（麒麟交叉编译）会直接报 incomplete universal character name，")
+        print("      而 MSVC 会照收不误 => 只编 Windows 看不出来。")
+    else:
+        print("OK：%s 下没有「被截断的 \\uXXXX / \\UXXXXXXXX」" % root)
+
+    return 1 if (hits or bad or u8hits or ucn) else 0
 
 
 if __name__ == "__main__":

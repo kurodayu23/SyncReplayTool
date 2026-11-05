@@ -231,7 +231,7 @@ else { Record '纯逻辑自检' 'FAIL' "rc=$rc PASS=$pass FAIL=$fail" }
 #     产品明明打了「复制未成功」，判据却报 failMsg=0 —— 判据自己把 bug 盖住了。
 #   源码层面拦不住这种（字面量里根本没有汉字字节，grep 看不见），
 #   所以必须让这段常驻门禁。
-Write-Host "`n===== 2b. 源码静态扫描（中文字面量 3 条检查）=====" -ForegroundColor Cyan
+Write-Host "`n===== 2b. 源码静态扫描（中文字面量 4 条检查）=====" -ForegroundColor Cyan
 $scanTool = 'D:\AP\AP7000\SyncReplayTool\scripts\scan_no_cjk_qstringliteral.py'
 if (-not (Test-Path $scanTool)) {
     Record '源码扫描' 'FAIL' "找不到 $scanTool"
@@ -239,7 +239,7 @@ if (-not (Test-Path $scanTool)) {
     $scanOut = Join-Path $logs 'scan-cjk.txt'
     & python $scanTool 2>&1 | Out-File -FilePath $scanOut -Encoding UTF8
     $scanRc = $LASTEXITCODE
-    if ($scanRc -eq 0) { Record '源码扫描' 'PASS' '中文字面量 3 条检查全过' }
+    if ($scanRc -eq 0) { Record '源码扫描' 'PASS' '中文字面量 4 条检查全过' }
     else { Record '源码扫描' 'FAIL' "rc=$scanRc（见 logs\scan-cjk.txt）" }
 }
 

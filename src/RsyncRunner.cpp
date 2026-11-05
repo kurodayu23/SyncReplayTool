@@ -1290,6 +1290,45 @@ QString specialAdvice(const QString &raw)
             u8"\u7A0B\u5E8F\u81EA\u5E26\u7684 ssh \u5728\u8BFB\u53D6\u7CFB\u7EDF /etc/ssh/ssh_config \u65F6\u5224\u5B9A\u5176\u4E2D\u7684\u4E00\u4E2A\u6307\u4EE4\u4E0D\u53EF\u7528\uFF0C"
             u8"\u5728\u914D\u7F6E\u89E3\u6790\u9636\u6BB5\u9000\u51FA\u3002\u539F\u59CB\u62A5\u9519\u89C1\u4E0A\u65B9\u300C\u539F\u59CB\u62A5\u9519\u300D\u884C\u3002");
 
+    // 私钥文件**权限过宽**，ssh 出于安全考虑主动拒绝使用这把钥匙。
+    //
+    // 实测原文（2026-11-05，Windows + 包内 msys2 OpenSSH，私钥放在共享目录里，
+    // ACL 里带 "Users" 组）：
+    //   Bad permissions. Try removing permissions for user: DOMAIN\Users (S-1-5-21-...) on file D:/keys/id_ed25519.
+    //   @         WARNING: UNPROTECTED PRIVATE KEY FILE!          @
+    //   Permissions for 'D:/keys/id_ed25519' are too open.
+    //   This private key will be ignored.
+    //   Load key "D:/keys/id_ed25519": bad permissions
+    //   srtpw@127.0.0.1: Permission denied (publickey,password,keyboard-interactive).
+    //
+    // **归因已经是对的**（kHardLocal 里的 "Load key" 排在认证规则之前先命中 ⇒ 本机层），
+    // 但本机层的通用建议只说"私钥文件是否存在且可读" —— 而这种情况下私钥
+    // **确实存在、也确实可读**，只是权限太宽。客户照着那条建议查一遍，
+    // 什么都查不出来，最后只会得出"是账号密码错了"，越改越错。
+    //
+    // 所以这一类必须单独给一句能照着做的处置。
+    if (raw.contains(QLatin1String("UNPROTECTED PRIVATE KEY"), Qt::CaseInsensitive)
+        || raw.contains(QLatin1String("are too open"), Qt::CaseInsensitive)
+        || raw.contains(QLatin1String("bad permissions"), Qt::CaseInsensitive))
+        return QString::fromUtf8(
+            u8"\u79C1\u94A5\u6587\u4EF6\u7684\u6743\u9650\u592A\u5BFD\uFF0Cssh "
+            u8"\u51FA\u4E8E\u5B89\u5168\u8003\u8651\u62D2\u7EDD\u4F7F\u7528\u8FD9"
+            u8"\u628A\u94A5\u5319\uFF08\u539F\u59CB\u62A5\u9519\u91CC\u7684 bad per"
+            u8"missions / are too open \u5C31\u662F\u8FD9\u4E2A\u610F\u601D\uFF09"
+            u8"\u3002\u8FD9\u4E0D\u662F\u79C1\u94A5\u5185\u5BB9\u574F\u4E86\uFF0C"
+            u8"\u4E5F\u4E0D\u662F\u5BF9\u65B9\u62D2\u7EDD\u4E86\u8D26\u53F7\uFF0C"
+            u8"\u800C\u662F\u672C\u673A\u7684\u6587\u4EF6\u6743\u9650\u8BA9 ssh "
+            u8"\u4E3B\u52A8\u8DF3\u8FC7\u4E86\u8FD9\u628A\u94A5\u5319\u3002\u8BF7"
+            u8"\u8FD9\u6837\u5904\u7406\uFF1A\u2460 \u628A\u79C1\u94A5\u590D\u5236"
+            u8"\u5230\u53EA\u6709\u5F53\u524D\u7528\u6237\u53EF\u8BFB\u7684\u4F4D"
+            u8"\u7F6E\uFF0C\u4F8B\u5982 C:\\Users\\\u4F60\u7684\u7528\u6237\u540D\\"
+            u8".ssh\\ \uFF1B\u2461 \u53F3\u952E\u8BE5\u6587\u4EF6 \u2192 \u5C5E"
+            u8"\u6027 \u2192 \u5B89\u5168 \u2192 \u9AD8\u7EA7 \u2192 \u53D6\u6D88"
+            u8"\u5176\u4ED6\u7528\u6237\u548C\u7EC4\u7684\u8BFB\u53D6\u6743\u9650"
+            u8"\uFF0C\u53EA\u4FDD\u7559\u4F60\u81EA\u5DF1\u7684\u8D26\u6237\u4E0E S"
+            u8"YSTEM \uFF1B\u2462 \u6216\u8005\u5728\u300C\u8BBE\u7F6E\u300D\u91CC"
+            u8"\u6539\u7528\u53E3\u4EE4\u767B\u5F55\u3002");
+
     // 远端路径栏填成了一个已存在的文件。接收端层的通用建议（查磁盘、查权限、
     // 问对方装没装 rsync）一条都不对，而真正要改的是这台电脑上那一栏。
     if (raw.contains(QLatin1String("Not a directory"), Qt::CaseInsensitive))

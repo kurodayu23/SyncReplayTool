@@ -158,6 +158,28 @@ const LayerCase kLayerCases[] = {
     { "local-key-broken", 0,
       "ssh-keygen -y -f '/home/tester/vmtest/bad': Load key \"bad\": invalid format" },
 
+    // 私钥文件**权限过宽**，ssh 主动拒用这把钥匙（2026-11-05 Windows 实测原文）。
+    //
+    // 期望**本机层**，不是认证层：这条输出里同时有
+    // "Permission denied (publickey,password,keyboard-interactive)"，
+    // 认证规则（kFailRules 里的 "publickey"）比本机规则靠前的话，
+    // 就会被判成"账号密码不对" —— 客户会去改密码，私钥一个字没动，
+    // 改一百次也不会好。真正的原因是本机这把钥匙的 ACL 太宽。
+    //
+    // 之所以能判对本机层，靠的是 kHardLocal 里的 "Load key"
+    // （kHardLocal 在 kFailRules **之前**判）。这条判据就是防止
+    // 有人调整规则顺序时把它悄悄挪到认证层。
+    { "local-key-perm-too-open", 0,
+      "Bad permissions. Try removing permissions for user: DOMAIN\\Users (S-1-5-21-1-2-3) "
+      "on file D:/keys/id_ed25519.\r\n"
+      "@         WARNING: UNPROTECTED PRIVATE KEY FILE!          @\r\n"
+      "Permissions for 'D:/keys/id_ed25519' are too open.\r\n"
+      "This private key will be ignored.\r\n"
+      "Load key \"D:/keys/id_ed25519\": bad permissions\r\n"
+      "srtpw@127.0.0.1: Permission denied (publickey,password,keyboard-interactive).\r\n"
+      "rsync: [sender] safe_read failed to read 4 bytes: Connection reset by peer (104)\r\n"
+      "rsync error: error in rsync protocol data stream (code 12) at io.c(358) [sender=3.5.1]" },
+
     { "local-source-gone", 0,
       "link_stat \"/home/tester/sendsrc/gone.spe\" failed: No such file or directory (2)\r\n"
       "rsync: [sender] send_files failed to open ..." },
@@ -2517,6 +2539,62 @@ int runSelfCheck()
             << "\tnetTimeout=" << (okNetTimeout ? 1 : 0)
             << "\tnetGeneric=" << (okNetGeneric ? 1 : 0)
             << "\trecvStill=" << (okRecvStill ? 1 : 0)
+            << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // 私钥文件权限过宽：归因必须落在本机层，而且要有一句能照着做的处置
+    //
+    // 现象（2026-11-05 Windows 实测，私钥放在共享目录、ACL 带 "Users" 组）：
+    // 随包 msys2 的 ssh 出于安全考虑**主动跳过这把钥匙**：
+    //     Load key "D:/keys/id_ed25519": bad permissions
+    //     srtpw@127.0.0.1: Permission denied (publickey,password,keyboard-interactive).
+    //
+    // 这条输出里 "Permission denied (publickey,...)" 和 "bad permissions" 同时在，
+    // 而认证规则（kFailRules 里的 "publickey"）排在前面的话就会被判成
+    // "账号密码不对" —— 客户去改密码，私钥一个字没动，改一百次也不会好。
+    //
+    // 正例：层 == 本机层(0) 且**不是**认证层(2)，专用建议非空且说清是权限问题。
+    // 反向锁 1：真的是密码错的时候必须仍然判认证层(2)。
+    // 反向锁 2：密码错的时候**不能**拿到这条私钥权限的专用建议
+    //          （不然一个"永远返回这条建议"的实现也能过正例）。
+    {
+        const QString keyPerm = QStringLiteral(
+            "Bad permissions. Try removing permissions for user: DOMAIN\\Users (S-1-5-21-1-2-3) "
+            "on file D:/keys/id_ed25519.\r\n"
+            "@         WARNING: UNPROTECTED PRIVATE KEY FILE!          @\r\n"
+            "Permissions for 'D:/keys/id_ed25519' are too open.\r\n"
+            "This private key will be ignored.\r\n"
+            "Load key \"D:/keys/id_ed25519\": bad permissions\r\n"
+            "srtpw@127.0.0.1: Permission denied (publickey,password,keyboard-interactive).\r\n"
+            "rsync error: error in rsync protocol data stream (code 12) at io.c(358) [sender=3.5.1]");
+
+        const bool okLayer = (RsyncRunner::layerOf(keyPerm) == 0);
+        const bool okNotAuth = (RsyncRunner::layerOf(keyPerm) != 2);
+
+        // 建议必须说清是**权限**问题，并给出可执行动作（挪到 .ssh / 改权限 / 改用口令）
+        const QString adv = RsyncRunner::specialAdviceFor(keyPerm);
+        const bool okAdv = adv.contains(QString::fromUtf8(u8"\u6743\u9650"))     // 权限
+                          && adv.contains(QString::fromUtf8(u8"\u79C1\u94A5"))   // 私钥
+                          && adv.contains(QString::fromUtf8(u8"\u53E3\u4EE4"));  // 口令
+
+        // 反向锁 1/2：真的是密码错 → 认证层，且拿不到这条私钥权限的专用建议
+        const QString badPass = QStringLiteral(
+            "appuser@192.168.0.1: Permission denied (publickey,password,keyboard-interactive).\r\n"
+            "rsync error: unexplained error (code 255) [sender=3.1.1]");
+        const bool okAuthStill = (RsyncRunner::layerOf(badPass) == 2);
+        const bool okAuthNoKeyAdv = !RsyncRunner::specialAdviceFor(badPass)
+                                    .contains(QString::fromUtf8(u8"\u6743\u9650"));
+
+        const bool ok = okLayer && okNotAuth && okAdv && okAuthStill && okAuthNoKeyAdv;
+        if (!ok)
+            ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "attribution-key-permission"
+            << "\tlayer=" << (okLayer ? 1 : 0)
+            << "\tnotAuth=" << (okNotAuth ? 1 : 0)
+            << "\tadvice=" << (okAdv ? 1 : 0)
+            << "\tauthStill=" << (okAuthStill ? 1 : 0)
+            << "\tauthNoKeyAdv=" << (okAuthNoKeyAdv ? 1 : 0)
             << "\n";
     }
 
@@ -5229,22 +5307,22 @@ int main(int argc, char *argv[])
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("SyncReplayTool"));
     const QCommandLineOption optSkip(QStringLiteral("no-splash"),
-        QStringLiteral("Skip the splash screen (automation only)."));
+        QString::fromUtf8(u8"跳过启动动画（仅自动化使用）"));
     const QCommandLineOption optSplashMs(QStringLiteral("splash-ms"),
-        QStringLiteral("Splash duration in ms, 0 to skip (automation only)."), QStringLiteral("ms"));
+        QString::fromUtf8(u8"启动动画显示时长，单位毫秒；0 表示跳过（仅自动化使用）"), QStringLiteral("ms"));
     const QCommandLineOption optShot(QStringLiteral("screenshot"),
-        QStringLiteral("Capture window to png and exit (automation only)."), QStringLiteral("path"));
+        QString::fromUtf8(u8"把主窗口截图存成 png 后退出（仅自动化使用）"), QStringLiteral("path"));
     const QCommandLineOption optShotSettings(QStringLiteral("screenshot-settings"),
-        QStringLiteral("Capture settings dialog to png and exit (automation only)."), QStringLiteral("path"));
+        QString::fromUtf8(u8"把设置弹窗截图存成 png 后退出（仅自动化使用）"), QStringLiteral("path"));
     const QCommandLineOption optSelfCheck(QStringLiteral("selfcheck"),
-        QStringLiteral("Run attribution and watchdog self-checks, print results and exit."));
+        QString::fromUtf8(u8"运行归因与看门狗自检，打印结果后退出"));
     const QCommandLineOption optGuiCheck(QStringLiteral("selfcheck-gui"),
-        QStringLiteral("Run GUI interaction self-checks (clicks real widgets), print results and exit."));
+        QString::fromUtf8(u8"运行界面交互自检（真实点击控件），打印结果后退出"));
     const QCommandLineOption optSecretCheck(QStringLiteral("selfcheck-secrets"),
-        QStringLiteral("Run real syncs and verify no plaintext password file is left behind."),
+        QString::fromUtf8(u8"跑真实同步，并核对没有留下明文口令文件"),
         QStringLiteral("rounds"));
     const QCommandLineOption optVersion(QStringLiteral("version"),
-        QStringLiteral("Print version information and exit."));
+        QString::fromUtf8(u8"打印版本信息后退出"));
     parser.addOption(optSkip);
     parser.addOption(optSplashMs);
     parser.addOption(optShot);
