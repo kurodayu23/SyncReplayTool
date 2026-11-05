@@ -105,6 +105,46 @@ if (-not $SkipBuild) {
     Record '构建' 'SKIP' '按参数跳过'
 }
 
+# ---------------------------------------------------------------- 1b. 麒麟交叉编译
+#
+# 为什么七段里必须有这一段（2026-11-05 实测）：构建段只编 Windows，麒麟二进制
+# 靠另外一条命令手工编。改了源码只跑七段 → 麒麟包里还是几小时前的旧代码，
+# 而"打包"段照样把旧二进制装进去、门禁也照样能过（除非文案变了才暴露）。
+# 实测就撞上了：麒麟二进制比源码旧 502 分钟，闸门二报「1/453 条文案找不到」。
+# 所以：源码比麒麟二进制新 → 自动重编；没改就跳过（省 6 分钟）。
+if (-not $SkipBuild) {
+    $kylinBin = Join-Path $PackageRoot 'build-kylin\release\SyncReplayTool'
+    $newestSrcAll = Get-ChildItem 'D:\AP\AP7000\SyncReplayTool\src\*.cpp','D:\AP\AP7000\SyncReplayTool\src\*.h' |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $kylinStale = (-not (Test-Path $kylinBin)) -or
+                  ((Get-Item $kylinBin).LastWriteTime -lt $newestSrcAll.LastWriteTime)
+    if ($kylinStale) {
+        Write-Host "`n===== 1b. 麒麟交叉编译（源码比产物新）=====" -ForegroundColor Cyan
+        $tc = Join-Path $PackageRoot 'qt596-toolchain'
+        if (-not (Test-Path $tc)) {
+            Record '麒麟编译' 'FAIL' "找不到 $tc（交叉编译工具链不在）"
+        } else {
+            docker run --rm `
+                -v "${tc}:/toolchain:ro" `
+                -v "D:\AP\AP7000\SyncReplayTool:/src:ro" `
+                -v (Join-Path $WorkRoot 'kylin-build')`:'/work' `
+                -v (Join-Path $PackageRoot 'build-kylin')`:'/out' `
+                --entrypoint /bin/bash kylin-v10-real:latest `
+                -c "cd /src && bash scripts/build-kylin-qt596.sh" 2>&1 |
+                Out-File -FilePath (Join-Path $logs 'kylin-build.log') -Encoding UTF8
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $kylinBin)) {
+                Record '麒麟编译' 'PASS' "二进制 $((Get-Item $kylinBin).LastWriteTime)"
+            } else {
+                Record '麒麟编译' 'FAIL' "rc=$LASTEXITCODE（见 logs\kylin-build.log）"
+            }
+        }
+    } else {
+        Record '麒麟编译' 'SKIP' '产物已比源码新'
+    }
+} else {
+    Record '麒麟编译' 'SKIP' '按参数跳过构建'
+}
+
 # ---------------------------------------------------------------- 2. 打包
 #
 # ★ 这一段是 2026-11-02 补上的，理由写在文件头的 .DESCRIPTION 里：
