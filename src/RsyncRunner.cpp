@@ -17,6 +17,8 @@
 #include <QStandardPaths>
 #include <QTemporaryFile>
 #include <QtGlobal>
+#include <QSysInfo>
+#include <QCryptographicHash>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -799,7 +801,7 @@ QString RsyncRunner::missingRootFromStderr(const QString &text)
 // 目标形态（每一段都必须能被远端 bash 原样解析）：
 //   test -d '<root>' || echo 'SRT_MISSING_ROOT:<root>' >&2; \
 //   mkdir -p -- '<dir1>' '<dir2>'; \
-//   rm -f -- '<dir>'/.srt-verify-*; \
+//   rm -f -- '<dir>'/.srt-verify-<scope>-*; \
 //   printf %s '<token>' > '<dir>'/.srt-verify-<token>
 //
 // 三处曾经踩过的坑，都固化在这里：
@@ -813,7 +815,8 @@ QString RsyncRunner::buildRemoteDirsCommand(const QString &root,
                                             const QStringList &dirs,
                                             bool needHomeRoot,
                                             const QString &token,
-                                            const QString &marker)
+                                            const QString &marker,
+                                            const QString &scope)
 {
     // 远端命令交给远端 shell 解析，路径里的空格和引号必须自己转义。
     // remoteDir() 已经把 "~" 开头改写成了等价的相对路径（见 remoteDir 注释），
@@ -848,14 +851,26 @@ QString RsyncRunner::buildRemoteDirsCommand(const QString &root,
         //
         // 标记文件是"传前传后对暗号"用的：正常路径下核对完就删掉了。
         // 但进程被强杀（Stop-Process / 断电 / 杀软误杀）时收尾代码根本不会跑，
-        // 接收端目录里就长期躺着 .srt-verify-<pid>-<时间戳> ——
+        // 接收端目录里就长期躺着 .srt-verify-<scope>-<pid>-<时间戳> ——
         // 客户在远端看到莫名文件，以为是同步过去的业务文件（台账 F-10）。
         //
         // 自己这轮的标记是**最后**才写的，所以"先删旧的、再写新的"不会误删自己。
         // glob 那一段**不能加引号**（加了引号就变成去删一个名叫
         // .srt-verify-* 的文件），只有目录名部分加引号。
-        // ⇒ 正确形态： rm -f -- '<dir>'/.srt-verify-*
-        drops << (QStringLiteral("rm -f -- '") + dir + QLatin1String("'/.srt-verify-*"));
+        //
+        // **glob 必须带 scope**（只删本客户端的残留）：
+        // 实测（2026-11-05，本机真容器 + 真 rsync）：两个客户端同时往同一个
+        // 接收端目录推数据时，无差别 glob 会把**另一个客户端正在用的**标记删掉。
+        // 那个客户端传完之后读不回自己的标记 ⇒ 报「远端目录在传输过程中被删除
+        // 或替换，已判定失败」—— 而它的数据其实一个字节都没少地到了远端
+        // （实测 20971520 字节、sha256 逐位一致）。现场场景很普通：
+        // 一台工作机和一台机器同时往服务器同一个目录推数据。
+        //
+        // 作用域为空时退回无差别 glob：那是"不知道是谁"的情况，
+        // 宁可回到旧行为，也不要拼出 `.srt-verify--*` 这种永远匹配不到的东西。
+        const QString scopeTail = scope.isEmpty() ? QStringLiteral("*")
+                                                   : (scope + QLatin1Char('-') + QStringLiteral("*"));
+        drops << (QStringLiteral("rm -f -- '") + dir + QLatin1String("'/.srt-verify-") + scopeTail);
         drops << (QStringLiteral("printf %s '") + token + QLatin1String("' > '")
                   + dir + QLatin1Char('/') + marker + QLatin1Char('\''));
     }
@@ -873,6 +888,50 @@ QString RsyncRunner::buildRemoteDirsCommand(const QString &root,
     if (!drops.isEmpty())
         segs << drops.join(QStringLiteral("; "));
     return segs.join(QStringLiteral("; "));
+}
+
+// 本客户端的身份作用域：主机名 + 配置目录的短哈希。
+//
+// 它决定两件事：标记文件名里带哪一段、以及"清旧标记"的 glob 只清哪一段。
+//
+// 为什么两个成分都要（缺一个就会回到老问题）：
+//   · 只用主机名 ⇒ 同一台机器上跑两个不同配置目录的实例会互相删标记；
+//   · 只用配置目录 ⇒ 两台不同电脑的默认配置目录路径往往一模一样
+//     （C:\Users\xxx\AppData\...），作用域会撞上 ⇒ 两台机器还是会互相删。
+//
+// 两条硬要求：
+//   1) **跨运行稳定** —— 否则自己的残留标记永远清不掉（F-10 又回来了）；
+//   2) **不同客户端不同** —— 否则会去删别人正在用的标记（2026-11-05 实测的 P1）。
+//
+// 主机名里可能有空格和中文，作用域要直接进远端文件名 ⇒ 只保留
+// 字母数字和短横线，其余换成下划线。
+QString RsyncRunner::clientScope()
+{
+    static QString s_scope;
+    if (!s_scope.isEmpty())
+        return s_scope;
+
+    QString host = QSysInfo::machineHostName().toLower();
+    QString keep;
+    keep.reserve(host.size());
+    for (int i = 0; i < host.size(); ++i) {
+        const QChar c = host.at(i);
+        if (c.isLetterOrNumber() || c == QLatin1Char('-'))
+            keep += c;
+        else
+            keep += QLatin1Char('_');
+    }
+    if (keep.isEmpty())
+        keep = QStringLiteral("host");
+    if (keep.size() > 24)
+        keep.truncate(24);
+
+    // 配置目录的短哈希：同一份配置 = 同一个客户端（单实例锁也按配置目录生效）。
+    const QByteArray h = QCryptographicHash::hash(ConfigStore::configDir().toUtf8(),
+                                                  QCryptographicHash::Md5)
+                              .toHex().left(8);
+    s_scope = keep + QLatin1Char('-') + QString::fromLatin1(h);
+    return s_scope;
 }
 
 // classifyLayer 在上面的匿名命名空间里，没法从外部链进来。
@@ -3060,7 +3119,15 @@ void RsyncRunner::ensureRemoteDirs()
         return;
     }
 
-    m_verifyToken = QString::number(QCoreApplication::applicationPid())
+    // token 里带上**客户端作用域**：标记文件名和"清旧标记"的 glob 都靠它区分
+    // "这是我的"和"那是别人的"。少了这一段，两个客户端往同一个接收端目录推数据时
+    // 会互相删掉对方**正在用**的标记 ⇒ 那个客户端传完之后读不回自己的标记 ⇒
+    // 报「远端目录被删除或替换，已判定失败」，而它的数据其实完整到了远端。
+    // （2026-11-05 实测：本机真容器 + 真 rsync，20MB 数据 sha256 逐位一致，
+    //   界面照样报"远端目录被删除或替换"。现场场景：一台工作机 + 一台机器
+    //   同时往服务器同一个目录推数据。）
+    m_verifyToken = clientScope()
+                    + QLatin1Char('-') + QString::number(QCoreApplication::applicationPid())
                     + QLatin1Char('-') + QString::number(QDateTime::currentMSecsSinceEpoch());
     m_verifyMarker = QStringLiteral(".srt-verify-") + m_verifyToken;
 
@@ -3073,7 +3140,8 @@ void RsyncRunner::ensureRemoteDirs()
     // 整条远端命令由 buildRemoteDirsCommand 拼（探测 + mkdir + 清旧标记 + 写本轮标记）。
     // 自检判据验的是**同一个函数**，所以产品改了这里判据一定跟着变。
     const QString dirsCommand = buildRemoteDirsCommand(rootOnly, dirs, needHomeRoot,
-                                                       m_verifyToken, m_verifyMarker);
+                                                       m_verifyToken, m_verifyMarker,
+                                                       clientScope());
 
     m_proc = new QProcess(this);
 #ifdef Q_OS_WIN

@@ -3152,11 +3152,12 @@ int runSelfCheck()
     //   · home 根（远端根留空）时不会出现空的 "mkdir -p --"
     // ----------------------------------------------------------------
     {
-        const QString token  = QStringLiteral("123-456");
-        const QString marker = QStringLiteral(".srt-verify-123-456");
+        const QString scope = QStringLiteral("sc1");
+        const QString token  = scope + QStringLiteral("-123-456");
+        const QString marker = QStringLiteral(".srt-verify-") + token;
         const QString dir    = QStringLiteral("/home/u/in dir/spe");
         const QString cmd = RsyncRunner::buildRemoteDirsCommand(
-            QStringLiteral("/home/u/in dir"), QStringList() << dir, false, token, marker);
+            QStringLiteral("/home/u/in dir"), QStringList() << dir, false, token, marker, scope);
 
         int quotes = 0;
         for (int i = 0; i < cmd.size(); ++i)
@@ -3168,26 +3169,33 @@ int runSelfCheck()
         const bool probeExact = (RsyncRunner::buildRemoteRootProbe(QStringLiteral("/home/u/in dir"))
                                  == QStringLiteral("test -d '/home/u/in dir' || echo 'SRT_MISSING_ROOT:/home/u/in dir' >&2"));
         const bool mkdirOk    = cmd.contains(QStringLiteral("mkdir -p -- '/home/u/in dir/spe'"));
-        const bool staleOk    = cmd.contains(QStringLiteral("rm -f -- '/home/u/in dir/spe'/.srt-verify-*"));
-        const bool writeOk    = cmd.contains(QStringLiteral("printf %s '123-456' > '/home/u/in dir/spe/.srt-verify-123-456'"));
+        const bool staleOk    = cmd.contains(QStringLiteral("rm -f -- '/home/u/in dir/spe'/.srt-verify-sc1-*"));
+        const bool writeOk    = cmd.contains(QStringLiteral("printf %s 'sc1-123-456' > '/home/u/in dir/spe/.srt-verify-sc1-123-456'"));
+        // **glob 必须带作用域**：无差别的 `.srt-verify-*` 会把别的客户端
+        // 正在用的标记删掉 ⇒ 那个客户端传完之后读不回标记 ⇒ 报
+        // 「远端目录被删除或替换，已判定失败」，而它的数据其实完整到了远端
+        // （2026-11-05 实测：20MB 数据 sha256 逐位一致，界面照样报失败）。
+        // 现场场景：两台电脑往服务器同一个目录推数据。
+        const bool globScoped = !cmd.contains(QStringLiteral("'/.srt-verify-*"))
+                                && !cmd.contains(QStringLiteral("'/.srt-verify-'"));
 
         // 路径里带单引号：必须是 '\'' 转义，且探测段逐字等于期望。
         const QString cmdQ = RsyncRunner::buildRemoteDirsCommand(
             QStringLiteral("/home/o'brien"), QStringList() << QStringLiteral("/home/o'brien/x"),
-            false, token, marker);
+            false, token, marker, scope);
         const bool escapedOk = (RsyncRunner::buildRemoteRootProbe(QStringLiteral("/home/o'brien"))
                                 == QStringLiteral("test -d '/home/o'\\''brien' || echo 'SRT_MISSING_ROOT:/home/o'\\''brien' >&2"))
                             && cmdQ.contains(QStringLiteral("mkdir -p -- '/home/o'\\''brien/x'"));
 
         // home 根：没有远端根、没有目录要建 ⇒ 不能出现空的 "mkdir -p --"。
         const QString cmdHome = RsyncRunner::buildRemoteDirsCommand(QString(), QStringList(), true,
-                                                                     token, marker);
+                                                                     token, marker, scope);
         const bool homeOk = !cmdHome.contains(QStringLiteral("test -d"))
                             && !cmdHome.contains(QStringLiteral("mkdir -p"))
-                            && cmdHome.contains(QStringLiteral("'./.srt-verify-123-456'"));
+                            && cmdHome.contains(QStringLiteral("'./.srt-verify-sc1-123-456'"));
 
         const bool ok = quotesEven && noEmptyQuote && probeExact && mkdirOk && staleOk
-                        && writeOk && escapedOk && homeOk;
+                        && writeOk && escapedOk && homeOk && globScoped;
         if (!ok)
             ++bad;
         out << (ok ? "PASS\t" : "FAIL\t") << "remote-dirs-command"
@@ -3196,7 +3204,7 @@ int runSelfCheck()
             << " probeExact=" << (probeExact ? 1 : 0)
             << " mkdirOk=" << (mkdirOk ? 1 : 0) << " staleOk=" << (staleOk ? 1 : 0)
             << " writeOk=" << (writeOk ? 1 : 0) << " escapedOk=" << (escapedOk ? 1 : 0)
-            << " homeOk=" << (homeOk ? 1 : 0) << "\n";
+            << " homeOk=" << (homeOk ? 1 : 0) << " globScoped=" << (globScoped ? 1 : 0) << "\n";
     }
 
     // ----------------------------------------------------------------

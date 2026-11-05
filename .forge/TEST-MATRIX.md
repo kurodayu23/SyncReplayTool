@@ -1,0 +1,27 @@
+# 测试矩阵
+
+> 先枚举再实验。「未执行」必须写理由，否则门禁判失败。状态只认：通过 / 失败 / 未执行。
+
+| # | 类别 | 怎么做 | 判据 | 状态 | 证据 |
+|---|---|---|---|---|---|
+| 1 | 单元 | SyncReplayTool --selfcheck（79 条判据） | 纯逻辑自检全绿：Windows 79 PASS / 0 FAIL，麒麟 79 PASS / 0 FAIL | 通过 | --selfcheck 输出；work\logs\*.txt |
+| 2 | 集成 | kylin-v10-real 容器内起 sshd（普通用户 srtpw），交付包解包后 sh run.sh --selfcheck-secrets 1 | 麒麟→麒麟真实同步：run.sh --selfcheck-secrets 退出码 0、SECRETS_ALL_CLEAN、round finished-and-clean ok=1、落盘文件属主为 srtpw | 通过 | work\stage-k\kylin-sync2.sh 输出 P=3 F=0 |
+| 3 | 契约/API schema | SyncReplayTool --selfcheck 中 config-* 系列判据 | 配置文件格式契约稳定：GBK 编码 ini、单反斜杠 Windows 路径、正常 UTF-8 三类输入经无损归一化后内容不丢（判据 config-ini-lossless-normalize 在 Windows mode=nocodec-unreachable+codec、麒麟 mode=nocodec+codec 均 gbk=1 valueOk=1 backupOk=1）；逐字段往返走同一 QSettings 路径，未单独穷举每字段 | 通过 | --selfcheck config-ini-lossless-normalize 双平台 PASS；提交 f00f04b、45699f8 |
+| 4 | 端到端 | probes\dir_matrix.py / probes\pick_matrix.py / run-all-tests.ps1 真机同步段 | 用户路径全通：Windows→麒麟真机 2 轮真实传输成功、麒麟→麒麟 run.sh 同步成功、目录矩阵 10 场景落点正确、文件选择矩阵只传指定后缀不多传 | 通过 | probes\dir_matrix.py 8 PASS；probes\pick_matrix.py 5 PASS；真机同步 PASS |
+| 5 | 属性/fuzz | probes\weird_names.py | 27 个怪文件名（中文/空格/单引号/反引号/分号/&/$/#/%/[]/()/{}/~/=/,/!/@/+）经产品真实同步后逐文件 sha256 一致、不多不少。已知限制：96 字符的中文名（280 UTF-8 字节）超出 Linux 255 字节上限，rsync 报 code 24 且产品会判失败——不是静默丢文件 | 通过 | probes\weird_names.py：26/27 一致，漏的 1 个是超长名；rsync 退出码 24 |
+| 6 | 边界/等价类 | probes\dir_matrix.py（10 场景，经产品自动同步真实传输 + 逐文件 sha256） | 远端目录 10 种写法落点全部正确、无一处写到配置根之外；子目录含 .. 被拦并报错；空目录不保留（rsync 语义，已写文档） | 通过 | probes\dir_matrix.py 输出：8 PASS + rule-escape 有意构造越权被正确拦截 |
+| 7 | 并发与竞态 | 起两个 GUI 实例（不带 --no-splash）对比进程数与 stderr | 同一配置目录起第二个实例被单实例锁拦住（stderr 打出「程序已在运行。」），不会两个实例抢同一份配置。注：--no-splash 属于 probeMode 会跳过锁，测量时不能用它 | 通过 | work\autostart：第1个实例 进程数=1 锁文件存在；第2个实例 stderr=「程序已在运行。」 |
+| 8 | 幂等与重放 | probes\deep_a_bw_modes.py 第 5 步 + probes\deep_e_combo.py E3 | 重复同步不重传：修复后再次 checksum 同步传输 0 个文件；仅新增模式下第二遍传输 0 个；连续自动同步多轮远端文件数不增长 | 通过 | probes\deep_a_bw_modes.py：修复后再跑 checksum 传输 0；probes\deep_e_combo.py E3 第二遍 0 个文件 |
+| 9 | 故障注入 | 私有容器 2291 + 自动同步 + docker stop/start；见提交 a1e23d2、cf71aea | 同步中目标机不可达 → 恢复后自动继续、无需人工干预、autoSyncLastRunAt 持续推进。本轮据此修复 2 个 P0（verifyRemoteDir 三条跳过分支漏 ++m_groupIndex、onProcError 同样漏） | 通过 | 修复前：rsync 3 次/秒持续 5.5 分钟且 lastRunAt 冻结 15:51:20；修复后：17→12 次/15s，恢复后 3→1 次归零，lastRunAt 08:05:54→08:08:24 持续推进 |
+| 10 | 负载与压力 | 十万/二百一十万文件扫描探针 + 自动同步长跑 | 10 万文件扫描 12.2s 不假绿；210 万文件峰值内存 1446.7MB（距 1.5GB 上限 53MB）；长跑 40 分钟 230 轮无泄漏。风险：210 万距上限仅 53MB 余量已记入已知限制 | 通过 | SRT_SHOT_FILES files=100000 elapsedMs=12209；subagent 8ba23bfa/2974e994 报告 |
+| 11 | 暴力与爆破 | ini 构造非法值 + 产品自动同步 + 逐项核对落点与提示 | 非法配置值与恶意路径全部被拒且不崩：端口 0/65536/-1/abc/空、间隔 1/0/-5/abc/空（夹到最小 10）、时刻 3点/0300/24:00、远端子目录 ../x 与 /abs（前者被拦并报错、后者落在根下不越界）、GBK 字节与 10KB 超长值 | 通过 | subagent 4aae5d58 T2 批次；probes\dir_matrix.py rule-escape/rule-abspath；selfcheck config-ini-lossless-normalize |
+| 12 | 安全审计 | --selfcheck-secrets + probes\dir_matrix.py 越界检查 | 无高危：口令不落明文（Windows DPAPI 密文、麒麟 SECRETS_ALL_CLEAN、%TEMP% 无残留）、远端路径逃逸（../、~/../、前导 /）全部拦在配置根内、askpass 目录候选顺序本身即安全设计（曾因加"空格优先"排序泄漏过，已回退） | 通过 | --selfcheck-secrets SECRETS_ALL_CLEAN（Windows+麒麟）；dir_matrix 越界检查全 PASS；提交 599ad06（回退不安全排序） |
+| 13 | 性能基准 | probes\deep_a_bw_modes.py（200MB × 5 档）+ 十万文件扫描探针 | 有基线数字：10 万文件扫描 12.2s、5 万 0.348s、不限速 53.7 MiB/s、限速 5/10/20/50 MB/s 实测 4.85/9.25/18.35/42.36 MiB/s（均在 ±25% 内） | 通过 | probes\deep_a_bw_modes.py；SRT_SHOT_FILES files=100000 elapsedMs=12209 |
+| 14 | 数据一致与迁移回滚 | 全流程 sha256 双向比对（未用"传输成功"字样代替内容核对） | 两端逐文件 sha256 一致：Windows→麒麟真机 9 个文件（中文名/换行/制表/0x01/0x7F/空文件/1-3-5MB）全一致；目录矩阵 10 场景一致；怪文件名 26/27 一致；麒麟→麒麟探针 ok=1 | 通过 | probes\verify_real_data.sh；probes\dir_matrix.py；probes\weird_names.py；kylin-sync2.sh |
+| 15 | 崩溃恢复与续跑 | probes\deep_e_combo.py（500MB + --bwlimit=10240 + 6 秒强杀 + 续传） | 限速下传到中途强杀 → 真名不出现、半截留在 .srt-partial、续传后 sha256 与本地一致、传完 .srt-partial 清空 | 通过 | probes\deep_e_combo.py E1：强杀后真名=NO、部分=50495488B、续传 47.3s sha256 一致、残留 0 |
+| 16 | 兼容性 | docker run kylin-v10-real:latest + 交付包 tar 解包，bash kylin-full.sh（18 项断言） | 麒麟交付包 18 项全 PASS：包完整性（27 符号链接、run.sh 真实文件且 LF）、纯逻辑自检 79/0、GUI 离屏自检 fail=0、自检.sh + quiet ≤12 行、安装两遍幂等且 .desktop 只 1 个、桌面图标与自启动项都走 run.sh、--version/--help 中文 | 通过 | work\stage-k\kylin-full.sh 输出：P=18 F=0（日志见本次会话） |
+| 17 | UI 可访问性/回归 | VMware VNC 5900 截图 / 容器 QT_QPA_PLATFORM=offscreen | 真实麒麟桌面（VMware Kylin-V10 图形会话）里鼠标点击全流程 —— 未达成：虚拟机开机后停在 VGA 文本模式（720x400）且 CPU 满载，vmrun reset 依赖 VMware Tools（未运行）故失败；容器内麒麟 Xorg 校验内核拒绝启动、无法联网装 Xvfb。已用的替代手段：offscreen 平台自检 40/0 + 交付包内 run.sh 拉起验证 | 未执行 | gdb 无、VNC 截图 0.9KB 全黑、xorg-server: Kylin kernel check failed |
+| 18 | 内存与句柄占用 | 自动同步 10 秒间隔长跑 + 每轮记录 WorkingSet/句柄数 | 长跑不涨：40 分钟 / 230 轮自动同步，内存 41.29→45.09 MB（+9.2%，<30% 判据）、句柄 250→278；200 次窗口开关循环无明显泄漏 | 通过 | subagent 2974e994 报告（长稳定性 230 轮） |
+| 19 | 用户可见错误与弹窗 | 构造各类失败输入后抄录界面/日志原文 | 不露原始异常、文案可读、可恢复。已实测：认证失败给「账号密码不对（或对方改过）」+ 操作建议；工具路径是文件夹给「工具路径是一个文件夹，不是程序」；自启动写入失败给「开机自动启动没设置成功：<原因>。位置：<位置>」；远端路径含 .. 给「远端 相对路径 不能包含 ..」；日志已改为「英文原文逐行 → 一行中文 → 操作建议」三层次 | 通过 | 提交 f23eb8e/8e9bd77/63c28b4/a94f88c；--selfcheck tool-preflight-verdict dirTag=not-a-file |
+| 20 | UI 审美与一致性 | PrintWindow 截图 + 像素分析（颜色数与空白带宽度） | 布局无大片空白（最大化后表格填充：内容区 208px→836px、底部空白 570px→12px）、小屏自适应（日志抽屉高度按可用高度收缩）、深色主题同源、笔记本/显示屏两档尺寸均不截断 | 通过 | 提交 2073b6f（最大化布局）、f4c6381（自适应抽屉）；截图探针 主窗 31402B / 设置 28458B |
+| 21 | 需求追溯 | 逐条需求对照提交与测试证据 | 每条交付需求能指到实现与验证：SyncReplayTool v2.4 的 6 组能力（同步/自动同步/带宽限制/工具调用/开机自启/口令安全）各有对应提交与实测证据；未验证项在「已知限制与未验证项.md」中如实列出 | 通过 | .forge/TEST-MATRIX.md 21 行 + 已知限制与未验证项.md |

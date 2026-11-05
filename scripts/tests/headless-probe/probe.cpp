@@ -14,7 +14,9 @@
 // Usage:
 //   probe --root <dir> [--host H --port P --user U --key K --remote R]
 //         [--rules a,b,c] [--no-rules] [--only-new] [--sync] [--timeout S]
-//         [--dump-rows]
+//         [--dump-rows] [--cancel-after MS]
+//
+// --cancel-after MS: 传输开始 MS 毫秒后再按一次开始/取消按钮（= 用户点取消）。
 #include <QApplication>
 #include <QTimer>
 #include <QTextStream>
@@ -67,6 +69,7 @@ int main(int argc, char *argv[])
     const bool   doSync    = argFlag(args, "--sync");
     const bool   dumpRows  = argFlag(args, "--dump-rows");
     const int    timeout   = argValue(args, "--timeout", "300").toInt();
+    const int    cancelAfter = argValue(args, "--cancel-after", "0").toInt();
 
     MainWindow w;
     SyncPanel *panel = w.syncPanelForTest();
@@ -101,6 +104,8 @@ int main(int argc, char *argv[])
     const int doneBefore = panel->syncFinishedCountForTest();
     int ticks = 0;
     bool scanned = false;
+    int syncStartTick = -1;
+    bool cancelSent = false;
 
     QTimer *timer = new QTimer;
     timer->setInterval(200);
@@ -127,6 +132,7 @@ int main(int argc, char *argv[])
                     return;
                 }
                 panel->startSyncForTest();
+                syncStartTick = ticks;
             }
             if (ticks * 200 > timeout * 1000) {
                 say("PROBE_FAIL scan-timeout");
@@ -134,6 +140,13 @@ int main(int argc, char *argv[])
                 return;
             }
             return;
+        }
+        if (!cancelSent && cancelAfter > 0 && syncStartTick >= 0
+            && (ticks - syncStartTick) * 200 >= cancelAfter) {
+            cancelSent = true;
+            say(QString("CANCEL sent after %1 ms").arg(cancelAfter));
+            // 传输中再按一次开始/取消按钮 = 用户点取消
+            panel->startSyncForTest();
         }
         if (panel->syncFinishedCountForTest() > doneBefore) {
             say(QString("SYNC ok=%1 done=%2 total=%3 count=\"%4\" status=\"%5\"")

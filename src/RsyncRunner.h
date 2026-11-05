@@ -327,13 +327,33 @@ public:
     // 形态：
     //   test -d '<root>' || echo 'SRT_MISSING_ROOT:<root>' >&2; \
     //   mkdir -p -- '<dir1>' '<dir2>'; \
-    //   rm -f -- '<dir>'/.srt-verify-*; \
+    //   rm -f -- '<dir>'/.srt-verify-<scope>-*; \
     //   printf %s '<token>' > '<dir>'/.srt-verify-<token>
+    //
+    // scope（客户端身份作用域）是**必须**的，不能退回成无差别 glob：
+    // 实测（2026-11-05，本机真容器 + 真 rsync）：两个客户端同时往**同一个**
+    // 接收端目录推数据时，后启动的那个执行 `rm -f -- '<dir>'/.srt-verify-*`
+    // 会把前一个**正在用**的标记删掉 ⇒ 前一个传完之后读不回自己的标记 ⇒
+    // 报「远端目录在传输过程中被删除或替换，本组传输结果不可信，已判定失败」。
+    // 而那 20MB 数据其实**一个字节都没少**地到了远端（实测 sha256 一致）。
+    // 现场场景很普通：一台工作机 + 一台机器同时往服务器同一个目录推数据。
+    // 有了 scope，各客户端只清自己那份残留，互不干扰。
     static QString buildRemoteDirsCommand(const QString &root,
                                            const QStringList &dirs,
                                            bool needHomeRoot,
                                            const QString &token,
-                                           const QString &marker);
+                                           const QString &marker,
+                                           const QString &scope);
+
+    // 本客户端的身份作用域：主机名 + 配置目录的短哈希。
+    //
+    // 为什么两个都要：
+    //   · 只用主机名 ⇒ 同一台机器上跑两个不同配置目录的实例会互相删标记；
+    //   · 只用配置目录 ⇒ 两台不同电脑的默认配置目录路径往往一模一样
+    //     （C:\Users\xxx\AppData\...），作用域会撞上。
+    // 作用域必须**跨运行稳定**（否则自己的残留永远清不掉），
+    // 又必须**不同客户端不同**（否则清别人的活标记）。
+    static QString clientScope();
 
     // 少数几类错误的专用建议（端口填错 / 远端路径填成文件 / 安全中心拦截）。
     // 空串 = 该用本层的通用建议。同样暴露出来，是为了让自检判据能验到
