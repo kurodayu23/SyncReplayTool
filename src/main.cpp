@@ -221,7 +221,11 @@ static int toolCellWidth(const ToolColumnDelegate &d)
 
 int runSelfCheck()
 {
-    QTextStream out(stdout);
+    // 输出走 ConsoleDevice：它是控制台时按**当前控制台代码页**转码
+    // （中文 Windows 的 cmd 是 936，直接吐 UTF-8 字节会满屏乱码），
+    // 被重定向（> 文件 / 管道）时保持 UTF-8（脚本要解析的就是它）。
+    ConsoleDevice console(stdout);
+    QTextStream out(&console);
     // 输出编码必须钉死成 UTF-8。
     //
     // 不钉的话，stdout 的编码跟着**当前 locale** 走：在 C locale 下
@@ -230,6 +234,8 @@ int runSelfCheck()
     // 客户（和运维）看到的是乱码，还以为程序坏了。
     //
     // 这不是显示层的小事：交付包里的 自检.sh 会把这段输出原样转述给人看。
+    //
+    // 钉成 UTF-8 之后，转码交给 ConsoleDevice 做（见 ConsoleOutput.h 的口径）。
     out.setCodec("UTF-8");
     int bad = 0;
 
@@ -3346,6 +3352,83 @@ int runSelfCheck()
         out.flush();
     }
 
+    // ----------------------------------------------------------------
+    // 控制台编码判据（2026-11-05 交付包审计 D7 的遗留）
+    //
+    // 背景：中文版 Windows 的 cmd 默认输出代码页是 936(GBK)，而程序吐的是
+    // UTF-8 字节 —— 运维在 cmd 里敲 --help / --selfcheck 看到的是满屏乱码，
+    // 客户的第一反应是"这软件输出坏了"。
+    //
+    // 这三条把口径钉死成**可回归的判据**（否则只能靠人眼看）：
+    //   ① 936 往返：中文按 GBK 编码后必须能原样解回来；
+    //   ② UTF-8 直通：cp=0 或 65001 时字节必须一个都不变；
+    //   ③ 重定向保 UTF-8：写进文件（=被重定向）时字节必须还是 UTF-8。
+    // ----------------------------------------------------------------
+    {
+        const QString sample = QString::fromUtf8(u8"已跳过");
+        const QByteArray utf8 = sample.toUtf8();
+
+        // ① 936 往返
+        const QByteArray gbk = encodeForCodePage(utf8, 936);
+        const QString back936 = decodeFromCodePage(gbk, 936);
+        const bool rt936 = (back936 == sample);
+        if (!rt936)
+            ++bad;
+        out << (rt936 ? "PASS\t" : "FAIL\t") << "console-gbk-roundtrip"
+            << "\tcp=936\tutf8Bytes=" << utf8.size()
+            << "\tencodedBytes=" << gbk.size()
+            << "\troundtrip=" << (rt936 ? 1 : 0) << "\n";
+
+        // 在**会做转码**的平台上，936 的编码结果必须和 UTF-8 原字节不同 ——
+        // 否则说明"转码"其实是原样输出（也就是没修）。
+        const bool reallyChanged = (gbk != utf8);
+        const bool needChange = consoleEncodingSupported();
+        const bool ok936Real = (!needChange) || reallyChanged;
+        if (!ok936Real)
+            ++bad;
+        out << (ok936Real ? "PASS\t" : "FAIL\t") << "console-gbk-not-utf8"
+            << "\tplatform=" << (needChange ? "transcoding" : "utf8-native")
+            << "\tdiffers=" << (reallyChanged ? 1 : 0) << "\n";
+
+        // ② UTF-8 直通
+        const bool passThrough = (encodeForCodePage(utf8, 0) == utf8)
+                              && (encodeForCodePage(utf8, 65001) == utf8);
+        if (!passThrough)
+            ++bad;
+        out << (passThrough ? "PASS\t" : "FAIL\t") << "console-utf8-passthrough"
+            << "\tcp0=" << (encodeForCodePage(utf8, 0) == utf8 ? 1 : 0)
+            << "\tcp65001=" << (encodeForCodePage(utf8, 65001) == utf8 ? 1 : 0) << "\n";
+
+        // ③ 重定向保 UTF-8：写进文件后字节必须还是原始 UTF-8。
+        bool redirectOk = false;
+        int redirectBytes = -1;
+        {
+            QTemporaryDir td;
+            if (td.isValid()) {
+                const QString path = td.filePath(QStringLiteral("cp.txt"));
+                FILE *fp = nullptr;
+                // 用 fopen 拿到 FILE*，走的是 writeConsoleText 的"非控制台"分支
+                // （文件不是控制台 ⇒ 原样写 UTF-8）。
+                if (fopen_s(&fp, path.toLocal8Bit().constData(), "wb") == 0 && fp) {
+                    writeConsoleText(fp, utf8);
+                    fclose(fp);
+                    QFile f(path);
+                    if (f.open(QIODevice::ReadOnly)) {
+                        const QByteArray back = f.readAll();
+                        redirectBytes = back.size();
+                        redirectOk = (back == utf8);
+                        f.close();
+                    }
+                }
+            }
+        }
+        if (!redirectOk)
+            ++bad;
+        out << (redirectOk ? "PASS\t" : "FAIL\t") << "console-redirect-keeps-utf8"
+            << "\twrote=" << utf8.size() << "\tread=" << redirectBytes << "\n";
+        out.flush();
+    }
+
     out << (bad == 0 ? "SELFCHECK_ALL_PASS" : "SELFCHECK_FAILED") << "\n";
     return bad == 0 ? 0 : 1;
 }
@@ -3369,7 +3452,14 @@ int runSelfCheck()
 //   ③ 落盘往返必须回到 ini 再读回来（"内存里对、磁盘上错"是最常见的漏法）。
 int runGuiSelfCheck()
 {
-    QTextStream out(stdout);
+    // 与 runSelfCheck 同一套口径：控制台按当前代码页转码，重定向时保持 UTF-8。
+    //
+    // 注意这里原来**漏了** setCodec("UTF-8")：QTextStream 的默认编码跟着
+    // 当前 locale 走，在 C locale 下（SSH / cron / 容器）所有中文判据标签
+    // 都会变成 "?"，排障的人看到的是一堆问号。
+    ConsoleDevice console(stdout);
+    QTextStream out(&console);
+    out.setCodec("UTF-8");
     int pass = 0;
     int bad = 0;
     auto check = [&out, &pass, &bad](const char *name, bool ok, const QString &detail) {
@@ -3977,8 +4067,11 @@ struct SecretCheck
     // 放构造函数里初始化，不用 QTextStream out(stdout)：
     //   1) 那写法会被解析成函数声明（最令人 vexing 的那种），报出来是莫名语法错；
     //   2) QTextStream 的拷贝构造在 Qt 5.9 是私有的，= 初始化也不行。
-    // 输出编码同样钉死 UTF-8，理由见 runSelfCheck() 里那段注释。
-    SecretCheck() : out(stdout) { out.setCodec("UTF-8"); }
+    // 输出编码同样钉死 UTF-8，理由见 runSelfCheck() 里那段注释；
+    // 控制台转码由 ConsoleDevice 负责（m_console 必须声明在 out 之前，
+    // 否则成员初始化顺序会让 out 拿到还没建好的设备）。
+    SecretCheck() : out(&m_console) { out.setCodec("UTF-8"); }
+    ConsoleDevice m_console{stdout};
     QTextStream   out;
     int           roundsLeft = 0;
     int           doneBefore = 0;
@@ -4561,7 +4654,11 @@ int main(int argc, char *argv[])
             const QString msg = QString::fromUtf8(u8"程序已在运行。\n\n"
                                                  u8"请先关闭已经打开的窗口再试。");
             // stderr 永远打一份：脚本和日志里能看见，不依赖界面。
-            QTextStream err(stderr);
+            // 同样走 ConsoleDevice：控制台上按当前代码页转码，重定向时保持 UTF-8。
+            // （原来这里既没钉编码也没转码，中文 Windows 的 cmd 里会是乱码。）
+            ConsoleDevice errConsole(stderr);
+            QTextStream err(&errConsole);
+            err.setCodec("UTF-8");
             err << msg << "\n";
             err.flush();
             // 界面提示只在**能显示窗口**时弹（offscreen/minimal 平台不弹）。

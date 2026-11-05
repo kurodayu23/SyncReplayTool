@@ -1305,23 +1305,16 @@ QStringList RsyncRunner::askpassDirCandidates()
         }
         if (out.isEmpty())
             out << QDir::tempPath();     // 全都不合格时只能退回原行为
-
-        // 稳定排序：**无空格的目录排前面**。
+        // 注意：**不要**在这里对「路径有没有空格」排序。
         //
-        // 为什么不是过滤而是排序：过滤（删掉带空格的）会把"中文+空格用户名"
-        // 和"装在 Program Files"这两类场景整片否掉 —— 那正是上一版改成
-        // "不筛空格 + 8.3 短路径"要救的场景，不能倒退。
-        //
-        // 但也不能完全不管：无空格路径**不依赖 8.3 短路径**（客户系统上
-        // `fsutil 8dot3name` 可能被关掉，那时 GetShortPathNameW 原样返回带空格的
-        // 长路径 ⇒ SSH_ASKPASS 被 CreateProcess 拆成两段 ⇒ 口令认证直接不可用）。
-        // 所以：能选无空格的先选无空格的，实在没有才靠短路径兜底。
-        std::stable_sort(out.begin(), out.end(),
-                         [](const QString &a, const QString &b) {
-                             const bool sa = a.contains(QLatin1Char(' '));
-                             const bool sb = b.contains(QLatin1Char(' '));
-                             return int(sa) < int(sb);
-                         });
+        // 2026-11-05 试过一版"无空格优先"，被审查用反例推翻：用户名带空格
+        // （John Smith / 张三 测试）时 LOCALAPPDATA/TEMP/home 全带空格，
+        // 只有程序目录无空格 ⇒ 排序把程序目录顶成第一候选，明文口令写进
+        // D:\Tools\... 这类**本机所有登录用户可读可写**的目录
+        // （实测 icacls：D:\ 是 Authenticated Users:(M)）。
+        // 顺序本身就是安全设计的一部分：先用户私有，再 TEMP，最后才程序目录/home。
+        // 空格问题交给 askpassPathForSsh() 用 8.3 短路径解决，解决不了要在那里报错，
+        // 不能靠"换一个目录"来回避。
         return out;
     }();
     return dirs;
@@ -1350,6 +1343,18 @@ QString RsyncRunner::askpassPathForSsh(const QString &askpassPath)
             return shortPath;
     }
 #endif
+    // 走到这里意味着：路径含空格，且拿不到 8.3 短名（该卷的 8dot3name 被关了，
+    // 企业镜像上常见）。此时 SSH_ASKPASS 是带空格的长路径，Windows OpenSSH 用
+    // CreateProcess 跑它会按空格拆成两段 ⇒ 拿不到口令 ⇒ ssh 报 Permission denied
+    // ⇒ 产品归因成「身份认证问题 / 请核对账号密码」，用户改一百次密码也改不好，
+    // 日志里一个字都不提路径。2026-11-05 审查（F3/P1）就是卡在这里：**静默**比失败更贵。
+    // 行为照旧（返回长路径）—— 8.3 关掉时没有更好替代；但至少留一行可查的日志，
+    // 让现场能一眼看出根因是"装在带空格的目录 + 系统关了短文件名"。
+    if (askpassPath.contains(QLatin1Char(' ')))
+        qWarning("askpass path contains space and no 8.3 short name available "
+                 "(8dot3name may be disabled on this volume): %s -- password auth will fail; "
+                 "install the program to a path without spaces",
+                 qPrintable(askpassPath));
     return askpassPath;
 }
 
