@@ -136,6 +136,19 @@ try {
             Write-Host '  构建失败后清掉占用进程，重试一轮…' -ForegroundColor Yellow
             & $Jom -f Makefile.Release
         }
+        if ($LASTEXITCODE -ne 0) {
+            # 第二种 LNK1104：**obj 还没编译完，链接就去打开它**（jom 的并行调度竞态）。
+            #   实测（2026-11-05 14:41）：main.obj 的写入时间比链接失败还晚 30 秒 ——
+            #   也就是 jom 依据**旧的依赖信息**决定"可以直接链接"，
+            #   而 main.cpp 恰好刚被改过、main.obj 正在重编。
+            #   症状是 LNK1104「无法打开文件 release\main.obj」，
+            #   而**不是**「exe 被占用」—— 所以上面那轮"清占用进程"的重试救不了它。
+            #   怎么办：再跑一遍（这一遍依赖信息已经是新的，obj 也齐了）。
+            #   只重试一次：连续两次都失败就是真问题，不该被重试掩盖。
+            Write-Host '  再试一轮（多半是 obj 还没编完就去链接）…' -ForegroundColor Yellow
+            Start-Sleep -Milliseconds 500
+            & $Jom -f Makefile.Release
+        }
         if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
     }
 
