@@ -3667,6 +3667,15 @@ int runSelfCheck()
     // ----------------------------------------------------------------
     {
         SyncPanel panel;
+        // **必须先把规则设成含 spe**，否则这条判据会受**客户自己的配置**影响：
+        // SyncPanel 构造时会读 SRT_CONFIG_DIR 里的 syncRules，而下面注入的两个文件后缀是 spe；
+        // 客户的规则里如果没有 spe（例如只有 iq），onScanFinished 会把这两个文件过滤掉，
+        // 模型变成 0 行、mdl->data() 返回空串，这条判据就报 FAIL。
+        //
+        // 2026-11-07 实测：一份完全正常的客户配置（规则只有 iq）让 --selfcheck 返回 rc=1，
+        // 而 自检.sh 对任何 FAIL 的结论是「环境不满足，软件无法在这台机器上运行」——
+        // 客户会以为装坏了，其实软件完全正常。判据不许依赖客户配置。
+        panel.setRulesForTest(QStringList() << QStringLiteral("spe"));
         FileItem a; a.relativePath = QStringLiteral("a.spe"); a.suffix = QStringLiteral("spe"); a.size = 3;
         FileItem b; b.relativePath = QStringLiteral("b.spe"); b.suffix = QStringLiteral("spe"); b.size = 3;
         panel.injectFiles(QVector<FileItem>() << a << b);
