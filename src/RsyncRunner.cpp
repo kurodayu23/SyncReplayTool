@@ -409,7 +409,14 @@ const char *kBlockedAdvice =
 // （链路断了 rsync 同样一个字都不吐）。这两种在日志上完全一样，
 // 但要分别去查两个方向，所以这条建议把两边都点一遍，而不是二选一乱猜。
 const char *kStallAdvice =
-    u8"\u5B50\u8FDB\u7A0B\u957F\u65F6\u95F4\u6CA1\u6709\u8F93\u51FA\uFF0C\u5DF2\u7EC8\u6B62\u3002";
+    u8"\u5B50\u8FDB\u7A0B\u957F\u65F6\u95F4\u6CA1\u6709\u8F93\u51FA\uFF0C\u5DF2\u7EC8\u6B62\u3002"
+    u8"\u8FD9\u4E0D\u80FD\u5F52\u7ED3\u4E3A\u201C\u672C\u673A\u73AF\u5883\u6709\u95EE\u9898\u201D\uFF1A"
+    u8"\u5361\u4F4F\u65F6 rsync \u4E00\u4E2A\u5B57\u90FD\u4E0D\u5410\uFF0C\u672C\u673A\u5F39\u7A97\u88AB\u62E6\u4E0E"
+    u8"\u94FE\u8DEF\u534A\u65AD\u5F00\u5728\u65E5\u5FD7\u4E0A\u5B8C\u5168\u4E00\u6837\u3002"
+    u8"\u3010\u4E24\u4E2A\u65B9\u5411\u90FD\u67E5\u4E00\u4E0B\u3011"
+    u8"\u2460 \u672C\u673A\uFF1A\u662F\u5426\u6709\u5F39\u7A97\u88AB\u6740\u6BD2\u8F6F\u4EF6\u62E6\u4F4F\uFF08\u672C"
+    u8"\u2461 \u5BF9\u7AEF/\u94FE\u8DEF\uFF1A\u76EE\u6807\u7535\u8111\u662F\u5426\u5361\u4F4F\u3001\u7761\u7720\u3001"
+    u8"\u5728\u76EE\u6807\u7535\u8111\u4E0A\u770B\u4E00\u773C sshd \u662F\u5426\u8FD8\u5728\u3001\u78C1\u76D8\u662F\u5426";
 
 // "核对远端目录卡住"专用的建议（2026-10-24 补）。
 //
@@ -4786,8 +4793,12 @@ void RsyncRunner::onWatchdogTimeout()
         reportAttribution(QString(), LayerReceiver,
                           QString::fromUtf8(kVerifyTimeoutAdvice));
     else
-        reportAttribution(QString(), LayerLocal,
-                          QString::fromUtf8(kStallAdvice));
+        // 传输阶段卡住**不能**断言"本机环境有问题"：2026-11-07 实测（传输中途 docker pause
+        // 对端 30 秒），客户看到「本机环境有问题」+「报错原文命中本机层匹配」，会去查本机
+        // 杀毒软件、权限、磁盘 —— 而真因是对端停止响应。
+        // 卡住时 rsync 一个字都不吐，本机弹窗被拦与链路半断开在日志上完全一样，
+        // 区分不了就不能断言，用"原因未识别"+ 两个方向都点到的建议（见 kStallAdvice）。
+        reportAttribution(QString(), LayerUnknown, QString::fromUtf8(kStallAdvice));
     // 只等 1 秒：kill 之后进程会立刻结束，而 waitForFinished 不跑事件循环，
     // finished 信号稍后由事件循环发出，真正的收尾在 onFinished 槽里做。
     m_proc->kill();
