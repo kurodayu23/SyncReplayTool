@@ -359,6 +359,12 @@ public:
     // 空串 = 该用本层的通用建议。同样暴露出来，是为了让自检判据能验到
     // "换了建议"这件事本身，而不只是验到"换了个层名"。
     static QString specialAdviceFor(const QString &raw);
+    // 判据用：把分类结果与短结论也接出来，避免判据只差一层拿不到。
+    static int     classifyLayerForTest(const QString &raw);
+    // 判据用：返回**客户实际会看到的那段建议**（含 reportAttribution 里的覆写）。
+    // 不能用 specialAdviceFor 代替：那个只对接收端层调用，本机层的专项处置不在里面。
+    static QString adviceForTest(const QString &raw);
+    static QString shortConclusionForTest(const QString &raw);
 
     // 收尾清理的**唯一次序来源**，按执行先后返回步骤名：
     //   "remote-markers"（删接收端 .srt-verify-*，要 ssh 凭据）

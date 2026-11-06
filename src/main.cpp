@@ -3790,6 +3790,41 @@ int runSelfCheck()
       }
 
       // ----------------------------------------------------------------
+      // 判据：私钥带口令时必须说「带口令」，不能只说「本机环境有问题」
+      //
+      // 2026-11-07 实测：客户用 ssh-keygen -N "口令" 生成的私钥（很多单位强制要求）
+      // 会让同步失败，而产品原来只说：
+      //   本机环境有问题
+      //   请检查本机：rsync 和 ssh 客户端是否齐全、私钥文件是否存在且可读、本机磁盘是否有空间。
+      // 四条里没有一条是真的：私钥存在且可读、rsync/ssh 都装了、磁盘有空。
+      // 真因是这把钥匙带口令，产品没有任何地方能输入它。
+      //
+      // 根因：classifyLayer 里 kHardLocal（含 "Load key"）排在 kFailRules（含 "passphrase"）
+      // 之前，而 ssh-keygen 的口令错误原文正好长成 `Load key "...": incorrect passphrase ...`。
+      {
+          const QString passErr = QStringLiteral(               "Load key \"C:/keys/id_ed25519\": incorrect passphrase supplied to decrypt private key\n"               "srtpw@10.0.0.5: Permission denied (publickey,password).");
+          const int layer = RsyncRunner::classifyLayerForTest(passErr);
+          const QString advice = RsyncRunner::adviceForTest(passErr);
+          // 短结论必须点到"口令"，不能是泛泛的"本机环境有问题"
+          const QString shortText = RsyncRunner::shortConclusionForTest(passErr);
+          const bool saysPassphrase = shortText.contains(QString::fromUtf8(u8"\u53E3\u4EE4"));
+          const bool noVagueLocal = !shortText.contains(QString::fromUtf8(u8"\u672C\u673A\u73AF\u5883"));
+          // 专项建议必须给出"去掉口令"的可行做法
+          const bool advHasFix = advice.contains(QStringLiteral("ssh-keygen -p -N"))
+                                 || advice.contains(QStringLiteral("ssh-keygen -p -N"));
+          const bool advSaysNotNetwork = advice.contains(QString::fromUtf8(u8"\u4E0D\u662F\u7F51\u7EDC"));
+          const bool ok = saysPassphrase && noVagueLocal && advHasFix && advSaysNotNetwork;
+          if (!ok)
+              ++bad;
+          out << (ok ? "PASS\t" : "FAIL\t") << "passphrase-key-message"
+              << "\tlayer=" << layer
+              << "\tsaysPassphrase=" << (saysPassphrase ? 1 : 0)
+              << "\tnoVagueLocal=" << (noVagueLocal ? 1 : 0)
+              << "\tadvHasFix=" << (advHasFix ? 1 : 0)
+              << "\tadvSaysNotNetwork=" << (advSaysNotNetwork ? 1 : 0) << "\n";
+      }
+
+      // ----------------------------------------------------------------
       // 判据：自动同步必须**每轮重扫**，能捡到新出现的文件
       //
       // 2026-11-07 实测背景：手动点「开始同步」原来不重扫（缺陷 D6，已修），

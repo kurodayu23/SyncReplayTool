@@ -544,6 +544,9 @@ private:
     QThread          *m_scanThread = nullptr;
     QString           m_scanKey;
     bool              m_syncRequested = false;
+    // 重扫前记下「用户取消勾选」的文件（相对路径），扫完在 onScanFinished 里恢复。
+    // 不记这一步，重扫的 setFiles() 会把它们重新勾上 --> 越权传走（2026-11-07 审查 P1）。
+    QSet<QString>     m_pendingUnchecked;
     // 扫描是否在飞。用来挡住**并发扫描**。
     //
     // 原来 startScanAsync() 没有任何重入保护，而「开始同步」这条路径

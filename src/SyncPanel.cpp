@@ -2290,6 +2290,18 @@ void SyncPanel::onScanFinished(const QVector<FileItem> &files)
 
     // 扫描是「开始同步」的前置步骤时，扫完要自动接着同步，
     // 不该让用户为了传个文件先点一次刷新再点一次开始。
+    // 重扫前记下的「用户取消勾选」在这里恢复。
+    //
+    // 必须放在 m_syncRequested 消费之前：恢复完再开始同步，本轮待传集合才是用户真正勾的那些。
+    // 放在之后等于白做（同步已经按"全勾"开跑了）。
+    if (!m_pendingUnchecked.isEmpty()) {
+        m_model->setUncheckedPaths(m_pendingUnchecked);
+        appendLogLine(QStringLiteral("INFO"),
+                      QString::fromUtf8(u8"已保留你上次取消勾选的 %1 个文件（本轮不会传它们）。")
+                          .arg(m_pendingUnchecked.size()), 0);
+        m_pendingUnchecked.clear();
+    }
+
     if (m_syncRequested) {
         m_syncRequested = false;
         if (noFiles) {
@@ -2359,15 +2371,29 @@ void SyncPanel::startSyncInternal(bool fromFreshScan)
     // fromFreshScan=true 只由 onScanFinished 传（刚扫完、清单是新的），
     // 那里不能再重扫，否则「扫描 → 同步 → 再扫描」会打死循环。
     if (!fromFreshScan || m_scanKey != currentScanKey()) {
+        // **重扫会重置勾选**：setFiles() 的下标默认全勾（FileTableModel.cpp 里 m_checked[i]=true）。
+        // 客户取消勾选 A 之后点同步，重扫把 A 勾回来，A 就被传走了 ——
+        // 而本文件另一处注释明说「手动点开始同步必须沿用用户的勾选…那是越权」。
+        // 所以重扫前先记下没勾的文件，扫完 onScanFinished 里恢复（2026-11-07 审查 P1）。
+        m_pendingUnchecked.clear();
+        if (!m_model->files().isEmpty()) {
+            const QVector<int> keepRows = m_model->checkedRows();
+            QSet<int> keepSet;
+            for (int r : keepRows) keepSet.insert(r);
+            const QVector<FileItem> &cur = m_model->files();
+            for (int r = 0; r < cur.size(); ++r)
+                if (!keepSet.contains(r))
+                    m_pendingUnchecked.insert(cur.at(r).relativePath);
+        }
         m_syncRequested = true;
         scanFiles();
         return;
     }
-
     QVector<int> rows = m_model->checkedRows();
     if (rows.isEmpty()) {
         appendLogLine(QStringLiteral("WARN"),
-                      QObject::tr("\xE5\xB7\xB2\xE9\x80\x89\xE6\x96\x87\xE4\xBB\xB6\xE6\x95\xB0\xE4\xB8\xBA 0\xE3\x80\x82"), 3);
+                      QObject::tr("\xE5\xB7\xB2\xE9\x80\x89\xE6\x96\x87\xE4\xBB\xB6\xE6\x95\xB0\xE4\xB8\xBA 0\xEF\xBC\x8C\xE8\xAF\xB7\xE5\x85\x88\xE5\x8B\xBE\xE9\x80\x89\xE8\xA6\x81\xE5\x90\x8C\xE6\xAD\xA5\xE7\x9A\x84\xE6\x96\x87\xE4\xBB\xB6\xE3\x80\x82"),
+                      3);
         return;
     }
 

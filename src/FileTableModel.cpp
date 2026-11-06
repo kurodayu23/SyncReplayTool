@@ -5,6 +5,7 @@
 #include <QBrush>
 #include <QColor>
 #include <QFont>
+#include <QSet>
 #include <QFontMetrics>
 #include "Theme.h"
 
@@ -410,6 +411,22 @@ QVector<int> FileTableModel::checkedRows() const
         if (m_checked.at(i))
             rows.append(i);
     return rows;
+}
+
+void FileTableModel::setUncheckedPaths(const QSet<QString> &relativePaths)
+{
+    if (relativePaths.isEmpty() || m_checked.isEmpty())
+        return;
+    bool changed = false;
+    for (int i = 0; i < m_files.size() && i < m_checked.size(); ++i) {
+        if (relativePaths.contains(m_files.at(i).relativePath) && m_checked.at(i)) {
+            m_checked[i] = false;
+            changed = true;
+        }
+    }
+    if (changed)
+        emit dataChanged(index(0, ColCheck), index(m_checked.size() - 1, ColCheck),
+                         QVector<int>() << Qt::CheckStateRole);
 }
 
 QStringList FileTableModel::suffixGroups() const

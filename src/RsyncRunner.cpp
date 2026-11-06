@@ -414,9 +414,12 @@ const char *kStallAdvice =
     u8"\u5361\u4F4F\u65F6 rsync \u4E00\u4E2A\u5B57\u90FD\u4E0D\u5410\uFF0C\u672C\u673A\u5F39\u7A97\u88AB\u62E6\u4E0E"
     u8"\u94FE\u8DEF\u534A\u65AD\u5F00\u5728\u65E5\u5FD7\u4E0A\u5B8C\u5168\u4E00\u6837\u3002"
     u8"\u3010\u4E24\u4E2A\u65B9\u5411\u90FD\u67E5\u4E00\u4E0B\u3011"
-    u8"\u2460 \u672C\u673A\uFF1A\u662F\u5426\u6709\u5F39\u7A97\u88AB\u6740\u6BD2\u8F6F\u4EF6\u62E6\u4F4F\uFF08\u672C"
-    u8"\u2461 \u5BF9\u7AEF/\u94FE\u8DEF\uFF1A\u76EE\u6807\u7535\u8111\u662F\u5426\u5361\u4F4F\u3001\u7761\u7720\u3001"
-    u8"\u5728\u76EE\u6807\u7535\u8111\u4E0A\u770B\u4E00\u773C sshd \u662F\u5426\u8FD8\u5728\u3001\u78C1\u76D8\u662F\u5426";
+    u8"\u2460 \u672C\u673A\uFF1A\u770B\u4E00\u773C\u662F\u4E0D\u662F\u6709\u5F39\u7A97\u88AB\u6740\u6BD2\u8F6F\u4EF6"
+    u8"\u62E6\u4F4F\u4E86\uFF08\u6BD4\u5982\u9632\u706B\u5899\u5F39\u51FA\u201C\u662F\u5426\u5141\u8BB8\u201D\uFF09"
+    u8"\uFF1B\u2461 \u5BFE\u7AEF/\u94FE\u8DEF\uFF1A\u76EE\u6807\u7535\u8111\u662F\u5426\u5361\u4F4F\u3001\u7761\u7720\u6216"
+    u8"\u6B63\u5728\u91CD\u542F\uFF0C\u5728\u76EE\u6807\u7535\u8111\u4E0A\u770B\u4E00\u773C sshd \u662F\u5426\u8FD8\u5728"
+    u8"\u3001\u78C1\u76D8\u662F\u5426\u5DF2\u6EE1\u3002\u4E24\u8FB9\u90FD\u6B63\u5E38\u5C31\u91CD\u8BD5\u4E00\u6B21"
+    u8"\uFF0C\u8FD8\u5361\u5C31\u628A\u4E0A\u9762\u7684\u539F\u59CB\u62A5\u9519\u53D1\u7ED9\u6280\u672F\u652F\u6301\u3002";
 
 // "核对远端目录卡住"专用的建议（2026-10-24 补）。
 //
@@ -753,6 +756,39 @@ bool isReceiverDiskFull(const QString &raw)
         || raw.contains(QString::fromUtf8(u8"\u8BBE\u5907\u4E0A\u6CA1\u6709\u7A7A\u95F4"))
         || raw.contains(QString::fromUtf8(u8"\u78C1\u76D8\u7A7A\u95F4\u4E0D\u8DB3"));
 }
+
+// 私钥文件**带口令**（passphrase），而本程序没有任何地方能输入这个口令。
+//
+// 2026-11-07 实测（麒麟接收端 + Windows 发送端，ssh-keygen -N "SrtKey2026"）：
+//   INFO  私钥无法免密解析：...\enc_key
+//   INFO  ssh-keygen 原始输出：Load key "...": incorrect passphrase supplied to decrypt private key
+//   INFO  本机环境有问题
+//   INFO  请检查本机：rsync 和 ssh 客户端是否齐全、私钥文件是否存在且可读、本机磁盘是否有空间。
+//
+// 四条建议里没有一条是真的：私钥**存在且可读**、rsync/ssh 都装了、磁盘也有空。
+// 真因是这把钥匙带口令，程序输不进去。客户照着查一圈什么也查不到。
+//
+// 为什么不能靠 kFailRules 里那条 { LayerAuth, "passphrase" }：
+// classifyLayer 里 kHardLocal 排在 kFailRules **之前**，而 kHardLocal 里有 "Load key"，
+// ssh-keygen 打的口令错误正好长成 `Load key "...": incorrect passphrase ...` ——
+// 先命中的赢，于是永远落到本机层。
+//
+// 单独判一层（不走 kHardLocal / kFailRules 的顺序）才能真正抓住它。
+static bool isPassphraseProtectedKey(const QString &text)
+{
+    if (text.isEmpty())
+        return false;
+    // 这三个是 ssh / ssh-keygen 在"私钥带口令且给不出口令"时打的原话。
+    // "incorrect passphrase supplied" 只可能来自口令错误，没有别的含义。
+    if (text.contains(QLatin1String("incorrect passphrase"), Qt::CaseInsensitive))
+        return true;
+    if (text.contains(QLatin1String("Enter passphrase for key"), Qt::CaseInsensitive))
+        return true;
+    if (text.contains(QLatin1String("passphrase supplied to decrypt"), Qt::CaseInsensitive))
+        return true;
+    return false;
+}
+
 
 int classifyLayer(const QString &text)
 {
@@ -1524,7 +1560,7 @@ QString specialAdvice(const QString &raw)
                 u8"\u53EF\u4EE5\u5220\u6389\u4FDD\u5B58\u76EE\u5F55\u4E0B\u7684 .srt-partial \u76EE\u5F55\u3002");
         }
 
-        if (isAlgoNegotiationFailure(raw) || isHandshakeRejectedByPeer(raw)) {
+        if (isAlgoNegotiationFailure(raw)) {
             return QString::fromUtf8(
                 u8"\u5DF2\u8FDE\u4E0A\u76EE\u6807\u7535\u8111\uFF0C\u4F46\u53CC\u65B9\u627E\u4E0D\u5230\u5171\u540C"
                 u8"\u652F\u6301\u7684 SSH \u7B97\u6CD5\uFF08\u52A0\u5BC6\u65B9\u5F0F\u3001\u5BC6\u94A5\u4EA4\u6362\u3001"
@@ -1540,6 +1576,24 @@ QString specialAdvice(const QString &raw)
                 u8"\u2461 \u6216\u628A\u76EE\u6807\u7535\u8111\u7684 OpenSSH \u5347\u5230 8.0 \u4EE5\u4E0A\u3002"
                 u8"\u6539\u5B8C\u5728\u672C\u673A\u9A8C\u8BC1\uFF1Assh -p \u7AEF\u53E3 \u8D26\u53F7@IP"
                 u8"\u80FD\u767B\u5F55\u5373\u53EF\u3002");
+        }
+
+        // 只有 "Connection closed by <ip> port <p>"、没有任何算法证据时，
+        // 上面那条算法建议是**错方向**：2026-11-07 实测，把 HTTP 端口当 SSH 端口连，
+        // ssh 也只打这一行。这时说"算法对不上"会让客户去改 sshd_config 的 Ciphers/HostKey，
+        // 而真正要改的只是**端口号填错了**。所以这里给中性、但要动手排查的说法。
+        if (isHandshakeRejectedByPeer(raw)) {
+            return QString::fromUtf8(
+                u8"\u7AEF\u53E3\u80FD\u8FDE\u4E0A\uFF0C\u4F46\u5BF9\u65B9\u5728\u63E1\u624B\u9636\u6BB5\u5C31\u628A"
+                u8"\u8FDE\u63A5\u5173\u4E86\uFF0C\u6CA1\u6709\u8D70\u5230\u9274\u6743\u3002\u5E38\u89C1\u539F\u56E0\u6709\u4E09"
+                u8"\u79CD\uFF0C\u6309\u5148\u540E\u987A\u5E8F\u6392\u67E5\uFF1A\u2460 **\u7AEF\u53E3\u53F7\u586B\u9519\u4E86**"
+                u8"\uFF08\u6700\u5E38\u89C1\uFF09\u2014\u2014\u8FD9\u4E2A\u7AEF\u53E3\u4E0A\u8DD1\u7684\u4E0D\u662F SSH\uFF0C"
+                u8"\u5148\u548C\u7BA1\u7406\u5458\u6838\u5BF9\u76EE\u6807\u7535\u8111 SSH \u7684\u771F\u6B63\u7AEF\u53E3\u53F7"
+                u8"\uFF1B\u2461 \u5BF9\u7AEF sshd \u6B63\u5728\u91CD\u542F\u6216\u8FC7\u8F7D\uFF0C\u7A0D\u7B49\u4E00\u4F1A"
+                u8"\u513F\u518D\u8BD5\uFF1B\u2462 \u4E2D\u95F4\u7684\u5B89\u5168\u8BBE\u5907\u62E6\u622A\u4E86\u8FDE\u63A5"
+                u8"\uFF08\u51FA\u53E3\u4EE3\u7406\u3001\u9632\u706B\u5899\uFF09\u3002\u4E0D\u7528\u53BB\u6539 sshd_config"
+                u8"\u7684\u7B97\u6CD5\u8BBE\u7F6E\u2014\u2014\u90A3\u662F\u53E6\u4E00\u79CD\u60C5\u51B5"
+                u8"\uFF08\u4E24\u8FB9\u7B97\u6CD5\u771F\u7684\u5BF9\u4E0D\u4E0A\uFF09\u3002");
         }
 
         if (isMissingRemoteRsync(raw)) {
@@ -1646,10 +1700,71 @@ QString RsyncRunner::specialAdviceFor(const QString &raw)
     return specialAdvice(raw);
 }
 
+// 私钥带口令的专项建议。抽成函数是因为两处要用：
+// reportAttribution（客户看到的）和 adviceForTest（判据验的）。
+static QString passphraseKeyAdviceText()
+{
+    return QString::fromUtf8(
+        u8"\u8FD9\u628A\u79C1\u94A5\u6587\u4EF6\u5E26\u53E3\u4EE4\uFF08passphrase\uFF09\uFF0C"
+        u8"\u800C\u672C\u7A0B\u5E8F\u6CA1\u6709\u5730\u65B9\u8F93\u5165\u8FD9\u4E2A\u53E3\u4EE4\uFF0C"
+        u8"\u6240\u4EE5\u62FF\u5B83\u5370\u8BC1\u4E0D\u4E86\u3002\u8FD9\u4E0D\u662F\u5BC6\u94A5\u574F\u4E86\uFF0C"
+        u8"\u4E5F\u4E0D\u662F\u8D26\u53F7\u88AB\u5BF9\u65B9\u62D2\u7EDD\uFF0C\u66F4\u4E0D\u662F\u7F51\u7EDC\u95EE\u9898\u3002"
+        u8"\u4E24\u6761\u8DEF\u9009\u4E00\u6761\uFF1A\u2460 \u628A\u53E3\u4EE4\u53BB\u6389\u2014\u2014\u5728\u547D\u4EE4\u884C\u8DD1"
+        u8" ssh-keygen -p -N \"\" -f <\u4F60\u7684\u79C1\u94A5\u8DEF\u5F84> \uFF08\u8DEF\u5F84\u4E0A\u6709\u7A7A\u683C"
+        u8"\u5C31\u7528\u5F15\u53F7\u5305\u8D77\u6765\uFF09\uFF0C\u5B83\u4F1A\u5148\u95EE\u65E7\u53E3\u4EE4\u3001\u518D\u628A\u65B0"
+        u8"\u53E3\u4EE4\u7559\u7A7A\uFF1B\u2461 \u6216\u8005\u5728\u300C\u8BBE\u7F6E\u300D\u91CC\u6539\u7528\u53E3\u4EE4\u767B\u5F55"
+        u8"\uFF08\u628A\u5BC6\u7801\u586B\u4E0A\u3001\u79C1\u94A5\u90A3\u4E00\u680F\u6E05\u7A7A\uFF09\u3002"
+        u8"\u5982\u679C\u4F60\u4E0D\u77E5\u9053\u53E3\u4EE4\u662F\u4EC0\u4E48\uFF0C\u5C31\u522B\u53BB\u731C\uFF0C"
+        u8"\u76F4\u63A5\u7528\u2461\uFF08\u7528\u5BC6\u7801\u767B\u5F55\uFF09\u6700\u7701\u4E8B\u3002");
+
+}
+// 判据用：直接把分类结果接出来。
+int RsyncRunner::classifyLayerForTest(const QString &raw)
+{
+    return classifyLayer(raw);
+}
+
+// 判据用：把"短结论"那段 if/else 链单独跑一遍，返回客户看到的那句话。
+//
+// 为什么不让判据去解析 reportAttribution 的 logText 信号：那是异步信号，
+// 判据里要挂 QSignalSpy 才能收，而且文案与层说明混在一起不好断言。
+QString RsyncRunner::shortConclusionForTest(const QString &raw)
+{
+    if (isPassphraseProtectedKey(raw))
+        return QString::fromUtf8(u8"\u79C1\u94A5\u6587\u4EF6\u5E26\u53E3\u4EE4\uFF0C\u672C\u7A0B\u5E8F\u7528\u4E0D\u4E86");
+    if (isAlgoNegotiationFailure(raw))
+        return QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u7684 SSH \u7B97\u6CD5\u5BF9\u4E0D\u4E0A");
+    if (isHandshakeRejectedByPeer(raw))
+        return QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u4E0A\u8FD9\u4E2A\u7AEF\u53E3\u4E0D\u50CF SSH \u670D\u52A1");
+    if (isReceiverDiskFull(raw))
+        return QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u78C1\u76D8\u6EE1\u4E86");
+    const int layer = classifyLayer(raw);
+    if (layer == LayerReceiver && isMissingRemoteRsync(raw))
+        return QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u6CA1\u88C5 rsync");
+    return QString::fromUtf8(kLayerShort[layer]);
+}
+
+// 判据用：与 reportAttribution 里"选哪段建议"的逻辑保持一致。
+// 必须复刻**覆写优先**的顺序，否则判据验不到"口令私钥给了专项建议"这件事。
+QString RsyncRunner::adviceForTest(const QString &raw)
+{
+    if (isPassphraseProtectedKey(raw))
+        return passphraseKeyAdviceText();
+    const int layer = classifyLayer(raw);
+    if (layer == LayerReceiver || layer == LayerReceiverSsh)
+        return specialAdvice(raw);
+    return QString();
+}
+
 void RsyncRunner::reportAttribution(const QString &raw, int forceLayer, const QString &adviceOverride){
     const int layer = (forceLayer >= 0) ? forceLayer : classifyLayer(raw);
 
     QString advice = adviceOverride;
+      // 私钥带口令的处置**与层无关**：它是本机的钥匙问题，但本机层的通用建议
+      // 只说"私钥是否存在且可读"（这条情况下全都成立），查不出任何东西。
+      // 所以在层建议之前先覆写掉，并说明两条能照做的路。
+      if (advice.isEmpty() && isPassphraseProtectedKey(raw))
+          advice = passphraseKeyAdviceText();
     if (advice.isEmpty())
         // 「接收端没装 rsync」这句专项建议只对接收端层成立。
         //
@@ -1681,7 +1796,12 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer, const QS
     // reportAttribution 有 16 处调用方显式传 forceLayer（多为 LayerLocal）。
     // 若只判文本，一段被强制归到本机层的文本只要恰好含「未找到命令」，
     // 短结论就会说「目标电脑没装 rsync」，与紧跟着的层说明自相矛盾。
-    if (isAlgoNegotiationFailure(raw)) {
+    // 私钥带口令：本程序没有输入口令的地方，必须直说，并给出能照做的两条路。
+    // 排在算法之前判：口令错误的原文里也可能带 Connection closed by 之类的尾巴。
+    if (isPassphraseProtectedKey(raw)) {
+        emit logText(QString::fromUtf8(u8"\u79C1\u94A5\u6587\u4EF6\u5E26\u53E3\u4EE4\uFF0C\u672C\u7A0B\u5E8F\u7528\u4E0D\u4E86"));
+    }
+    else if (isAlgoNegotiationFailure(raw)) {
         emit logText(QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u7684 SSH \u7B97\u6CD5\u5BF9\u4E0D\u4E0A"));
     // 只有 "Connection closed by <ip> port <p>"、没有任何算法证据时，**不能**说是算法问题。
     // 2026-11-07 实测（把 HTTP 端口当 SSH 端口连）：对端不是 SSH 服务时 ssh 也只打这一行。

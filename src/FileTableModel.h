@@ -86,6 +86,14 @@ public:
     int rowForRelativePath(const QString &rel) const;
     int checkedCount() const;
     void setAllChecked(bool on);
+    // 按相对路径把指定文件**取消勾选**（其余保持原样）。
+    // 
+    // 为什么需要它（2026-11-07 审查实测 P1）：手动点「开始同步」现在会先重扫，
+    // 而 setFiles() 的下标默认全勾（见 .cpp 里 m_checked[i] = true）。
+    // 于是客户取消勾选 A 之后点同步，重扫又把 A 勾回来，A 被传走 ——
+    // 本文件另一处注释明说「手动点开始同步必须沿用用户的勾选…那是越权」。
+    // 重扫前把未勾选的路径记下来，扫完用这个方法恢复。
+    void setUncheckedPaths(const QSet<QString> &relativePaths);
     QVector<int> checkedRows() const;
 
     // ---- 后缀分组（Tab 的计数由这里出，不许写死在界面上）----
