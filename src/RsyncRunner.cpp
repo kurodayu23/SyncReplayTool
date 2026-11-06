@@ -1674,8 +1674,15 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer, const QS
     // reportAttribution 有 16 处调用方显式传 forceLayer（多为 LayerLocal）。
     // 若只判文本，一段被强制归到本机层的文本只要恰好含「未找到命令」，
     // 短结论就会说「目标电脑没装 rsync」，与紧跟着的层说明自相矛盾。
-    if (isAlgoNegotiationFailure(raw) || isHandshakeRejectedByPeer(raw))
+    if (isAlgoNegotiationFailure(raw)) {
         emit logText(QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u7684 SSH \u7B97\u6CD5\u5BF9\u4E0D\u4E0A"));
+    // 只有 "Connection closed by <ip> port <p>"、没有任何算法证据时，**不能**说是算法问题。
+    // 2026-11-07 实测（把 HTTP 端口当 SSH 端口连）：对端不是 SSH 服务时 ssh 也只打这一行。
+    // 这时说"算法对不上"会把人引去改 sshd_config，而真正要改的是端口号。
+    }
+    else if (isHandshakeRejectedByPeer(raw)) {
+        emit logText(QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u4E0A\u8FD9\u4E2A\u7AEF\u53E3\u4E0D\u50CF SSH \u670D\u52A1"));
+    }
     else if (isReceiverDiskFull(raw))
         emit logText(QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u78C1\u76D8\u6EE1\u4E86"));
     else if (layer == LayerReceiver && isMissingRemoteRsync(raw))
