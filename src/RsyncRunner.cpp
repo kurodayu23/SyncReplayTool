@@ -449,6 +449,21 @@ const char *kVerifyTimeoutAdvice =
 const char *kHardReceiver[] = {
     "[receiver]",
     "rsync: command not found",
+    // ★ 接收端没装 rsync 时，**中文 locale 的 bash 打的是中文**。
+    //
+    // 2026-11-06 实测（麒麟 V10，Windows 发送端 → 麒麟接收端，接收端 rsync 被卸掉）：
+    //     bash: rsync: 未找到命令
+    //     rsync: connection unexpectedly closed (0 bytes received so far) [sender]
+    //     rsync error: error in rsync protocol data stream (code 12) at io.c(303)
+    // 只认英文 "rsync: command not found" 时**一条都不命中**，于是落到网络层，
+    // 客户看到「网络不通」+「去查 ping / 端口 / 防火墙」—— 而真正要做的是
+    // "让对方装 rsync"。方向完全带错，客户无论如何查不出来。
+    //
+    // 中文发行版（麒麟/统信）的 bash 会把内建消息本地化：
+    //   bash: xxx: command not found  ->  bash: xxx: 未找到命令
+    // 所以中英都收。
+    // rsync 自己那条（发送端英文，不受 locale 影响）—— rc=127 的权威行，兜底
+    "remote command not found",
     "No space left on device",
     "write failed on",
     "mkdir failed",
@@ -463,6 +478,23 @@ const char *kHardReceiver[] = {
     // 四条里没有一条是真的 —— 问题就在这台电脑上那一栏，填错了。
     // 留在接收端层是对的（错在远端），但**建议**必须换，见 specialAdvice。
     "Not a directory"
+};
+
+// 接收端强证据的**多字节（中文）**部分，单独一张表、单独比较。
+//
+// 为什么不能塞进上面那张表：上面是 `const char*` + QLatin1String 比较，
+// 而 QLatin1String 把 UTF-8 字节**按 Latin-1 逐字节**解释 —— 中文会变成一串
+// mojibake，永远匹配不上真实的 QString 文本。
+// 2026-11-06 实测：先按老写法把「未找到命令」加进 kHardReceiver，
+// 判据 receiver-no-rsync-zh 立刻报 expect=3 got=1（仍判成网络层），就是这个原因。
+// 这张表用 QString::fromUtf8 解码后再比，中文字面量用 u8 前缀保证是 UTF-8 字节。
+const char *const kHardReceiverUtf8[] = {
+    // 中文 locale 的 bash：bash: rsync: 未找到命令
+    u8"\u672A\u627E\u5230\u547D\u4EE4",
+    // 部分发行版用「找不到命令」
+    u8"\u627E\u4E0D\u5230\u547D\u4EE4",
+    // bash: rsync: 没有那个文件或目录（命令路径不存在时的中文说法）
+    u8"\u6CA1\u6709\u90A3\u4E2A\u6587\u4EF6\u6216\u76EE\u5F55"
 };
 
 // 本机层的强证据。和 kHardReceiver 同一个道理：这些字样只可能由**这台
@@ -631,6 +663,12 @@ int classifyLayer(const QString &text)
         return LayerReceiverNameConflict;
     for (const char *needle : kHardReceiver) {
         if (text.contains(QLatin1String(needle), Qt::CaseInsensitive))
+            return LayerReceiver;
+    }
+    // 多字节（中文）强证据：必须 fromUtf8 解码后比，不能走 QLatin1String ——
+    // QLatin1String 会把 UTF-8 字节按 Latin-1 逐字节解释，中文永远匹配不上。
+    for (const char *needle : kHardReceiverUtf8) {
+        if (text.contains(QString::fromUtf8(needle), Qt::CaseInsensitive))
             return LayerReceiver;
     }
     for (const char *needle : kHardLocal) {
@@ -1327,10 +1365,47 @@ int RsyncRunner::watchdogMs(int fileCount, qint64 totalBytes)
 // 同一个组件还会拦二进制执行，报的是
 //   exec: /.../libexec/ssh: Operation not permitted
 // 现象是"刚解压出来能跑，几分钟后突然不能用了"，因为扫描器是异步标记的。
+// 接收端是否**没装 rsync**（中英两种 locale 都认）。
+//
+// 提取成独立函数的原因：短结论（kLayerShort）和专项建议（specialAdvice）都要用它。
+// 如果只在 specialAdvice 里判，客户第一眼看到的仍是 kLayerShort[LayerReceiver]
+// =「目标电脑目录或权限有问题」—— 方向带错，他会去查目录权限而不是让对端装 rsync。
+bool isMissingRemoteRsync(const QString &raw)
+{
+    return raw.contains(QString::fromUtf8(u8"\u672A\u627E\u5230\u547D\u4EE4"))
+        || raw.contains(QString::fromUtf8(u8"\u627E\u4E0D\u5230\u547D\u4EE4"))
+        || raw.contains(QLatin1String("rsync: command not found"), Qt::CaseInsensitive)
+        || raw.contains(QLatin1String("remote command not found"), Qt::CaseInsensitive);
+}
+
 QString specialAdvice(const QString &raw)
 {
     // 端口栏填的不是数字/含全角字符。ssh 连尝试都没做就退出了，
     // 通用建议（ping 目标 IP、查防火墙、让对方放行端口）没有一条沾边。
+    // ★ 接收端**没装 rsync**：这是离线客户最容易撞的一条，而且通用建议带不出来。
+    //
+    // 实测原文（2026-11-06，Windows 发送端 → 麒麟接收端，接收端 rsync 被卸掉）：
+    //     bash: rsync: 未找到命令
+    //     rsync: connection unexpectedly closed (0 bytes received so far) [sender]
+    //     rsync error: error in rsync protocol data stream (code 12) at io.c(303)
+    // 归因已经能落到接收端层（kHardReceiverUtf8），但接收端的通用建议列了四条
+    // （目录存在、写权限、磁盘空间、已装 rsync）—— 客户得逐条试，而其中三条
+    // 都不是原因。这里直接点破，并给出两边都能照做的命令。
+    {
+        if (isMissingRemoteRsync(raw)) {
+            return QString::fromUtf8(
+                u8"\u76EE\u6807\u7535\u8111\u4E0A\u6CA1\u6709 rsync\uFF0C\u6240\u4EE5\u4F20\u4E0D\u8FC7\u53BB"
+                u8"\uFF08\u8FD9\u4E0D\u662F\u7F51\u7EDC\u95EE\u9898\uFF0C\u4E5F\u4E0D\u662F\u76EE\u5F55\u6743\u9650\u95EE\u9898\uFF09\u3002"
+                u8"\u4E24\u53F0\u673A\u5668\u90FD\u8981\u6709 rsync\uFF1A\u53D1\u9001\u7AEF\u5305\u91CC\u5DF2\u7ECF\u5E26\u4E86\uFF0C"
+                u8"\u63A5\u6536\u7AEF\u9700\u8981\u5B89\u88C5\u3002"
+                u8"\u3010\u79BB\u7EBF\u673A\u5668\u3011\u628A\u6570\u636E\u540C\u6B65\u5DE5\u5177\u7684\u6574\u4E2A\u5305\u76EE\u5F55\u62F7\u5230\u76EE\u6807\u7535\u8111\uFF0C"
+                u8"\u5728\u91CC\u9762\u6267\u884C\uFF1Asudo sh \u5B89\u88C5\u002Esh --with-rsync"
+                u8"\uFF08\u5305\u91CC\u81EA\u5E26\u4E00\u4EFD\u9759\u6001 rsync\uFF0C\u4E0D\u9700\u8981\u4E0A\u7F51\uFF09"
+                u8"\u3010\u80FD\u4E0A\u7F51\u3011sudo apt install rsync\u3002"
+                u8"\u88C5\u5B8C\u5728\u76EE\u6807\u7535\u8111\u4E0A\u9A8C\u8BC1\uFF1Arsync --version \u80FD\u8F93\u51FA\u7248\u672C\u5373\u53EF\u3002");
+        }
+    }
+
     if (raw.contains(QLatin1String("Bad port"), Qt::CaseInsensitive))
         return QString::fromUtf8(
             u8"ssh \u8FD4\u56DE Bad port\uFF1A\u6536\u5230\u7684\u7AEF\u53E3\u503C\u4E0D\u53EF\u7528\u3002"
@@ -1441,7 +1516,13 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer, const QS
     if (!keys.isEmpty())
         emit logText(keys);
 
-    emit logText(QString::fromUtf8(kLayerShort[layer]));
+    // 短结论也要精准：接收端缺 rsync 时，kLayerShort[LayerReceiver] 给的是
+    // 「目标电脑目录或权限有问题」—— 客户会去查目录权限，而真正要做的是让对端装 rsync。
+    // 这一行是他第一眼看到的，方向必须对。
+    if (isMissingRemoteRsync(raw))
+        emit logText(QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u6CA1\u88C5 rsync"));
+    else
+        emit logText(QString::fromUtf8(kLayerShort[layer]));
 
     // kLayerMeaning 里带着【责任归属：xx】前缀 —— 对客户是噪音（他要的是
     // "哪里出问题"一句话）。运行时剥掉前缀，只留后面那句人话，不用改那 7 条长转义串。

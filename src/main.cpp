@@ -133,6 +133,20 @@ const LayerCase kLayerCases[] = {
       "rsync: connection unexpectedly closed (0 bytes received so far) [sender]\r\n"
       "rsync error: remote command not found (code 127) at io.c(226) [sender=3.1.1]" },
 
+    // ★ 同一个故障的**中文 locale 版本**（2026-11-06 实测漏判）。
+    //
+    // 麒麟/统信是中文 locale，bash 会把内建消息本地化成「未找到命令」。
+    // 上面那条英文用例一直通过，所以这个变体长期没被测到 ——
+    // 真实现场（Windows 发送端 → 麒麟接收端，接收端没装 rsync）报的是这一条：
+    //     bash: rsync: 未找到命令
+    //     rsync: connection unexpectedly closed (0 bytes received so far) [sender]
+    //     rsync error: error in rsync protocol data stream (code 12) at io.c(303)
+    // 当时被判成网络层，客户被引导去查 ping/端口/防火墙，永远查不到真因。
+    { "receiver-no-rsync-zh", 3,
+      "bash: rsync: \xE6\x9C\xAA\xE6\x89\xBE\xE5\x88\xB0\xE5\x91\xBD\xE4\xBB\xA4\r\n"
+      "rsync: connection unexpectedly closed (0 bytes received so far) [sender]\r\n"
+      "rsync error: error in rsync protocol data stream (code 12) at io.c(303) [sender=3.5.1]" },
+
     { "receiver-disk-full", 3,
       "rsync: [receiver] write failed on \"/home/appuser/testfs/big.spe\": "
       "No space left on device (28)\r\n"

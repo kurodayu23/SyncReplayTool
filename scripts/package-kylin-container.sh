@@ -49,6 +49,7 @@ export LC_ALL=C.UTF-8
 BINARY=""
 BASE_TAR=""
 PAYLOAD=""
+STATIC_RSYNC=""
 DOCS=""
 OUT=""
 ROOT_NAME="数据同步工具-麒麟"
@@ -60,6 +61,7 @@ while [ $# -gt 0 ]; do
         --binary)    BINARY=$2;  shift 2 ;;
         --base-tar)  BASE_TAR=$2; shift 2 ;;
         --payload)   PAYLOAD=$2;  shift 2 ;;
+        --static-rsync) STATIC_RSYNC=$2; shift 2 ;;
         --docs)      DOCS="$2"; shift 2 ;;  # 已废弃：交付包不再带文档（2026-10-25）
         --out)       OUT=$2;      shift 2 ;;
         --root-name) ROOT_NAME=$2; shift 2 ;;
@@ -118,8 +120,13 @@ echo "  解出条目：$(find "$PKG" | wc -l)"
 
 # ---------------------------------------------------------------- 2. 裁剪
 echo "##### 2. 裁掉死重"
-# 这批需要 GLIBC_2.38，麒麟 V10（glibc 2.23）永不可用。
-rm -rf "$PKG/libexec" "$PKG/lib/sshv2"
+  # lib/sshv2 需要 GLIBC_2.38，麒麟 V10（glibc 2.23）永不可用 —— 删。
+  #
+  # libexec/ 不再整个删：基础包里那份 rsync 确实是 GLIBC_2.38 的、用不了，
+  # 但**离线交付要求包里自带一份能跑的 rsync**（第 3 步之后会写入静态版）。
+  # 这里只清掉旧的那份，稍后由 STATIC_RSYNC 覆盖。
+  rm -rf "$PKG/lib/sshv2"
+  rm -f  "$PKG/libexec/rsync"
 # 用不上的插件
 rm -rf "$PKG/plugins/imageformats" "$PKG/plugins/egldeviceintegrations"
 rm -f  "$PKG/plugins/platforms/libqlinuxfb.so" \
@@ -198,7 +205,7 @@ if [ "$_gate_ok" -ne 1 ]; then
     fail "裁剪后插件依赖有无法解析的，交付包会在客户机上起不来界面（日志见上）"
 fi
 echo "  插件依赖闸门   : 通过（全部可解析）"
-echo "  libexec/        : 已删除（GLIBC_2.38，麒麟 V10 不可用）"
+  echo "  libexec/rsync   : 旧的那份已清（GLIBC_2.38 不可用），稍后写入静态版"
 echo "  lib/sshv2/      : 已删除（同上）"
 echo "  imageformats/   : 已删除（只同步 .spe/.iq，用不到）"
 echo "  egldevice + linuxfb/vnc/eglfs + libqgtk3 : 已删除"
@@ -219,6 +226,33 @@ for f in rsync ssh scp ssh-keygen ssh-keyscan; do
     [ -f "$PAYLOAD/bin/$f" ] || fail "payload 里缺 bin/$f"
     cp -p "$PAYLOAD/bin/$f" "$PKG/bin/$f"
 done
+
+# ---- 自带静态 rsync（离线交付的核心）----
+#
+# 为什么必须自带：麒麟 V10 的 glibc 是 2.23，而 Ubuntu 22.04 构建的 rsync
+# 要 GLIBC_2.38 —— 客户机器上如果**没装系统 rsync**（精简安装、离线内网很常见），
+# 整个同步功能就不可用，而客户又没法 apt install（不能上外网）。
+#
+# 这份是在 kylin-v10-real 容器里用 gcc 静态编译的 rsync 3.1.3（LDFLAGS=-static），
+# 静态链接、不依赖目标机任何 .so，麒麟 V10/V11 通用。
+# bin/rsync 启动器本来就有「自带版优先」逻辑（找 $HERE/libexec/rsync），
+# 放对位置即可生效，不需要改脚本。
+if [ -n "$STATIC_RSYNC" ]; then
+    [ -f "$STATIC_RSYNC" ] || fail "指定的静态 rsync 不存在：$STATIC_RSYNC"
+    mkdir -p "$PKG/libexec"
+    cp -p "$STATIC_RSYNC" "$PKG/libexec/rsync"
+    chmod 755 "$PKG/libexec/rsync"
+    # 闸门：必须真的是静态可执行，且能自己报出版本（不依赖目标机任何库）
+    if ! "$PKG/libexec/rsync" --version >/dev/null 2>&1; then
+        fail "自带静态 rsync 在本容器里跑不起来：$PKG/libexec/rsync"
+    fi
+    if ldd "$PKG/libexec/rsync" 2>/dev/null | grep -q "=>"; then
+        fail "自带 rsync 不是静态链接（ldd 显示出动态依赖），换机器可能跑不了"
+    fi
+    echo "  libexec/rsync   : 已写入静态版（$(stat -c%s "$PKG/libexec/rsync") 字节，ldd 无动态依赖）"
+else
+    echo "  libexec/rsync   : 未提供（客户机将依赖系统 rsync）"
+fi
 
 # ---- 闸门 C：包里被文档/脚本引用的文件必须真的在包里 ----
 # 这一条把"上一版漏装 安装自启.sh"这类问题挡在打包阶段，

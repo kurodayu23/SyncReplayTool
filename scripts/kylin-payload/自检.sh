@@ -397,10 +397,19 @@ if [ -n "$RSYNC_PROTO" ]; then
 fi
 
 [ "$ssh_ok" = 1 ] && [ "$rsync_ok" = 1 ] || {
-    echo "    说明：本包**不附带** ssh/rsync 可执行文件（随包那份要求 glibc 2.38，"
-    echo "         麒麟 V10 是 2.23，带上也跑不起来，已经删掉）。"
-    echo "         程序直接用**系统自带**的那一份；两者都不可用时，"
-    echo "         请让系统管理员执行：sudo apt install openssh-client rsync"
+    # 2026-11-06 起本包**附带**了一份静态 rsync（libexec/rsync，在麒麟 V10 里
+    # LDFLAGS=-static 编的，ldd 无动态依赖），所以不能再照旧说"本包不附带"。
+    if [ -x "$HERE/libexec/rsync" ]; then
+        echo "    说明：本包**附带**一份静态 rsync（libexec/rsync），但对端和 sshd 看不到它。"
+        echo "         rsync 走 ssh 时**两端**都要有 rsync：接收端是被 sshd 拉起来的，"
+        echo "         它按 login shell 的 PATH 找，看不到包目录。"
+        echo "         离线机器上执行这一条即可让接收端也能用："
+        echo "             sudo sh \"$HERE/安装.sh\" --with-rsync"
+        echo "         （会把包内静态版装到 /usr/local/bin/rsync；不需要联网）"
+    else
+        echo "    说明：本包未附带 rsync（裁剪过）。镜像里 rsync 用**系统自带**的那一份；"
+        echo "         都不可用时请让系统管理员执行：sudo apt install rsync"
+    fi
 }
 
 # ---- 5. 口令加密后端 ----

@@ -64,6 +64,10 @@ param(
     # 放构建目录，不放会被清空的 ai-workspace；缺失时会自动用本地已有的交付包补。
     [string]$KylinBaseTar = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\kylin-base\base.tar.gz',
     [string]$KylinBinary  = '',
+    # 自带静态 rsync（离线交付核心）：在 kylin-v10-real 里用 gcc -static 编的 rsync 3.1.3。
+    # 有它，客户机器即使没装系统 rsync、又不能上外网，同步照样能用。
+    # 传空字符串则跳过（退回旧行为：依赖客户机系统 rsync）。
+    [string]$StaticRsync    = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\work\rsync-static\rsync-static',
     [string]$WorkRoot     = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\work\pkg-preflight',
     [string]$ContainerImage = 'kylin-v10-real:latest',
     [string]$ContainerName  = 'srt-nightd-pkg',
@@ -628,11 +632,12 @@ if (-not $SkipKylinTar) {
 
     Write-Host "   容器内组装 ...（$ContainerName，端口 $ContainerPort）"
     $pkgCmd = "/pkg.sh --binary /build/SyncReplayTool --base-tar /stage/base.tar.gz " +
-              "--payload /payload --root-name-b64 $rootNameB64 --out /out/kylin.tar.gz"
+              "--payload /payload --static-rsync /srsync/rsync-static --root-name-b64 $rootNameB64 --out /out/kylin.tar.gz"
     docker create --name $ContainerName --entrypoint /bin/bash `
         -p "${ContainerPort}:22" `
         -v "${binStage}:/build:ro" `
         -v "${kStage}:/payload:ro" `
+        -v "$(Split-Path -Parent $StaticRsync):/srsync:ro" `
         -v "${KylinBaseTar}:/stage/base.tar.gz:ro" `
         -v "${ContainerScript}:/pkg.sh:ro" `
         $ContainerImage -c $pkgCmd | Out-Null

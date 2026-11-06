@@ -24,6 +24,21 @@
 #   · Exec 指向 sh "<包目录>/run.sh" —— 裸二进制缺 LD_LIBRARY_PATH /
 #     QT_PLUGIN_PATH，Qt 找不到平台插件会直接 abort(134)。
 # 纯服务器（没有桌面）请改用 包里的 安装自启.sh（写 user 级 systemd unit）。
+#
+# ----------------------------------------------------------------------------
+# 自带 rsync 装到系统里（**离线交付用**）
+#
+#   sudo sh 安装.sh --with-rsync
+#
+# 为什么要这一步：rsync over ssh 要求**两端都有 rsync**。接收端是被 sshd 拉起来的，
+# 它用 login shell 的 PATH（/usr/local/bin:/usr/bin:...）去找 rsync，**看不到包目录**。
+# 客户机器如果没装 rsync、又不能上外网 apt install，光有包内那份是传不了的 ——
+# 实测报错：rsync error: remote command not found (code 127) / bash: rsync: 未找到命令。
+#
+# 本包 libexec/rsync 是在麒麟 V10 里静态编译的（LDFLAGS=-static，ldd 无动态依赖），
+# 装到 /usr/local/bin/rsync 后 sshd 也能找到，接收端就不必预装任何东西。
+# 需要管理员权限；已经装过同一份会跳过。
+# ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -31,10 +46,48 @@ TPL="$HERE/数据同步工具.desktop"
 
 # ---- 参数 ----
 DO_AUTOSTART="ask"      # ask | yes | no
+DO_RSYNC="no"          # no | yes（把 libexec/rsync 装到 /usr/local/bin）
 case "${1:-}" in
     --autostart)    DO_AUTOSTART="yes" ;;
     --no-autostart) DO_AUTOSTART="no" ;;
+    --with-rsync)    DO_RSYNC="yes" ;;
 esac
+
+# ---- 自带 rsync 装到系统（--with-rsync）----
+#
+# 为什么装到 /usr/local/bin 而不是 /usr/bin：
+#   · /usr/local/bin 是给"管理员本地安装的软件"用的，不覆盖发行版的文件；
+#   · 它在 login shell 的默认 PATH 里（实测：/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:...），
+#     所以 sshd 拉起来的 `rsync --server` 能直接找到；
+#   · 系统以后自己升级 rsync 也不会把我们这份覆盖掉，反之亦然。
+if [ "$DO_RSYNC" = "yes" ]; then
+    SRC="$HERE/libexec/rsync"
+    DST="/usr/local/bin/rsync"
+    if [ ! -f "$SRC" ]; then
+        echo "✗ 包里没有 libexec/rsync，无法安装。这个包可能是裁剪过的。" >&2
+        exit 1
+    fi
+    if [ "$(id -u)" != "0" ]; then
+        echo "✗ 需要管理员权限。请改用：sudo sh 安装.sh --with-rsync" >&2
+        exit 1
+    fi
+    # 已经装过同一份就跳过（按大小+首行版本判断，避免重复覆盖）
+    if [ -f "$DST" ] && [ "$(stat -c%s "$DST" 2>/dev/null)" = "$(stat -c%s "$SRC" 2>/dev/null)" ] \
+       && "$DST" --version 2>/dev/null | head -1 | grep -q "3.1.3"; then
+        echo "✓ /usr/local/bin/rsync 已经是包里那一份（3.1.3），跳过"
+    else
+        install -m 755 "$SRC" "$DST" || { echo "✗ 复制失败：$DST" >&2; exit 1; }
+        echo "✓ 已把自带 rsync 装到 $DST"
+    fi
+    # 闸门：装完之后必须能在 login shell 的 PATH 里找到、且能报版本
+    if bash -lc "command -v rsync" >/dev/null 2>&1; then
+        echo "  login shell 能看到：$(bash -lc "command -v rsync") → $(bash -lc "rsync --version" 2>/dev/null | head -1)"
+    else
+        echo "⚠ 装好了但 login shell 的 PATH 里找不到 rsync（PATH=$(bash -lc "echo \$PATH" 2>/dev/null)）" >&2
+        echo "  接收端仍会报 remote command not found。请把 $DST 所在目录加进 PATH。" >&2
+    fi
+    echo "  取消安装：sudo rm -f $DST"
+fi
 
 # ---- 开机自启：取消 ----
 AUTOSTART_DIR="$HOME/.config/autostart"
