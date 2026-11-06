@@ -3696,6 +3696,87 @@ int runSelfCheck()
         }
     }
 
+      // ----------------------------------------------------------------
+      // 判据：手动点「开始同步」必须**先重扫**（2026-11-07 缺陷回归锁）
+      //
+      // 缺陷现场：目录里已有若干文件并同步过，再往目录里拷新文件，点「开始同步」，
+      // 产品沿用上一次的旧清单、界面报「20 / 20 个文件 · 本轮无变更」，
+      // 新增文件一个都没传（实测本地 24 个、接收端 20 个）。
+      //
+      // 根因：startSyncInternal() 原来只在 m_scanKey（本机目录 + 后缀列表）
+      // 变化时重扫，而 scanKey 不含任何文件系统状态。
+      // 同一个文件的注释却写「使用手册 §2.4：点开始同步会自动重新扫描一次」。
+      //
+      // 这个判据直接调生产的 startSyncForTest()（= startOrCancel），
+      // 不碰内部函数 —— "判据测了谓词、洞在接线"这个坑本项目已经踩过。
+      {
+          QTemporaryDir sandbox;
+          const QString root = sandbox.path();
+          { QFile f(root + QStringLiteral("/a.spe")); f.open(QIODevice::WriteOnly); f.write("a"); }
+
+          SyncPanel panel;
+          panel.setLocalRootForTest(root);
+          panel.setRulesForTest(QStringList() << QStringLiteral("spe"));
+          // 目标必须"看起来有效"，否则 startSyncInternal 会在重扫之前就 return
+          // （目标未配的早退分支排在重扫判断前面）。
+          panel.setHostForTest(QStringLiteral("127.0.0.1"));
+          panel.setPortForTest(1);            // 不可达端口，不会真连上
+          panel.setUserForTest(QStringLiteral("srtprobe"));
+
+          panel.scanFilesForTest();
+          {
+              QElapsedTimer t; t.start();
+              while (panel.isScanningForTest() && t.elapsed() < 8000) {
+                  QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                  QThread::msleep(5);
+              }
+          }
+          const int before = panel.fileCountForTest();
+
+          // 新增一个文件（模拟客户把新数据拷进目录）
+          { QFile f(root + QStringLiteral("/b.spe")); f.open(QIODevice::WriteOnly); f.write("b"); }
+
+          // 手动点「开始同步」
+          panel.startSyncForTest();
+
+          // 它必须触发一次重扫，并把新文件扫进来
+          bool pickedUp = false;
+          {
+              QElapsedTimer t; t.start();
+              while (t.elapsed() < 8000) {
+                  QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                  if (!panel.isScanningForTest() && panel.fileCountForTest() > before) {
+                      pickedUp = true;
+                      break;
+                  }
+                  QThread::msleep(5);
+              }
+          }
+          const int after = panel.fileCountForTest();
+
+          // 反向锁：重扫后不该陷入「扫描→同步→再扫描」的死循环。
+          // 打一次事件循环，看扫描计数是否还在继续涨。
+          const quint64 genBefore = FileScanner::scanGeneration();
+          {
+              QElapsedTimer t; t.start();
+              while (t.elapsed() < 600) {
+                  QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                  QThread::msleep(5);
+              }
+          }
+          const quint64 genAfter = FileScanner::scanGeneration();
+          const bool noScanLoop = (genAfter - genBefore) <= 2;   // 允许 1~2 次收尾扫描
+
+          const bool ok = pickedUp && (before == 1) && (after >= 2) && noScanLoop;
+          if (!ok)
+              ++bad;
+          out << (ok ? "PASS\t" : "FAIL\t") << "start-sync-rescans"
+              << "\tbefore=" << before << "\tafter=" << after
+              << "\tpickedUp=" << (pickedUp ? 1 : 0)
+              << "\tnoScanLoop=" << (noScanLoop ? 1 : 0)
+              << "\tgenDelta=" << (genAfter - genBefore) << "\n";
+      }
+
     // ---- 判据：密钥材料必须**按字节原样**认出，不能先 trim 再判长度 ----
     //
     // 密钥文件里躺的是 32 个随机二进制字节。首/尾各有约 2.7% 的概率
