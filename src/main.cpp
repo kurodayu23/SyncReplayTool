@@ -153,6 +153,31 @@ const LayerCase kLayerCases[] = {
       "rsync error: error in file IO (code 11) at receiver.c(381) [receiver=3.2.7]\r\n"
       "rsync: [sender] write error: Broken pipe (32)" },
 
+
+    // 2026-11-07 暴力测试新增：SSH 算法协商失败必须归第 5 类（对端 SSH 不能用），不能落网络层。
+    // 三种真实形态：①客户端发现没交集（Unable to negotiate）；②服务端先发现、直接关连接
+    // （只有 "Connection closed by <ip> port <p>"）；③DSA 主机密钥 / 老 kex / CBC 都走 ①或②。
+    { "ssh-algo-no-cipher", 5,
+      "Unable to negotiate with 127.0.0.1 port 2350: no matching cipher found. Their offer: aes128-cbc\r\n"
+      "rsync: connection unexpectedly closed (0 bytes received so far) [sender]\r\n"
+      "rsync error: error in rsync protocol data stream (code 12) at io.c(303) [sender=3.5.1]" },
+
+    { "ssh-algo-no-kex", 5,
+      "Unable to negotiate with 127.0.0.1 port 2350: no matching key exchange method found. Their offer: diffie-hellman-group1-sha1\r\n"
+      "rsync error: error in rsync protocol data stream (code 12) at io.c(303) [sender=3.5.1]" },
+
+    // 服务端先关连接：客户端只拿到这一行（实测 麒麟 V10 只留 DSA 主机密钥）。
+    // 与"端口不通"必须区分：后者是 "connect to host ... Connection refused"。
+    { "ssh-handshake-rejected", 5,
+      "Connection closed by 127.0.0.1 port 2350\r\n"
+      "rsync: connection unexpectedly closed (0 bytes received so far) [sender]\r\n"
+      "rsync error: error in rsync protocol data stream (code 12) at io.c(303) [sender=3.5.1]" },
+
+    // 反例：真正的端口不通仍必须是网络层（不能被上面的规则误吞）。
+    { "port-refused-not-algo", 1,
+      "ssh: connect to host 192.168.0.1 port 65000: Connection refused\r\n"
+      "rsync: connection unexpectedly closed (0 bytes received so far) [sender]" },
+
     { "receiver-readonly", 3,
       "rsync: [receiver] mkstemp \"/home/appuser/testdir/.#hash#file.spe.bNEPzj\" failed: "
       "Permission denied (13)" },
@@ -2431,8 +2456,12 @@ int runSelfCheck()
         const bool okAdvPort = !advPort.isEmpty() && advPort.contains(QStringLiteral("Bad port"));
         const bool okAdvDir  = !advDir.isEmpty() && advDir.contains(QStringLiteral("Not a directory"));
         // 反向锁：这两类**不能**被新分支误伤，必须仍然走通用建议（返回空串）
-        const bool okGeneric = RsyncRunner::specialAdviceFor(refused).isEmpty()
-                               && RsyncRunner::specialAdviceFor(noSpace).isEmpty();
+        const bool okGeneric = RsyncRunner::specialAdviceFor(refused).isEmpty();
+          // 磁盘满：必须具备专项建议且点到磁盘/空间（2026-11-07 新增，取代原来的"必须走通用"）。
+          const QString advNoSpace = RsyncRunner::specialAdviceFor(noSpace);
+          const bool okAdvNoSpace = !advNoSpace.isEmpty()
+              && (advNoSpace.contains(QString::fromUtf8(u8"\u78C1\u76D8"))
+                  || advNoSpace.contains(QString::fromUtf8(u8"\u7A7A\u95F4")));
         // 反向锁：层没变
         const bool okLayerRest = (RsyncRunner::layerOf(refused) == 1)
                                  && (RsyncRunner::layerOf(noSpace) == 3);
@@ -2440,7 +2469,7 @@ int runSelfCheck()
         const bool okKylin = !RsyncRunner::specialAdviceFor(kylin).isEmpty();
 
         const bool ok = okLayerPort && okLayerDir && okAdvPort && okAdvDir
-                        && okGeneric && okLayerRest && okKylin;
+                        && okGeneric && okAdvNoSpace && okLayerRest && okKylin;
         if (!ok)
             ++bad;
         out << (ok ? "PASS\t" : "FAIL\t") << "attribution-advice"

@@ -729,6 +729,24 @@ bool isHandshakeRejectedByPeer(const QString &raw)
     return true;
 }
 
+// 接收端磁盘满。
+//
+// 归到 LayerReceiver（第 3 类）本身是对的（错在远端），但那一层的短结论是
+// 「目标电脑目录或权限有问题」，建议又列了四条（目录存在 / 写权限 / 磁盘空间 /
+// 已装 rsync）—— 客户得逐条试，而真正的原因只有「磁盘满」这一条。
+// 2026-11-07 暴力测试提出：这一层缺一个能一句话点破的判定。
+//
+// rsync 原文（rc=11）：
+//   rsync: [receiver] write failed on "/p/big.spe": No space left on device (28)
+//   rsync error: error in file IO (code 11) at receiver.c(381) [receiver=3.2.7]
+// 中文 locale 下 glibc strerror 会给「设备上没有空间」。
+bool isReceiverDiskFull(const QString &raw)
+{
+    return raw.contains(QLatin1String("No space left on device"), Qt::CaseInsensitive)
+        || raw.contains(QString::fromUtf8(u8"\u8BBE\u5907\u4E0A\u6CA1\u6709\u7A7A\u95F4"))
+        || raw.contains(QString::fromUtf8(u8"\u78C1\u76D8\u7A7A\u95F4\u4E0D\u8DB3"));
+}
+
 int classifyLayer(const QString &text)
 {
     // SSH 算法协商失败**最先判**：它的 stderr 里同时含有
@@ -1487,6 +1505,18 @@ QString specialAdvice(const QString &raw)
         // 紧跟着的层说明自相矛盾，客户看到两条互相打架的结论。
     // 短结论这一层加了 layer 守卫后：强制本机层时永远走 kLayerShort[LayerLocal]。
         // SSH 算法协商失败：给能照着做的处置（2026-11-07 实测）。
+        // 磁盘满：一句话点破，别再让客户在"目录/权限/磁盘/rsync"四条里逐条试。
+        if (isReceiverDiskFull(raw)) {
+            return QString::fromUtf8(
+                u8"\u76EE\u6807\u7535\u8111\u7684\u78C1\u76D8\u6EE1\u4E86\uFF0C\u5199\u4E0D\u8FDB\u53BB\u3002"
+                u8"\u8FD9\u4E0D\u662F\u7F51\u7EDC\u95EE\u9898\uFF0C\u4E5F\u4E0D\u662F\u76EE\u5F55\u6743\u9650\u95EE\u9898\u3002"
+                u8"\u8BF7\u8BA9\u76EE\u6807\u7535\u8111\u7684\u8D1F\u8D23\u4EBA\uFF1A"
+                u8"\u2460 \u770B\u4E00\u4E0B\u5269\u4F59\u7A7A\u95F4\uFF1Adf -h \u4FDD\u5B58\u76EE\u5F55\uFF1B"
+                u8"\u2461 \u6E05\u6389\u4E0D\u9700\u8981\u7684\u6587\u4EF6\uFF0C\u6216\u628A\u4FDD\u5B58\u76EE\u5F55\u6362\u5230\u7A7A\u95F4\u591F\u7684\u5206\u533A\uFF1B"
+                u8"\u2462 \u5982\u679C\u662F\u56E0\u4E3A\u4E0A\u4E00\u6B21\u4F20\u8F93\u7684\u4E34\u65F6\u6587\u4EF6\u6CA1\u6E05\uFF0C"
+                u8"\u53EF\u4EE5\u5220\u6389\u4FDD\u5B58\u76EE\u5F55\u4E0B\u7684 .srt-partial \u76EE\u5F55\u3002");
+        }
+
         if (isAlgoNegotiationFailure(raw) || isHandshakeRejectedByPeer(raw)) {
             return QString::fromUtf8(
                 u8"\u5DF2\u8FDE\u4E0A\u76EE\u6807\u7535\u8111\uFF0C\u4F46\u53CC\u65B9\u627E\u4E0D\u5230\u5171\u540C"
@@ -1646,6 +1676,8 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer, const QS
     // 短结论就会说「目标电脑没装 rsync」，与紧跟着的层说明自相矛盾。
     if (isAlgoNegotiationFailure(raw) || isHandshakeRejectedByPeer(raw))
         emit logText(QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u7684 SSH \u7B97\u6CD5\u5BF9\u4E0D\u4E0A"));
+    else if (isReceiverDiskFull(raw))
+        emit logText(QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u78C1\u76D8\u6EE1\u4E86"));
     else if (layer == LayerReceiver && isMissingRemoteRsync(raw))
         emit logText(QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u6CA1\u88C5 rsync"));
     else
