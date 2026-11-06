@@ -2327,14 +2327,14 @@ void SyncPanel::onScanFinished(const QVector<FileItem> &files)
                               QObject::tr("\xE8\x87\xAA\xE5\x8A\xA8\xE5\x90\x8C\xE6\xAD\xA5\xE5\xB7\xB2\xE9\x87\x8D\xE6\x96\xB0\xE6\x89\xAB\xE6\x8F\x8F\xE5\xAE\x8C\xE6\x88\x90\xEF\xBC\x8C\xE5\xB7\xB2\xE5\x85\xA8\xE9\x80\x89\xE5\xB9\xB6\xE5\x90\x8C\xE6\xAD\xA5 %1 \xE4\xB8\xAA\xE6\x96\x87\xE4\xBB\xB6\xE3\x80\x82")
                                 .arg(files.size()), 1);
             }
-            startSyncInternal();
+            startSyncInternal(true);
         }
     }
 }
 
 // ---------------------------------------------------------------- 同步
 
-void SyncPanel::startSyncInternal()
+void SyncPanel::startSyncInternal(bool fromFreshScan)
 {
     if (!m_target.isValid()) {
         appendLogLine(QStringLiteral("ERR"),
@@ -2345,7 +2345,20 @@ void SyncPanel::startSyncInternal()
 
     // 清单对不上当前配置（配置改过、或者压根没扫过）就先重扫。
     // 使用手册 §2.4：「点开始同步会自动重新扫描一次」，所以扫描不是前置仪式。
-    if (m_scanKey != currentScanKey()) {
+    // **手动点「开始同步」必须先重扫**（fromFreshScan=false）：
+    //
+    // 2026-11-07 实测缺陷：原来这里只在**配置键**（本机目录 + 后缀列表）变了才重扫。
+    // 用户把新文件拷进目录后再点「开始同步」，产品沿用旧清单，
+    // 界面报「20 / 20 个文件 · 本轮无变更」，接收端一个都没收到（本地实际 24 个）。
+    // 而本文件另一处注释写的是「使用手册 §2.4：点开始同步会自动重新扫描一次」——
+    // 实现与文档不符，属于**静默漏传**。
+    //
+    // 自动同步那条路（autoSyncFire）本来每轮都调 scanFiles()，所以没有这个问题；
+    // 手动这条路现在改成无条件重扫，两条路的行为就一致了。
+    //
+    // fromFreshScan=true 只由 onScanFinished 传（刚扫完、清单是新的），
+    // 那里不能再重扫，否则「扫描 → 同步 → 再扫描」会打死循环。
+    if (!fromFreshScan || m_scanKey != currentScanKey()) {
         m_syncRequested = true;
         scanFiles();
         return;

@@ -332,7 +332,11 @@ private slots:
     void onRowDoubleClicked(const QModelIndex &index);
     void onSelectAllToggled(bool on);
     void startOrCancel();
-    void startSyncInternal();
+    // fromFreshScan = true 表示**刚扫完**、清单是新的，可以直奔传输；
+    // false（默认，手动点「开始同步」）**必须先重扫** —— 否则用户把新文件
+    // 拷进目录后点同步，产品会沿用旧清单、报「本轮无变更」，新文件永远不传
+    // （2026-11-07 实测：本地 24 个文件、界面仍显示 20/20、接收端 20 个）。
+    void startSyncInternal(bool fromFreshScan = false);
     void launchToolForRow(int row, int toolIndex);
     void onToolFinished(int exitCode, QProcess::ExitStatus status);
     void onToolError(QProcess::ProcessError error);
