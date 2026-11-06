@@ -1392,6 +1392,13 @@ QString specialAdvice(const QString &raw)
     // （目录存在、写权限、磁盘空间、已装 rsync）—— 客户得逐条试，而其中三条
     // 都不是原因。这里直接点破，并给出两边都能照做的命令。
     {
+        // 必须同时满足"这一层确实是接收端层" —— 不能只看文本。
+        //
+        // 为什么：reportAttribution 有 16 处调用方会显式传 forceLayer（多为 LayerLocal，
+        // 用来报"本机这侧已经确定的问题"）。若只判文本，一段被强制归到本机层的文本
+        // 只要恰好含「未找到命令」，短结论就会说「目标电脑没装 rsync」，与同一段日志里
+        // 紧跟着的层说明自相矛盾，客户看到两条互相打架的结论。
+        // 加了 layer 判断后：强制本机层时永远走 kLayerShort[LayerLocal]。
         if (isMissingRemoteRsync(raw)) {
             return QString::fromUtf8(
                 u8"\u76EE\u6807\u7535\u8111\u4E0A\u6CA1\u6709 rsync\uFF0C\u6240\u4EE5\u4F20\u4E0D\u8FC7\u53BB"
@@ -1519,7 +1526,11 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer, const QS
     // 短结论也要精准：接收端缺 rsync 时，kLayerShort[LayerReceiver] 给的是
     // 「目标电脑目录或权限有问题」—— 客户会去查目录权限，而真正要做的是让对端装 rsync。
     // 这一行是他第一眼看到的，方向必须对。
-    if (isMissingRemoteRsync(raw))
+    // 必须同时满足"这一层确实是接收端层"，不能只看文本。
+    // reportAttribution 有 16 处调用方显式传 forceLayer（多为 LayerLocal）。
+    // 若只判文本，一段被强制归到本机层的文本只要恰好含「未找到命令」，
+    // 短结论就会说「目标电脑没装 rsync」，与紧跟着的层说明自相矛盾。
+    if (layer == LayerReceiver && isMissingRemoteRsync(raw))
         emit logText(QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u6CA1\u88C5 rsync"));
     else
         emit logText(QString::fromUtf8(kLayerShort[layer]));
