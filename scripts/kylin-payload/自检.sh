@@ -321,8 +321,15 @@ if [ -n "$RSYNC_SYS" ]; then
     RSYNC_SYSVER=$("$RSYNC_SYS" --version 2>&1 | head -1)
     ok "rsync：系统自带 ${RSYNC_SYS}（${RSYNC_SYSVER:-版本未知}）"
     rsync_ok=1
+    elif [ -x "$HERE/libexec/rsync" ] && "$HERE/libexec/rsync" --version >/dev/null 2>&1; then
+    ok "rsync：系统里没有，但**包内自带静态版可用**（$("$HERE/libexec/rsync" --version 2>/dev/null | head -1)）"
+    echo "    离线机器就是靠它：rsync 走 ssh 要求**两端**都有，作为接收端时请先执行："
+    echo "        sudo sh \"$HERE/安装.sh\" --with-rsync"
+    echo "    （会装到 /usr/local/bin/rsync，sshd 也能找到；不需要联网）"
+    rsync_ok=1
+    
 else
-    bad "系统里找不到 rsync —— 同步功能不可用"
+    bad "系统里没有 rsync，包内自带的那份也跑不起来 —— 同步功能不可用"
     echo "    请让系统管理员安装：sudo apt install rsync"
 fi
 
