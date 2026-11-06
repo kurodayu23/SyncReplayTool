@@ -665,8 +665,85 @@ QString baseNameOf(const QString &path)
     return slash < 0 ? QString() : path.mid(slash + 1);
 }
 
+// 两端 SSH 算法/Banner 协商失败（不是网络问题）。
+//
+// 2026-11-07 实测（麒麟 V10 接收端，产品真实调用路径）：
+//   sshd 只允许 Ciphers aes128-cbc 时，OpenSSH 9.9 客户端报：
+//     Unable to negotiate with 127.0.0.1 port 2350: no matching cipher found.
+//     Their offer: aes128-cbc
+//   同类还有 no matching key exchange method / host key type / MAC found、
+//   no mutual signature supported、Host key type not accepted。
+//
+// 这些**全部**曾被判成网络层：客户被引导去 ping、查端口、查防火墙，
+// 而真正要做的是「让对端放开算法」或「升级对端 sshd」。方向完全带错。
+//
+// 为什么以前连这句都拿不到：sshArgs() 里给 ssh 传了 -o LogLevel=ERROR，
+// 实测把这条诊断整个吞掉（输出为空、rc=255），产品只剩 rsync 的
+// "connection unexpectedly closed"。已改成 LogLevel=INFO（见 sshArgs）。
+bool isAlgoNegotiationFailure(const QString &raw)
+{
+    return raw.contains(QLatin1String("Unable to negotiate"), Qt::CaseInsensitive)
+        || raw.contains(QLatin1String("no matching cipher"), Qt::CaseInsensitive)
+        || raw.contains(QLatin1String("no matching key exchange"), Qt::CaseInsensitive)
+        || raw.contains(QLatin1String("no matching host key"), Qt::CaseInsensitive)
+        || raw.contains(QLatin1String("no matching MAC"), Qt::CaseInsensitive)
+        || raw.contains(QLatin1String("no mutual signature"), Qt::CaseInsensitive)
+        || raw.contains(QLatin1String("Host key type not accepted"), Qt::CaseInsensitive);
+}
+
+// 对端在**握手阶段主动断开**，且客户端没给任何算法/Banner 说明。
+//
+// 2026-11-07 实测（麒麟 V10 接收端只留 HostKey ssh_host_dsa_key）：
+//   客户端（OpenSSH 9.9，已移除 DSA 支持）拿到的**全部**输出只有一行：
+//     Connection closed by 127.0.0.1 port 2350
+//   没有 "Unable to negotiate"（那是客户端自己发现没有交集时才打的），
+//   因为 7.2p2 服务端先发现双方 hostkey 算法没有交集、直接把连接关了。
+//
+// 与"端口不通"的区别很明确：端口不通时是 ssh 的 "connect to host ... 
+// Connection refused/timed out"，根本没有建立 TCP；而这里是**已经连上、
+// 握手到一半被对端关掉**。所以不能报"网络不通 / 请 ping"。
+//
+// 判定要保守：只有出现 "Connection closed by" 且**没有**任何更具体的
+// 认证/密钥/算法字样时才归到这里，避免把真正的网络中断误判成版本问题。
+bool isHandshakeRejectedByPeer(const QString &raw)
+{
+    if (!raw.contains(QLatin1String("Connection closed by"), Qt::CaseInsensitive))
+        return false;
+    // 更具体的证据优先：出现这些就说明不是"纯握手被关"。
+    static const char *const kMoreSpecific[] = {
+        "Permission denied",
+        "Too many authentication failures",
+        "kex_exchange_identification",
+        "no matching",
+        "Unable to negotiate",
+        "Host key verification failed",
+        "Connection refused",
+        "Connection timed out",
+        "No route to host",
+        "Connection reset by peer",
+    };
+    for (const char *needle : kMoreSpecific) {
+        if (raw.contains(QLatin1String(needle), Qt::CaseInsensitive))
+            return false;
+    }
+    return true;
+}
+
 int classifyLayer(const QString &text)
 {
+    // SSH 算法协商失败**最先判**：它的 stderr 里同时含有
+    // "connection unexpectedly closed"（网络层的 needle）和 rsync 的 code 12，
+    // 只要让 kFailRules 先跑，就必然被判成网络层 —— 2026-11-07 实测三种接收端限制
+    // （HostKey dsa-only / Ciphers aes128-cbc / Kex dh-group1-sha1）全部落到
+    // 「网络不通 + 请 ping 检查防火墙」，方向完全错，客户永远查不到真因。
+    //
+    // 归到 LayerReceiverSsh（第 5 类）：端口是通的、责任在对端，与那一层的
+    // 层说明「端口能通但 SSH 服务不能用」吻合。
+    if (isAlgoNegotiationFailure(text))
+        return LayerReceiverSsh;
+    if (isHandshakeRejectedByPeer(text))
+        return LayerReceiverSsh;
+
     // 第 6 类最先判（理由见 isReceiverNameConflict 的注释）。
     if (isReceiverNameConflict(text))
         return LayerReceiverNameConflict;
@@ -1387,6 +1464,7 @@ bool isMissingRemoteRsync(const QString &raw)
         || raw.contains(QLatin1String("remote command not found"), Qt::CaseInsensitive);
 }
 
+
 QString specialAdvice(const QString &raw)
 {
     // 端口栏填的不是数字/含全角字符。ssh 连尝试都没做就退出了，
@@ -1408,6 +1486,25 @@ QString specialAdvice(const QString &raw)
         // 只要恰好含「未找到命令」，短结论就会说「目标电脑没装 rsync」，与同一段日志里
         // 紧跟着的层说明自相矛盾，客户看到两条互相打架的结论。
     // 短结论这一层加了 layer 守卫后：强制本机层时永远走 kLayerShort[LayerLocal]。
+        // SSH 算法协商失败：给能照着做的处置（2026-11-07 实测）。
+        if (isAlgoNegotiationFailure(raw) || isHandshakeRejectedByPeer(raw)) {
+            return QString::fromUtf8(
+                u8"\u5DF2\u8FDE\u4E0A\u76EE\u6807\u7535\u8111\uFF0C\u4F46\u53CC\u65B9\u627E\u4E0D\u5230\u5171\u540C"
+                u8"\u652F\u6301\u7684 SSH \u7B97\u6CD5\uFF08\u52A0\u5BC6\u65B9\u5F0F\u3001\u5BC6\u94A5\u4EA4\u6362\u3001"
+                u8"\u4E3B\u673A\u5BC6\u94A5\u7C7B\u578B\u6216\u6821\u9A8C\u65B9\u5F0F\uFF09\u3002"
+                u8"\u8FD9\u4E0D\u662F\u7F51\u7EDC\u95EE\u9898\uFF0C\u4E5F\u4E0D\u662F\u5BC6\u7801\u9519\u3002"
+                u8"\u539F\u56E0\u662F\u4E24\u8FB9\u7684 SSH \u7248\u672C\u5DEE\u5F97\u592A\u591A\uFF1A"
+                u8"\u672C\u7A0B\u5E8F\u5E26\u7684\u662F OpenSSH 9.x\uFF0C\u5DF2\u9ED8\u8BA4\u7981\u7528\u4E86"
+                u8"\u5F88\u591A\u8001\u7B97\u6CD5\uFF08\u5982 CBC \u52A0\u5BC6\u3001ssh-rsa\u3001DSA\uFF09\u3002"
+                u8"\u3010\u4E24\u9009\u4E00\u3011"
+                u8"\u2460 \u8BA9\u76EE\u6807\u7535\u8111\u653E\u5F00\u7B97\u6CD5\uFF08\u6539 /etc/ssh/sshd_config\uFF0C"
+                u8"\u628A Ciphers / KexAlgorithms / HostKey \u6539\u6210\u65B0\u7248\u652F\u6301\u7684\u503C\uFF0C"
+                u8"\u7136\u540E\u91CD\u542F sshd\uFF09\uFF1B"
+                u8"\u2461 \u6216\u628A\u76EE\u6807\u7535\u8111\u7684 OpenSSH \u5347\u5230 8.0 \u4EE5\u4E0A\u3002"
+                u8"\u6539\u5B8C\u5728\u672C\u673A\u9A8C\u8BC1\uFF1Assh -p \u7AEF\u53E3 \u8D26\u53F7@IP"
+                u8"\u80FD\u767B\u5F55\u5373\u53EF\u3002");
+        }
+
         if (isMissingRemoteRsync(raw)) {
             return QString::fromUtf8(
                 u8"\u76EE\u6807\u7535\u8111\u4E0A\u6CA1\u6709 rsync\uFF0C\u6240\u4EE5\u4F20\u4E0D\u8FC7\u53BB"
@@ -1525,7 +1622,7 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer, const QS
         // 所以在**调用处**卡一道：只有接收端层才允许走 specialAdvice 里那条分支。
         // 其它层的专项建议（Bad port / ssh_config / 私钥权限等）不受影响，因为
         // 它们各自还有自己的语义判定，且都不以"对端"为假设。
-        advice = (layer == LayerReceiver) ? specialAdvice(raw) : QString();
+        advice = (layer == LayerReceiver || layer == LayerReceiverSsh) ? specialAdvice(raw) : QString();
     if (advice.isEmpty())
         advice = QString::fromUtf8(kLayerAdvice[layer]);
 
@@ -1547,7 +1644,9 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer, const QS
     // reportAttribution 有 16 处调用方显式传 forceLayer（多为 LayerLocal）。
     // 若只判文本，一段被强制归到本机层的文本只要恰好含「未找到命令」，
     // 短结论就会说「目标电脑没装 rsync」，与紧跟着的层说明自相矛盾。
-    if (layer == LayerReceiver && isMissingRemoteRsync(raw))
+    if (isAlgoNegotiationFailure(raw) || isHandshakeRejectedByPeer(raw))
+        emit logText(QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u7684 SSH \u7B97\u6CD5\u5BF9\u4E0D\u4E0A"));
+    else if (layer == LayerReceiver && isMissingRemoteRsync(raw))
         emit logText(QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u6CA1\u88C5 rsync"));
     else
         emit logText(QString::fromUtf8(kLayerShort[layer]));
@@ -1556,7 +1655,11 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer, const QS
     // "哪里出问题"一句话）。运行时剥掉前缀，只留后面那句人话，不用改那 7 条长转义串。
     // 【 = U+3010, 】 = U+3011
     {
-        QString meaning = QString::fromUtf8(kLayerMeaning[layer]);
+        // 算法协商失败时不能用第 5 类那句「对端没有 SSH 服务应答」——
+        // sshd 明明是活的，只是算法对不上。改用一句准确的，避免客户去重启 sshd。
+        QString meaning = isAlgoNegotiationFailure(raw)
+            ? QString::fromUtf8(u8"\u3010\u8D23\u4EFB\u5F52\u5C5E\uFF1A\u63A5\u6536\u7AEF\u7535\u8111\u3011\u7AEF\u53E3\u80FD\u8FDE\u4E0A\uFF0C\u4F46\u53CC\u65B9\u6CA1\u6709\u5171\u540C\u652F\u6301\u7684 SSH \u7B97\u6CD5\uFF08\u52A0\u5BC6/\u5BC6\u94A5\u4EA4\u6362/\u4E3B\u673A\u5BC6\u94A5\u7C7B\u578B\uFF09\u3002")
+            : QString::fromUtf8(kLayerMeaning[layer]);
         const int rb = meaning.indexOf(QChar(0x3011));
         if (rb > 0 && meaning.startsWith(QChar(0x3010)))
             meaning = meaning.mid(rb + 1).trimmed();
@@ -2333,7 +2436,20 @@ QStringList RsyncRunner::sshArgs(const TargetConfig &target, bool quotePath) con
         // 再把 ssh 自己的 warning 级日志压掉，否则每次同步开头都会冒一行
         // "Warning: Permanently added ... to the list of known hosts"。
         // 只压 ssh 客户端的，rsync 自己的输出不受影响，权限错误照常报。
-        a << QStringLiteral("-o") << QStringLiteral("LogLevel=ERROR");
+        // LogLevel=INFO 而不是 ERROR：ERROR 会把 ssh 唯一有价值的那句诊断吞掉。
+        //
+        // 2026-11-07 实测（麒麟 V10 接收端，sshd 只允许 Ciphers aes128-cbc）：
+        //   默认日志级 → "Unable to negotiate with 127.0.0.1 port 2350:
+        //                  no matching cipher found. Their offer: aes128-cbc"（1 行，无噪音）
+        //   LogLevel=ERROR → 输出为空、rc=255，产品于是只看到 rsync 的
+        //                    "connection unexpectedly closed" + "code 12"，
+        //                    被判成网络层，客户被引导去查 ping / 端口 / 防火墙 ——
+        //                    而真正要做的是让对端放开算法或升级 sshd。方向全错。
+        //
+        // 代价：INFO 会多一行 "Warning: Permanently added ... to the list of known hosts."。
+        // 那一行在 failureKeyLines()/handleLine() 里都不参与归因（不在 kFailRules 里），
+        // 只可能出现在 stderrTail 里；归因看的是是否命中 needle，多一行无副作用。
+        a << QStringLiteral("-o") << QStringLiteral("LogLevel=INFO");
     }
     return a;
 }
@@ -3011,7 +3127,45 @@ void RsyncRunner::start(const TargetConfig &target,
         return false;
     };
 
-    if (reject(target.remoteRoot) || rejectGlob(target.remoteRoot))
+    // shell 元字符：$ ` ; | & ( ) —— 与上面的 glob 同一类「会静默写错地方」的问题。
+    //
+    // 2026-11-07 实测（麒麟 V10 接收端，产品真实调用路径 --selfcheck-secrets）：
+    //   用户填 $(touch /tmp/PWNED1)/x → 远端建出目录名「$(touch 」，文件在里面，
+    //                                产品报 finished-and-clean ok=1 + SECRETS_ALL_CLEAN
+    //   用户填 a|touch /tmp/PWNED7    → 远端建出「a|touch 」
+    //   用户填 `touch /tmp/PWNED2`/x → 远端建出「`touch 」
+    //   用户填 a;touch /tmp/PWNED9    → 远端建出「a;touch 」
+    //   用户填 a&touch /tmp/PWNED8    → 远端建出「a&touch 」
+    //   用户填 a$(id>/tmp/PWNED4)b    → 远端建出「a$(id>」
+    //
+    // 好消息：这些 payload 没有一个真在远端执行了 shell 命令（--protect-args 挡住了），
+    // 所以不是命令注入漏洞。坏消息：路径被远端按空格拆开后静默截断，文件落进用户
+    // 从没填过的目录，界面还报成功 —— 客户按自己填的路径永远找不到数据。
+    //
+    // 不能靠转义补救：远端规格不过 shell（escapeForRemoteShell 是恒等函数），
+    // 但 ensureRemoteDirs / verifyRemoteDir 过 shell，两处口径不同就会出现
+    // 「建在一个目录、传进另一个目录」—— 这正是历史上单引号那次故障的形态。只能拒。
+    auto rejectShellMeta = [this](const QString &raw) {
+        const QString metaChars = QStringLiteral("$`;|&()");
+        for (const QChar c : raw) {
+            if (!metaChars.contains(c))
+                continue;
+            emit logText(QString::fromUtf8(u8"\u8FDC\u7AEF\u8DEF\u5F84\u4E0D\u80FD\u542B [%1]\u3002")
+                             .arg(c));
+            emit logText(QString::fromUtf8(
+                u8"\u8FD9\u662F shell \u5143\u5B57\u7B26\u3002\u5B83\u4E0D\u4F1A\u88AB\u672C\u7A0B\u5E8F\u6267\u884C"
+                u8"\uFF08\u5DF2\u7528 --protect-args \u963B\u65AD\uFF09\uFF0C\u4F46\u8FDC\u7AEF\u4F1A\u6309\u7A7A\u683C"
+                u8"\u628A\u8DEF\u5F84\u62C6\u5F00\uFF0C\u6587\u4EF6\u4F1A\u843D\u5230\u4E00\u4E2A\u4F60\u6CA1\u586B\u8FC7"
+                u8"\u7684\u76EE\u5F55\uFF0C\u800C\u754C\u9762\u663E\u793A\u540C\u6B65\u5B8C\u6210\u3002"));
+            emit logText(QString::fromUtf8(
+                u8"\u8BF7\u628A\u8FD9\u4E9B\u5B57\u7B26\u4ECE\u76EE\u5F55\u540D\u91CC\u53BB\u6389\u3002"));
+            emit allFinished(false);
+            return true;
+        }
+        return false;
+    };
+
+    if (reject(target.remoteRoot) || rejectGlob(target.remoteRoot) || rejectShellMeta(target.remoteRoot))
         return;
 
     // ~user/xxx 形式明确拒绝。remoteDir() 对这种输入返回 "\x01~user\x01" 哨兵。
@@ -3064,7 +3218,7 @@ void RsyncRunner::start(const TargetConfig &target,
                       QString::fromUtf8(u8"\u6839\u76EE\u5F55")))
         return;
     for (const SyncRule &rule : rules) {
-        if (reject(rule.remoteSubDir) || rejectGlob(rule.remoteSubDir))
+        if (reject(rule.remoteSubDir) || rejectGlob(rule.remoteSubDir) || rejectShellMeta(rule.remoteSubDir))
             return;
         if (rejectEscapes(subDirEscapesRoot(rule.remoteSubDir),
                           QString::fromUtf8(u8"\u76F8\u5BF9\u8DEF\u5F84")))
