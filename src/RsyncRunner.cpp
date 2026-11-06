@@ -493,8 +493,17 @@ const char *const kHardReceiverUtf8[] = {
     u8"\u672A\u627E\u5230\u547D\u4EE4",
     // 部分发行版用「找不到命令」
     u8"\u627E\u4E0D\u5230\u547D\u4EE4",
-    // bash: rsync: 没有那个文件或目录（命令路径不存在时的中文说法）
-    u8"\u6CA1\u6709\u90A3\u4E2A\u6587\u4EF6\u6216\u76EE\u5F55"
+    // 「没有那个文件或目录」这类**通用 ENOENT 文案刻意不收**。
+    //
+    // 实测（2026-11-06 审查反例）：中文 locale 下 glibc strerror 会把它给到多种完全不同的故障，
+    //   rsync: [sender] Failed to exec ssh: 没有那个文件或目录 (2)      <- 本机缺 ssh（应判本机层）
+    //   rsync: link_stat "/x.spe" failed: 没有那个文件或目录 (2)        <- 本机源文件被删（应判本机层）
+    // 若收进本表，这两种都会被判成"接收端"，短结论打「目标电脑没装 rsync」，
+    // 与本文件 311 行那条自定规则正好相反："不要顺着它去补 failed: No such file or directory
+    // 这种通用短语…补了就会把本机的问题甩给对面机器"。
+    //
+    // 真要认「接收端 shell 找不到 rsync」，靠的是「未找到命令」/「找不到命令」——
+    // 那是 bash 的 command-not-found 专用文案，ENOENT 不会产生它。
 };
 
 // 本机层的强证据。和 kHardReceiver 同一个道理：这些字样只可能由**这台
@@ -1398,7 +1407,7 @@ QString specialAdvice(const QString &raw)
         // 用来报"本机这侧已经确定的问题"）。若只判文本，一段被强制归到本机层的文本
         // 只要恰好含「未找到命令」，短结论就会说「目标电脑没装 rsync」，与同一段日志里
         // 紧跟着的层说明自相矛盾，客户看到两条互相打架的结论。
-        // 加了 layer 判断后：强制本机层时永远走 kLayerShort[LayerLocal]。
+    // 短结论这一层加了 layer 守卫后：强制本机层时永远走 kLayerShort[LayerLocal]。
         if (isMissingRemoteRsync(raw)) {
             return QString::fromUtf8(
                 u8"\u76EE\u6807\u7535\u8111\u4E0A\u6CA1\u6709 rsync\uFF0C\u6240\u4EE5\u4F20\u4E0D\u8FC7\u53BB"
@@ -1508,7 +1517,15 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer, const QS
 
     QString advice = adviceOverride;
     if (advice.isEmpty())
-        advice = specialAdvice(raw);
+        // 「接收端没装 rsync」这句专项建议只对接收端层成立。
+        //
+        // 审查 P2（2026-11-06）：specialAdvice 没有 layer 形参，它只看文本；
+        // 而 reportAttribution 有 13 处调用方显式传 forceLayer。若调用方把一段含 rsync
+        // 字样的文本强制归到本机层，advice 仍会说"让对端装 rsync"，与层说明打架。
+        // 所以在**调用处**卡一道：只有接收端层才允许走 specialAdvice 里那条分支。
+        // 其它层的专项建议（Bad port / ssh_config / 私钥权限等）不受影响，因为
+        // 它们各自还有自己的语义判定，且都不以"对端"为假设。
+        advice = (layer == LayerReceiver) ? specialAdvice(raw) : QString();
     if (advice.isEmpty())
         advice = QString::fromUtf8(kLayerAdvice[layer]);
 

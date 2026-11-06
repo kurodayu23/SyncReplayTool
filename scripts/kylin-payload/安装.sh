@@ -47,11 +47,22 @@ TPL="$HERE/数据同步工具.desktop"
 # ---- 参数 ----
 DO_AUTOSTART="ask"      # ask | yes | no
 DO_RSYNC="no"          # no | yes（把 libexec/rsync 装到 /usr/local/bin）
-case "${1:-}" in
-    --autostart)    DO_AUTOSTART="yes" ;;
-    --no-autostart) DO_AUTOSTART="no" ;;
-    --with-rsync)    DO_RSYNC="yes" ;;
-esac
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --autostart)    DO_AUTOSTART="yes" ;;
+        --no-autostart) DO_AUTOSTART="no" ;;
+        --with-rsync)   DO_RSYNC="yes" ;;
+        # 2026-11-06 审查 P1：原来只认 $1（`case "${1:-}"`），
+        # 于是 `sh 安装.sh --autostart --with-rsync` 会把 --with-rsync **静默丢掉**——
+        # 自启装了、rsync 没装，同步照样报 remote command not found (127)。
+        # 两个参数都是本脚本自己在头部推荐的，必须都能被认。
+        *)
+            echo "未知参数：$1" >&2
+            echo "可用：--autostart | --no-autostart | --with-rsync" >&2
+            exit 2 ;;
+    esac
+    shift
+done
 
 # ---- 自带 rsync 装到系统（--with-rsync）----
 #
@@ -87,6 +98,10 @@ if [ "$DO_RSYNC" = "yes" ]; then
         echo "  接收端仍会报 remote command not found。请把 $DST 所在目录加进 PATH。" >&2
     fi
     echo "  取消安装：sudo rm -f $DST"
+    # 2026-11-06 审查 P2：装完就停。原来装完继续走下面的桌面图标分支，
+    # sudo 下 HOME=/root，会顺手 mkdir /root/桌面 并写图标 —— 一个系统级动作
+    # 污染 root 家目录；而且那一堆输出会淹没 rsync 的安装结果，运维看不见。
+    exit 0
 fi
 
 # ---- 开机自启：取消 ----

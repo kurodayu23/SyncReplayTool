@@ -631,15 +631,52 @@ if (-not $SkipKylinTar) {
     $rootNameB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($KylinPkgName))
 
     Write-Host "   容器内组装 ...（$ContainerName，端口 $ContainerPort）"
+    # ── 静态 rsync 路径归一化（2026-11-06 审查 P1，两种输入实测都会崩）──
+    #
+    # 1) -StaticRsync 传空串 → Split-Path -Parent 抛
+    #      "Cannot bind argument to parameter Path because it is an empty string"
+    #    （参数注释写的是"传空字符串则跳过"，实际直接抛异常）
+    # 2) -StaticRsync 传相对名（如 rsync-static）→ Split-Path -Parent 返回空串
+    #    → -v ":/srsync:ro" → docker create 报
+    #      "invalid spec: :/srsync:ro: empty section between colons"（实测 exit=125）
+    #
+    # 一律解析成绝对路径再取父目录；空串则整体跳过挂载与 --static-rsync。
+    $srsyncMount = $null
+    $srsyncLeaf  = $null
+    if (-not [string]::IsNullOrWhiteSpace($StaticRsync)) {
+        $srsyncFull = $null
+        try {
+            $srsyncFull = (Resolve-Path -LiteralPath $StaticRsync -ErrorAction Stop).Path
+        } catch {
+            throw ("指定的静态 rsync 不存在或不可解析：{0}（{1}）" -f $StaticRsync, $_.Exception.Message)
+        }
+        $srsyncParent = Split-Path -Parent $srsyncFull
+        if ([string]::IsNullOrEmpty($srsyncParent)) {
+            throw ("无法解析静态 rsync 的父目录：{0}" -f $StaticRsync)
+        }
+        $srsyncMount = $srsyncParent
+        $srsyncLeaf  = Split-Path -Leaf $srsyncFull
+        Write-Host ("   自带静态 rsync：{0}" -f $srsyncFull)
+    } else {
+        Write-Host "   自带静态 rsync：未指定（客户机将依赖系统 rsync）"
+    }
+
+    $srsyncArg = ""
+    if ($srsyncMount) {
+        $srsyncArg = "--static-rsync /srsync/$srsyncLeaf "
+    }
     $pkgCmd = "/pkg.sh --binary /build/SyncReplayTool --base-tar /stage/base.tar.gz " +
-              "--payload /payload --static-rsync /srsync/rsync-static --root-name-b64 $rootNameB64 --out /out/kylin.tar.gz"
+              "--payload /payload " + $srsyncArg + 
+              "--root-name-b64 $rootNameB64 --out /out/kylin.tar.gz"
+    $mountArg = @()
+    if ($srsyncMount) { $mountArg = @('-v', "${srsyncMount}:/srsync:ro") }
     docker create --name $ContainerName --entrypoint /bin/bash `
         -p "${ContainerPort}:22" `
         -v "${binStage}:/build:ro" `
         -v "${kStage}:/payload:ro" `
-        -v "$(Split-Path -Parent $StaticRsync):/srsync:ro" `
         -v "${KylinBaseTar}:/stage/base.tar.gz:ro" `
         -v "${ContainerScript}:/pkg.sh:ro" `
+        @mountArg `
         $ContainerImage -c $pkgCmd | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "docker create 失败（exit=$LASTEXITCODE）" }
 

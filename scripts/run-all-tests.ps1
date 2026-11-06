@@ -191,8 +191,30 @@ if ($SkipPackage) {
         Record '打包' 'FAIL' "找不到麒麟二进制 $kylinBin（先跑 build-kylin-qt596.sh）"
         $kylinBin = $null
     }
+    # ── 自带静态 rsync（离线交付核心）──
+    #
+    # 客户要求完全离线：包里必须自带一份能在麒麟 V10（glibc 2.23）上跑的 rsync，
+    # 否则客户机器没装 rsync、又不能上外网时，同步功能整体不可用。
+    # 这里**必须**拦住两种情况，不能让它们悄悄溜过去：
+    #   1) 静态 rsync 根本没编（work\rsync-static\ 被清过）→ 包会少 libexec/rsync
+    #   2) 编出来但不是静态链接 → 换台机器就跑不了，比没有更糟（客户以为自带）
+    # 不拦住的话，package-delivery.ps1 会打印「未指定（客户机将依赖系统 rsync）」
+    # 然后照样 rc=0 —— 包做出来了，但它不满足离线要求。
+    $staticRsync = Join-Path $PackageRoot 'work\rsync-static\rsync-static'
+    if (-not (Test-Path -LiteralPath $staticRsync)) {
+        Record '打包' 'FAIL' "缺静态 rsync：$staticRsync（先跑 scripts\build-rsync-static.sh）"
+        $staticRsync = $null
+    } else {
+        $lddOut = & bash -lc "ldd '$($staticRsync -replace '\\','/')' 2>&1" 2>$null
+        if ($lddOut -match '=>') {
+            Record '打包' 'FAIL' "静态 rsync 有动态依赖（不是 -static 编的）"
+            $staticRsync = $null
+        }
+    }
+
     $pkgArgs = @('-BuildRoot', $QtKitBuild, '-OutDir', $pkgPath, '-SkipBuild')
     if ($kylinBin) { $pkgArgs += @('-KylinBinary', $kylinBin) }
+    if ($staticRsync) { $pkgArgs += @('-StaticRsync', $staticRsync) }
     & powershell -ExecutionPolicy Bypass -File 'D:\AP\AP7000\SyncReplayTool\scripts\package-delivery.ps1' @pkgArgs 2>&1 |
         Out-File -FilePath (Join-Path $logs 'package.log') -Encoding UTF8
     $pkgRc = $LASTEXITCODE

@@ -326,8 +326,17 @@ else
     echo "    请让系统管理员安装：sudo apt install rsync"
 fi
 
-if [ -d "$HERE/libexec" ]; then
-    warn "包内仍带着 libexec/（随包 ssh/rsync），但它在麒麟 V10 上跑不起来，实际用的是系统那一份。"
+if [ -f "$HERE/libexec/rsync" ]; then
+    # 2026-11-06：libexec/rsync 是**离线交付用的静态 rsync**，有意保留。
+    # 原文案无条件 warn「它在麒麟 V10 上跑不起来，实际用的是系统那一份」——
+    # 与 70 行之后那段新说明自相矛盾，也与事实相反：实测 bin/rsync 正是靠它跑起来的
+    # （它是 LDFLAGS=-static 编的，ldd 报 not a dynamic executable，不吃 glibc 版本）。
+    # 只有真的不可用时才该 warn。
+    if [ -x "$HERE/libexec/rsync" ] && "$HERE/libexec/rsync" --version >/dev/null 2>&1; then
+        ok "包内自带静态 rsync：可用（$("$HERE/libexec/rsync" --version 2>/dev/null | head -1)）"
+    else
+        warn "包内 libexec/rsync 存在但跑不起来（丢执行位或架构不符），会用系统 rsync。"
+    fi
 fi
 
 # 包内 wrapper 的回落探测（真实运行条件 + 5 秒超时）

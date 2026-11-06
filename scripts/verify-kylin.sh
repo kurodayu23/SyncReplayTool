@@ -158,10 +158,21 @@ if echo "$_sc_out" | grep -q '系统自带'; then
 else
     res 1 "自检没有标注「系统自带」"
 fi
-if echo "$_sc_out" | grep -q '包内自带'; then
-    res 1 "自检仍然出现「包内自带」字样"
+# 2026-11-06：这条原来断言"自检里绝不许出现「包内自带」"（防谎报）。
+# 现在包里**真的**自带了 libexec/rsync，自检如实标出「包内自带静态 rsync：可用」正是对的。
+# 判据反向：若包里有 libexec/rsync，自检就必须标出来（不许隐瞒）；没有则不许出现该字样。
+if [ -f "$PKG/libexec/rsync" ]; then
+    if echo "$_sc_out" | grep -q "包内自带静态 rsync"; then
+        res 0 "自检如实标出「包内自带静态 rsync」（包内确实有）"
+    else
+        res 1 "包内有 libexec/rsync，但自检没标出「包内自带静态 rsync」"
+    fi
 else
-    res 0 "自检里没有「包内自带」的谎报"
+    if echo "$_sc_out" | grep -q "包内自带"; then
+        res 1 "自检出现「包内自带」但包里没有（谎报）"
+    else
+        res 0 "包里无自带 rsync，自检也没谎报「包内自带」"
+    fi
 fi
 _q=$(cd "$PKG" && sh ./自检.sh --quiet 2>&1); _qn=$(printf '%s\n' "$_q" | grep -c .)
 echo "    --quiet 输出行数 = $_qn"
@@ -199,7 +210,26 @@ done
 for f in rsync ssh scp ssh-keygen ssh-keyscan; do
     if [ -x "$PKG/bin/$f" ]; then res 0 "含 bin/$f（可执行）"; else res 1 "缺/不可执行 bin/$f"; fi
 done
-[ -e "$PKG/libexec" ] && res 1 "libexec/ 还在包里（永不可用的死重）" || res 0 "libexec/ 已清掉"
+# 2026-11-06 起，包里**故意**带 libexec/rsync —— 它是离线交付用的静态 rsync。
+# 原断言 [ -e libexec ] && FAIL 是「包里绝不该有 libexec」那个年代的，
+# 不改的话新包必然 PASS=42 FAIL=1、门禁永远红（审查实测复现）。
+# 现在断言改成：必须有、必须可执行、必须是静态链接、且 libexec 下不该有别的死重。
+if [ -f "$PKG/libexec/rsync" ] && [ -x "$PKG/libexec/rsync" ]; then
+    res 0 "含 libexec/rsync（自带静态 rsync，离线可用）"
+    if ldd "$PKG/libexec/rsync" 2>/dev/null | grep -q "=>"; then
+        res 1 "libexec/rsync 不是静态链接（换机器可能跑不了）"
+    else
+        res 0 "libexec/rsync 为静态链接"
+    fi
+else
+    res 1 "缺 libexec/rsync（离线机器将无法同步）"
+fi
+_lx=$(find "$PKG/libexec" -mindepth 1 -maxdepth 1 ! -name rsync 2>/dev/null | wc -l)
+if [ "$_lx" = "0" ]; then
+    res 0 "libexec/ 下无多余死重"
+else
+    res 1 "libexec/ 下有多余文件（旧的 GLIBC_2.38 二进制）"
+fi
 [ -e "$PKG/lib/sshv2" ] && res 1 "lib/sshv2/ 还在包里（永不可用的死重）" || res 0 "lib/sshv2/ 已清掉"
 for d in plugins/imageformats plugins/egldeviceintegrations; do
     [ -e "$PKG/$d" ] && res 1 "$d/ 还在包里（用不上）" || res 0 "$d/ 已清掉"
