@@ -1,4 +1,4 @@
-﻿#include "FileScanner.h"
+#include "FileScanner.h"
 
 #include "ToolRunner.h"
 
@@ -701,6 +701,22 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
                     ++g_skippedLinks;
                     addSkipNote(QString::fromUtf8(
                         u8"因是符号链接跳过：%1（链接不是数据，且目标不存在）").arg(entryPath));
+                } else {
+                    // 既不是普通文件、也不是链接 —— FIFO（命名管道）/ Unix socket / 设备文件。
+                    //
+                    // 2026-11-07 实测（麒麟发送端放一个 mkfifo 和一个 socket）：
+                    //   产品同步成功、普通文件正常传，但 FIFO/socket **完全静默**地消失了 ——
+                    //   不进清单、不进任何计数、日志里一个字都没有。
+                    // 这违反本文件反复申明的「跳过必须留痕」：符号链接、读不了的目录、
+                    // 后缀不符的文件都有提示，唯独特殊文件没有。客户把含 FIFO 的目录同步
+                    // 过去，接收端少一个条目而他永远不会知道。
+                    //
+                    // 这些确实**不该**被同步（FIFO 的"内容"不是数据、socket 根本没有内容；
+                    // rsync 带 -a 含 -D 会试图在远端 mknod，普通账号必然失败），
+                    // 所以正确做法不是传它，而是**说清楚跳过了什么**。
+                    addSkipNote(QString::fromUtf8(
+                        u8"因不是普通文件跳过：%1（管道 / 套接字 / 设备文件不是数据，无法传输）")
+                        .arg(entryPath));
                 }
                 continue;
             }

@@ -1,3 +1,6 @@
+#ifndef _WIN32
+#include <sys/stat.h>   // mkfifo（special-file-skip-note 判据用）
+#endif
 #include <QApplication>
 #include <QClipboard>
 #include <QByteArray>
@@ -3776,6 +3779,52 @@ int runSelfCheck()
               << "\tnoScanLoop=" << (noScanLoop ? 1 : 0)
               << "\tgenDelta=" << (genAfter - genBefore) << "\n";
       }
+
+      // ----------------------------------------------------------------
+      // 判据：FIFO / socket 这类特殊文件被跳过时**必须留痕**
+      //
+      // 2026-11-07 实测缺陷：麒麟发送端放一个 mkfifo 和一个 Unix socket，
+      // 产品同步成功、普通文件正常传，但这两个**完全静默**地消失了 ——
+      // 不进清单、不进任何计数、日志里一个字都没有。
+      // 而本产品反复申明「跳过必须留痕」（符号链接、读不了的目录、后缀不符都有提示）。
+      //
+      // 这些文件确实不该被同步（FIFO 的内容不是数据、socket 没有内容；
+      // rsync 带 -a 含 -D 会试图在远端 mknod，普通账号必然失败），
+      // 所以判据断言的不是"把它传过去"，而是"客户能看到它被跳过了"。
+      // 只在 POSIX 上跑：Windows 造不出 FIFO。
+#ifndef _WIN32
+      {
+          QTemporaryDir sandbox;
+          const QString root = sandbox.path();
+          { QFile f(root + QStringLiteral("/plain.spe")); f.open(QIODevice::WriteOnly); f.write("x"); }
+          const QByteArray fifoPath = QFile::encodeName(root + QStringLiteral("/pipe.spe"));
+          const bool madeFifo = (::mkfifo(fifoPath.constData(), 0644) == 0);
+
+          if (!madeFifo) {
+              out << "SKIP\tspecial-file-skip-note\tcannot create fifo\n";
+          } else {
+              const QVector<FileItem> got = FileScanner::scan(root, QStringList() << QStringLiteral("spe"));
+              const QStringList notes = FileScanner::skippedNotes();
+              bool mentioned = false;
+              for (int i = 0; i < notes.size(); ++i) {
+                  if (notes.at(i).contains(QStringLiteral("pipe.spe"))
+                      && notes.at(i).contains(QString::fromUtf8(u8"\u4E0D\u662F\u666E\u901A\u6587\u4EF6"))) {
+                      mentioned = true;
+                      break;
+                  }
+              }
+              // 清单里只应有普通文件（FIFO 不该被列进去）
+              const bool onlyPlain = (got.size() == 1);
+              const bool ok = mentioned && onlyPlain;
+              if (!ok)
+                  ++bad;
+              out << (ok ? "PASS\t" : "FAIL\t") << "special-file-skip-note"
+                  << "\tfiles=" << got.size()
+                  << "\tmentioned=" << (mentioned ? 1 : 0)
+                  << "\tnotes=" << notes.size() << "\n";
+          }
+      }
+#endif
 
     // ---- 判据：密钥材料必须**按字节原样**认出，不能先 trim 再判长度 ----
     //
