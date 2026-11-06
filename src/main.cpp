@@ -3781,6 +3781,65 @@ int runSelfCheck()
       }
 
       // ----------------------------------------------------------------
+      // 判据：自动同步必须**每轮重扫**，能捡到新出现的文件
+      //
+      // 2026-11-07 实测背景：手动点「开始同步」原来不重扫（缺陷 D6，已修），
+      // 而自动同步那条路（autoSyncFire）每轮都调 scanFiles()，所以自动同步
+      // **能**捡到新文件、手动不能 —— 两条路行为不一致。
+      //
+      // 麒麟 GUI 实测确认过：自动同步间隔 10 秒，放 2 个新文件后 35 秒内
+      // 接收端从 1 个变成 3 个。这条判据把那个行为锁住，
+      // 防止以后有人为了"省一次扫描"把 autoSyncFire 里的 scanFiles() 删掉。
+      {
+          QTemporaryDir sandbox;
+          const QString root = sandbox.path();
+          { QFile f(root + QStringLiteral("/a.spe")); f.open(QIODevice::WriteOnly); f.write("a"); }
+
+          SyncPanel panel;
+          panel.setLocalRootForTest(root);
+          panel.setRulesForTest(QStringList() << QStringLiteral("spe"));
+          panel.setHostForTest(QStringLiteral("127.0.0.1"));
+          panel.setPortForTest(1);
+          panel.setUserForTest(QStringLiteral("srtprobe"));
+
+          panel.scanFilesForTest();
+          {
+              QElapsedTimer t; t.start();
+              while (panel.isScanningForTest() && t.elapsed() < 8000) {
+                  QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                  QThread::msleep(5);
+              }
+          }
+          const int before = panel.fileCountForTest();
+
+          // 新文件出现（模拟客户把新数据拷进目录）
+          { QFile f(root + QStringLiteral("/b.spe")); f.open(QIODevice::WriteOnly); f.write("b"); }
+
+          // 强制触发一次自动同步（绕过"到点"与"忙"两个守卫）
+          panel.forceAutoSyncFireForTest();
+
+          bool pickedUp = false;
+          {
+              QElapsedTimer t; t.start();
+              while (t.elapsed() < 8000) {
+                  QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                  if (!panel.isScanningForTest() && panel.fileCountForTest() > before) {
+                      pickedUp = true;
+                      break;
+                  }
+                  QThread::msleep(5);
+              }
+          }
+          const int after = panel.fileCountForTest();
+          const bool ok = pickedUp && (before == 1) && (after >= 2);
+          if (!ok)
+              ++bad;
+          out << (ok ? "PASS\t" : "FAIL\t") << "autosync-rescans"
+              << "\tbefore=" << before << "\tafter=" << after
+              << "\tpickedUp=" << (pickedUp ? 1 : 0) << "\n";
+      }
+
+      // ----------------------------------------------------------------
       // 判据：FIFO / socket 这类特殊文件被跳过时**必须留痕**
       //
       // 2026-11-07 实测缺陷：麒麟发送端放一个 mkfifo 和一个 Unix socket，
