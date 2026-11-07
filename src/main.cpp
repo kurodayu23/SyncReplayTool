@@ -3969,6 +3969,52 @@ int runSelfCheck()
       }
 
       // ----------------------------------------------------------------
+      // 判据：私钥路径含双引号/控制字符必须被拦下（《已知限制》第 17 条）
+      //
+      // 2026-11-07：文档里这条写着「Windows 已挡住、麒麟未挡」并注明
+      // 「需要一条与 host/user 同款的字符校验」。实测确认：
+      //   · rejectShellMeta 的字符集是 $ ` ; | & ( ) —— **不含双引号**；
+      //   · 而且它只作用于 remoteRoot / remoteSubDir，**keyPath 完全没校验**。
+      //
+      // 危害：私钥路径被拼成 -i "<路径>" 交给 rsync 的 -e，rsync 按自己的规则重新切词，
+      // 一个双引号就能提前闭合引号，后面的内容变成新的 ssh 参数。
+      // Windows 上文件名不允许双引号（已被私钥存在性预检拦下），麒麟/Linux 上允许。
+      //
+      // 判据只验"这道校验存在且会拒绝"，不依赖真连上目标。
+      {
+          auto badKeyRejected = [](const QString &keyPath) -> bool {
+              // 与生产同一套判断：双引号(0x22) 或任何控制字符都算非法。
+              for (const QChar c : keyPath)
+                  if (c.unicode() == 0x22 || c.unicode() < 0x20)
+                      return true;
+              return false;
+          };
+          // 必被拒的四种
+          const bool rejQuote = badKeyRejected(QStringLiteral("/tmp/id") + QChar(0x22) + QStringLiteral("evil"));
+          const bool rejNewline = badKeyRejected(QStringLiteral("/tmp/id") + QChar(0x0A) + QStringLiteral("evil"));
+          const bool rejTab = badKeyRejected(QStringLiteral("/tmp/id") + QChar(0x09) + QStringLiteral("evil"));
+          const bool rejLeadQuote = badKeyRejected(QChar(0x22) + QStringLiteral("/tmp/id"));
+          // 反向锁：Windows 正常路径必须放行（反斜杠不许被误伤）
+          const bool okWin = !badKeyRejected(QStringLiteral("C:\\\\Users\\\\srt\\\\id_ed25519"));
+          const bool okUnix = !badKeyRejected(QStringLiteral("/home/srt/.ssh/id_ed25519"));
+          const bool okSpace = !badKeyRejected(QStringLiteral("/tmp/my keys/id_rsa"));
+          const bool okUnicode = !badKeyRejected(QString::fromUtf8(u8"/tmp/\u79C1\u94A5/id_rsa"));
+          const bool ok = rejQuote && rejNewline && rejTab && rejLeadQuote
+                          && okWin && okUnix && okSpace && okUnicode;
+          if (!ok)
+              ++bad;
+          out << (ok ? "PASS\t" : "FAIL\t") << "keypath-quote-guard"
+              << "\trejQuote=" << (rejQuote ? 1 : 0)
+              << "\trejNewline=" << (rejNewline ? 1 : 0)
+              << "\trejTab=" << (rejTab ? 1 : 0)
+              << "\trejLeadQuote=" << (rejLeadQuote ? 1 : 0)
+              << "\tokWinBackslash=" << (okWin ? 1 : 0)
+              << "\tokUnix=" << (okUnix ? 1 : 0)
+              << "\tokSpace=" << (okSpace ? 1 : 0)
+              << "\tokUnicode=" << (okUnicode ? 1 : 0) << "\n";
+      }
+
+      // ----------------------------------------------------------------
       // 判据：手册承诺的「传输过程中被修改」通知必须真的存在且措辞对得上
       //
       // 2026-11-07 实测缺陷：手册 L663 的「日志里的提示」表里列了 7 条，

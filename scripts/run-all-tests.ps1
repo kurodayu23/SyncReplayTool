@@ -300,7 +300,16 @@ if (-not $dockerOk) {
 } else {
     docker rm -f $Container 2>&1 | Out-Null
     docker run -d --name $Container -p "${E2ePort}:22" kylin-v11-sshd:latest 2>&1 | Out-Null
-    Start-Sleep -Seconds 8
+    # **不能死等固定秒数**（2026-11-07 实测踩到）：原来写 Start-Sleep -Seconds 8，
+    # 机器一忙 sshd 还没起来就开始连 → ssh 报「连接被拒」，真机同步段误判 FAIL，
+    # 而实际手动换端口重跑一次就 PASS。改成轮询到 sshd 真正应答为止（最多 40 秒）。
+    $sshReady = $false
+    for ($try = 0; $try -lt 20; $try++) {
+        Start-Sleep -Seconds 2
+        docker exec $Container sh -c "pgrep -x sshd" 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { $sshReady = $true; break }
+    }
+    if (-not $sshReady) { Write-Host "  警告：容器里的 sshd 40 秒内没起来，继续试（可能仍会失败）" -ForegroundColor Yellow }
     # 容器里的 sshd 默认没起，需要手动拉起；用分号串，别用 || （PS 5.1 会解析它）
     $inner = "echo '$($E2eUser):$($E2ePass)' | chpasswd; mkdir -p /run/sshd; /usr/sbin/sshd -p 22; sleep 1; mkdir -p /home/$($E2eUser)/srt-in; chown -R $($E2eUser):$($E2eUser) /home/$($E2eUser)/srt-in"
     docker exec $Container sh -c $inner | Out-Null
@@ -312,7 +321,10 @@ if (-not $dockerOk) {
     $env:SRT_SC_REMOTE = "/home/$E2eUser/srt-in"
     cmd /c "`"$Exe`" --selfcheck-secrets 2 > `"$logs\selfcheck-secrets.txt`" 2>&1"
     $rc = $LASTEXITCODE
-    $tail = (Get-Content (Join-Path $logs 'selfcheck-secrets.txt') -Tail 3) -join ' | '
+    # **必须指定 -Encoding UTF8**（2026-11-07 实测）：cmd 重定向出来的是 UTF-8，
+    # 而 PS 5.1 的 Get-Content 默认按 ANSI(GBK) 读 → 摘要里的失败原因全是乱码
+    # （实测看到「璇峰湪鏈満 ping 鐩爣 IP」这种），等于把 FAIL 的说明擦了。
+    $tail = (Get-Content (Join-Path $logs 'selfcheck-secrets.txt') -Encoding UTF8 -Tail 3) -join ' | '
     if ($rc -eq 0 -and $tail -match 'SECRETS_ALL_CLEAN') { Record '真机同步' 'PASS' '2 轮真实传输成功且无明文口令残留' }
     else { Record '真机同步' 'FAIL' $tail }
     Remove-Item Env:SRT_SC_HOST, Env:SRT_SC_PORT, Env:SRT_SC_USER, Env:SRT_SC_PASS, Env:SRT_SC_REMOTE -ErrorAction SilentlyContinue

@@ -3395,6 +3395,39 @@ void RsyncRunner::start(const TargetConfig &target,
     if (reject(target.remoteRoot) || rejectGlob(target.remoteRoot) || rejectShellMeta(target.remoteRoot))
         return;
 
+    // ---- 私钥路径里的双引号必须挡住（手册《已知限制与未验证项》第 17 条）----
+    //
+    // 私钥路径会被拼成 -i "<路径>" 交给 rsync 的 -e，而 **rsync 按自己的规则
+    // 重新切词**：路径里一个双引号就能提前闭合引号，后面的内容被当成新的 ssh 参数
+    // （实测过：产品自己的 -o StrictHostKeyChecking=no 被当成要 stat 的文件名）。
+    //
+    // Windows：文件名不允许双引号，这种路径不可能存在，已被上面的私钥存在性预检拦下。
+    // 麒麟/Linux：文件名**允许**双引号 ⇒ 必须在这里显式拦，否则是可构造的参数改写。
+    //
+    // 只挡双引号(0x22)和控制字符，**不挡反斜杠**：Windows 路径本来就长成 C:\Users\...。
+    if (target.useKey()) {
+        bool badKey = false;
+        for (const QChar c : target.keyPath) {
+            if (c.unicode() == 0x22 || c.unicode() < 0x20) {
+                badKey = true;
+                break;
+            }
+        }
+        if (badKey) {
+            emit logText(QString::fromUtf8(u8"\u79C1\u94A5\u8DEF\u5F84\u91CC\u4E0D\u80FD\u542B\u53CC\u5F15\u53F7\u6216\u63A7\u5236\u5B57\u7B26\u3002"));
+            emit logText(QString::fromUtf8(
+                u8"\u8FD9\u6761\u8DEF\u5F84\u4F1A\u88AB\u62FC\u6210 -i \"<\u8DEF\u5F84>\" \u4EA4\u7ED9 rsync\uFF0C"
+                u8"\u800C rsync \u4F1A\u6309\u81EA\u5DF1\u7684\u89C4\u5219\u91CD\u65B0\u5207\u8BCD\uFF1A"
+                u8"\u4E00\u4E2A\u53CC\u5F15\u53F7\u5C31\u80FD\u63D0\u524D\u95ED\u5408\u5F15\u53F7\uFF0C"
+                u8"\u540E\u9762\u7684\u5185\u5BB9\u4F1A\u88AB\u5F53\u6210\u65B0\u7684 ssh \u53C2\u6570\u3002"));
+            emit logText(QString::fromUtf8(
+                u8"\u8BF7\u628A\u79C1\u94A5\u6539\u540D\u6210\u4E0D\u542B\u53CC\u5F15\u53F7\u7684\u6587\u4EF6\u540D"
+                u8"\uFF08\u4F8B\u5982 id_ed25519\uFF09\uFF0C\u6216\u8005\u5728\u300C\u8BBE\u7F6E\u300D\u91CC\u91CD\u65B0\u9009\u4E00\u6B21\u79C1\u94A5\u3002"));
+            emit allFinished(false);
+            return;
+        }
+    }
+
     // ~user/xxx 形式明确拒绝。remoteDir() 对这种输入返回 "\x01~user\x01" 哨兵。
     // 放行的话 ssh 会在远端 home 下建出一个字面名叫 "~user" 的垃圾目录，
     // rsync 再报一句 "hostname is not the same as the transfer hostname"，
