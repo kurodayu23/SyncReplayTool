@@ -3790,6 +3790,60 @@ int runSelfCheck()
       }
 
       // ----------------------------------------------------------------
+      // 判据：扫描窗口内点按钮 = 取消，不许被静默吞掉、也不许开传
+      //
+      // 2026-11-07 审查实测缺陷：startOrCancel() 只把 m_busy 当取消，
+      // 而 m_busy 只在**真开传**时置位 —— 扫描期是 m_scanning 为真、m_busy 为假。
+      // 于是扫描期那一按会落到 startSyncInternal()：
+      //   · 扫描还没结束 → 被 m_scanning 静默吞掉，界面毫无反馈
+      //   · 扫描刚结束、同步已起来 → 变成取消，把用户自己的同步取消掉
+      // 两次点击界面长得一模一样，后果却相反。10 万文件扫描约 30 秒，窗口够大。
+      //
+      // 这条判据用"连点两次"稳定命中该分支：scanFiles() 里 m_scanning = true 是
+      // **同步**置位的，所以第二次 startSyncForTest() 一定落在扫描窗口内。
+      {
+          QTemporaryDir sandbox;
+          const QString root = sandbox.path();
+          { QFile f(root + QStringLiteral("/a.spe")); f.open(QIODevice::WriteOnly); f.write("a"); }
+
+          SyncPanel panel;
+          panel.setLocalRootForTest(root);
+          panel.setRulesForTest(QStringList() << QStringLiteral("spe"));
+          panel.setHostForTest(QStringLiteral("127.0.0.1"));
+          panel.setPortForTest(1);
+          panel.setUserForTest(QStringLiteral("srtprobe"));
+
+          // 第一击：触发重扫（m_scanning 同步置 true，m_syncRequested 置 true）
+          panel.startSyncForTest();
+          const bool scanningNow = panel.isScanningForTest();
+
+          // 第二击：落在扫描窗口内 —— 必须是"取消"
+          panel.startSyncForTest();
+          const QString statusAfter = panel.statusTextForTest();
+          const bool canceled = statusAfter.contains(QString::fromUtf8(u8"\u53D6\u6D88"));
+
+          // 等一会，确认没有真的开传（取消就该停在这儿）
+          {
+              QElapsedTimer t; t.start();
+              while (t.elapsed() < 1200) {
+                  QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                  QThread::msleep(5);
+              }
+          }
+          const bool notBusy = !panel.isSyncBusyForTest();
+          const int rounds = panel.syncFinishedCountForTest();
+
+          const bool ok = scanningNow && canceled && notBusy && (rounds == 0);
+          if (!ok)
+              ++bad;
+          out << (ok ? "PASS\t" : "FAIL\t") << "scan-window-cancel"
+              << "\tscannedAtSecondClick=" << (scanningNow ? 1 : 0)
+              << "\tcanceled=" << (canceled ? 1 : 0)
+              << "\tnotBusy=" << (notBusy ? 1 : 0)
+              << "\trounds=" << rounds << "\n";
+      }
+
+      // ----------------------------------------------------------------
       // 判据：重扫**不许**把用户取消勾选的文件重新勾上（越权传输）
       //
       // 2026-11-07 审查实测缺陷（D6 的连带）：客户勾 1 个、取消 1 个，点「开始同步」，
