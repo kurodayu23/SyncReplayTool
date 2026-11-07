@@ -1875,6 +1875,11 @@ QString SyncPanel::currentScanKey() const
 void SyncPanel::scanFiles()
 {
     if (m_localRoot.isEmpty()) {
+        // **必须清掉"扫完就开同步"这个待办**：这条分支不调 onScanFinished，
+        // 标志会留到下一次扫描完成时才被消费 —— 于是客户补上目录、只点一次「刷新」，
+        // 程序就自己开始同步了（2026-11-07 审查实测 SPONTANEOUS_SYNC=1）。
+        // 用户没点「开始同步」，就不该有同步在跑。
+        m_syncRequested = false;
         appendLogLine(QStringLiteral("WARN"),
                       QObject::tr("\xE6\x9C\xAC\xE6\x9C\xBA\xE6\x96\x87\xE4\xBB\xB6\xE7\x9B\xAE\xE5\xBD\x95\xE4\xB8\xBA\xE7\xA9\xBA\xE3\x80\x82"), 3);
         // 同 rootMissing：目录都没设，界面不该停在「就绪」让人以为一切正常。
@@ -2385,6 +2390,8 @@ void SyncPanel::startSyncInternal(bool fromFreshScan)
                 if (!keepSet.contains(r))
                     m_pendingUnchecked.insert(cur.at(r).relativePath);
         }
+        // 扫描期按钮显示「取消」：否则客户看到「开始同步」以为还没开始，再点一下就被当取消。
+        m_startBtn->setText(T(kCancelSync));
         m_syncRequested = true;
         scanFiles();
         return;
@@ -2470,6 +2477,21 @@ void SyncPanel::startOrCancel()
     // 原来写成 `m_busy && m_runner->isRunning()`：组与组之间 m_proc 会短暂为空，
     // 那一瞬间点一下就会**再启动一次同步**，而界面上正显示着上一次在跑。
     // 按钮现在传输中一直可点（它就是取消按钮），这个窗口用户完全够得着。
+    // **扫描窗口也是"取消"，不是"再点一次开始"**。
+    //
+    // 2026-11-07 审查实测：手动点「开始同步」现在会先重扫（D6 的修法），
+    // 而扫描 10 万文件约需 30 秒。这期间 m_busy 还是 false（只有真开传才置位），
+    // 于是这一按会落到下面的 startSyncInternal()：
+    //   · 扫描还没结束 → 被 m_scanning 静默吞掉，界面毫无反馈；
+    //   · 扫描刚结束、同步已起来 → 变成取消，把用户自己的同步取消掉。
+    // 两次点击界面长得一模一样，后果却相反。
+    if (m_scanning && m_syncRequested) {
+        m_syncRequested = false;
+        m_startBtn->setText(T(kStartSync));
+        setStatusLine(T(kStatusCanceled), 2);
+        appendLogLine(QStringLiteral("WARN"), QObject::tr("\xE7\x94\xA8\xE6\x88\xB7\xE5\x8F\x96\xE6\xB6\x88\xEF\xBC\x8C\xE5\xB7\xB2\xE5\x81\x9C\xE6\xAD\xA2\xE6\x9C\xAC\xE6\xAC\xA1\xE5\x90\x8C\xE6\xAD\xA5"), 3);
+        return;
+    }
     if (m_busy) {
         if (m_runner->isRunning())
             m_runner->cancel();
