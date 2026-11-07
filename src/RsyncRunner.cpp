@@ -1694,6 +1694,67 @@ QString specialAdvice(const QString &raw)
         u8"\u65B0\u590D\u5236\u7684\u6587\u4EF6\u4F1A\u88AB\u91CD\u65B0\u8BC4\u4F30\u3002");
 }
 
+// ---- 「传输过程中被修改」检测 -------------------------------------------
+//
+// 手册 L663 的「日志里的提示」表里承诺了这条：
+//   【注意】以下文件在传输过程中被修改：xxx
+//   → 这些文件在这一轮传输期间被改过（采集程序还在写、或有人手动改了）
+//   → 下一轮会自动按内容重新比对，有差异就补传。如果这类文件是采集程序
+//     正在写的，先把采集停下来再同步。
+//
+// 2026-11-07 实测发现：手册写了、代码里**一个字都没有**。
+// 客户对着手册等这条提示永远等不到，也就不知道他传过去的是"写到一半"的快照。
+// 这一条正是本产品一直在防的「静默拿到不完整数据」，所以补上实现。
+void RsyncRunner::collectModifiedDuringTransfer()
+{
+    if (m_preStat.isEmpty())
+        return;
+    const QDir base(m_localRoot);
+    for (auto it = m_preStat.constBegin(); it != m_preStat.constEnd(); ++it) {
+        const QFileInfo fi(base.absoluteFilePath(it.key()));
+        bool changed = false;
+        if (!fi.exists())
+            changed = true;          // 传输期间被删掉，也算"改过"
+        else
+            changed = (fi.size() != it.value().first
+                       || fi.lastModified().toMSecsSinceEpoch() != it.value().second);
+        if (changed && !m_modifiedDuringTransfer.contains(it.key()))
+            m_modifiedDuringTransfer.append(it.key());
+    }
+    m_preStat.clear();
+}
+
+QString RsyncRunner::modifiedNoticeForTest(const QStringList &names)
+{
+    if (names.isEmpty())
+        return QString();
+    // 文件名太多时只点前 10 个，剩下的用数量带过 —— 日志抽屉不是给人读长列表的。
+    QString joined = names.mid(0, 10).join(QString::fromUtf8(u8"\u3001"));
+    if (names.size() > 10)
+        joined += QString::fromUtf8(u8" \u7B49 %1 \u4E2A").arg(names.size());
+    return QString::fromUtf8(u8"\u3010\u6CE8\u610F\u3011\u4EE5\u4E0B\u6587\u4EF6\u5728\u4F20\u8F93\u8FC7\u7A0B\u4E2D\u88AB\u4FEE\u6539\uFF1A%1").arg(joined);
+}
+
+QString RsyncRunner::modifiedAdviceText()
+{
+    return QString::fromUtf8(
+        u8"\u8FD9\u4E9B\u6587\u4EF6\u5728\u8FD9\u4E00\u8F6E\u4F20\u8F93\u671F\u95F4\u88AB\u6539\u8FC7\uFF08\u91C7\u96C6\u7A0B\u5E8F\u8FD8\u5728\u5199\u3001\u6216\u6709\u4EBA\u624B\u52A8\u6539\u4E86\uFF09"
+        u8"\u3002\u4E0B\u4E00\u8F6E\u4F1A\u81EA\u52A8\u6309\u5185\u5BB9\u91CD\u65B0\u6BD4\u5BF9\uFF0C\u6709\u5DEE\u5F02\u5C31\u8865\u4F20\uFF1B"
+        u8"\u5982\u679C\u8FD9\u4E9B\u6587\u4EF6\u662F\u91C7\u96C6\u7A0B\u5E8F\u6B63\u5728\u5199\u7684\uFF0C"
+        u8"\u8BF7\u5148\u628A\u91C7\u96C6\u505C\u4E0B\u6765\u518D\u540C\u6B65\u4E00\u6B21\uFF0C"
+        u8"\u5426\u5219\u8FD9\u4E00\u6B21\u4F20\u8FC7\u53BB\u7684\u53EF\u80FD\u662F\u5199\u5230\u4E00\u534A\u7684\u5FEB\u7167\u3002");
+}
+
+void RsyncRunner::flushModifiedDuringTransfer()
+{
+    if (m_modifiedDuringTransfer.isEmpty())
+        return;
+    const QStringList names = m_modifiedDuringTransfer;
+    m_modifiedDuringTransfer.clear();
+    emit logText(modifiedNoticeForTest(names));
+    emit logText(modifiedAdviceText());
+}
+
 // 公开静态：接出上面那个专用建议函数，让自检判据能验到"换了建议"本身。
 QString RsyncRunner::specialAdviceFor(const QString &raw)
 {
@@ -3519,6 +3580,10 @@ void RsyncRunner::ensureRemoteDirs()
     if (m_cancelRequested) {
         cleanupSecrets();
         m_roundActive = false;
+        // 报手册 L663 承诺的「传输过程中被修改」——必须在 allFinished 之前，
+        // 否则上层已经收尾，这条提示会排在"同步完成"之后，客户以为它不重要。
+        collectModifiedDuringTransfer();
+        flushModifiedDuringTransfer();
         emit allFinished(!m_failed && !m_cancelRequested);
         return;
     }
@@ -3928,6 +3993,10 @@ void RsyncRunner::launchNext()
             emit logText(QString::fromUtf8(u8"\u52FE\u4E86\u300C\u4EC5\u540C\u6B65\u65B0\u589E\u6587\u4EF6\u300D\uFF1A\u672C\u6B21\u6709 %1 \u4E2A\u6587\u4EF6\u6CA1\u6709\u4F20\u8F93\uFF0C\u56E0\u4E3A\u8FDC\u7AEF\u5DF2\u7ECF\u5B58\u5728\u540C\u540D\u6587\u4EF6\uFF0C\u8FDC\u7AEF\u7684\u5185\u5BB9\u4FDD\u6301\u539F\u6837\u3001\u4E0D\u4F1A\u88AB\u8986\u76D6\u3002\u5982\u679C\u4F60\u60F3\u8986\u76D6\u8FDC\u7AEF\u540C\u540D\u6587\u4EF6\uFF0C\u53D6\u6D88\u8FD9\u4E2A\u52FE\u9009\u518D\u540C\u6B65\u4E00\u6B21\u3002")
                          .arg(m_total - m_done));
         m_roundActive = false;
+        // 报手册 L663 承诺的「传输过程中被修改」——必须在 allFinished 之前，
+        // 否则上层已经收尾，这条提示会排在"同步完成"之后，客户以为它不重要。
+        collectModifiedDuringTransfer();
+        flushModifiedDuringTransfer();
         emit allFinished(!m_failed && !m_cancelRequested);
         return;
     }
@@ -3950,6 +4019,17 @@ void RsyncRunner::launchNext()
     // 本组总字节：看门狗的校验阶段预算要按它放大（见 watchdogMs 注释）。
     // 只在这里算一次，每一行 stdout/stderr 都会重置看门狗，不能每次重算。
     m_currentGroupBytes = 0;
+    // 记下本组每个文件传输前的大小与 mtime —— 分组结束后比对，
+    // 用来报手册 L663 承诺的那条「传输过程中被修改」。
+    m_preStat.clear();
+    {
+        const QDir base(m_localRoot);
+        for (const QString &f : m_currentGroupFiles) {
+            const QFileInfo fi(base.absoluteFilePath(f));
+            if (fi.isFile())
+                m_preStat.insert(f, qMakePair(fi.size(), fi.lastModified().toMSecsSinceEpoch()));
+        }
+    }
     for (const QString &f : m_currentGroupFiles) {
         const QFileInfo fi(QDir(m_localRoot).absoluteFilePath(f));
         if (fi.isFile())

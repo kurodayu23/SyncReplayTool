@@ -359,6 +359,10 @@ public:
     // 空串 = 该用本层的通用建议。同样暴露出来，是为了让自检判据能验到
     // "换了建议"这件事本身，而不只是验到"换了个层名"。
     static QString specialAdviceFor(const QString &raw);
+    // 手册 L663 承诺的「传输过程中被修改」通知。抽成静态函数是为了让判据
+    // 能验到**客户实际看到的那段文字**，而不是验一条手抄的副本。
+    static QString modifiedNoticeForTest(const QStringList &names);
+    static QString modifiedAdviceText();
     // 判据用：把分类结果与短结论也接出来，避免判据只差一层拿不到。
     static int     classifyLayerForTest(const QString &raw);
     // 判据用：返回**客户实际会看到的那段建议**（含 reportAttribution 里的覆写）。
@@ -552,6 +556,11 @@ private:
     QStringList     m_currentGroupFiles;
     // 本组文件总大小，供 watchdogMs() 算校验阶段的时间预算。只在本组跑的时候有意义。
     qint64          m_currentGroupBytes = 0;
+    // 「传输过程中被修改」检测（手册 L663 承诺的那条提示）：
+    // 分组启动时记下每个文件的 (大小, mtime)，分组结束后重新 stat 比对。
+    // 采集程序边写边同步时，传过去的可能是"写到一半"的快照，必须告诉客户。
+    QHash<QString, QPair<qint64, qint64>> m_preStat;
+    QStringList     m_modifiedDuringTransfer;
     // 「仅同步新增文件」勾选项的值。
     //
     // 这个勾选框以前只被创建、从来没被读过：同步一律走 --checksum 全量比对，
@@ -577,6 +586,8 @@ private:
     // 用 QStringList 的线性查找，一组 5000 个文件就是 2500 万次字符串比较。
     // 列表本身保留，onFinished 还要按顺序遍历。
     QSet<QString>   m_currentGroupSet;
+    void collectModifiedDuringTransfer();
+    void flushModifiedDuringTransfer();
     QProcess      *m_proc = nullptr;
     // rsync 整棵进程树所在的 Windows Job Object 句柄（D11）。
     //
