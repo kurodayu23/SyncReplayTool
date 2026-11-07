@@ -329,9 +329,27 @@ int runSelfCheck()
     // SyncReplayTool.ini（改 onlyNewFiles、写工具规则）。
     // sandbox 必须在**任何** ConfigStore/SyncPanel 之前建好，所以放在函数最前面。
     QTemporaryDir selfCheckSandbox;
+    // **临时目录不可用就立刻停，一条判据都不跑。**
+    //
+    // 2026-11-07 实测事故：把 TEMP 指到一个不存在的路径后跑自检，
+    // QTemporaryDir 全部创建失败、path() 返回**空串**，于是判据里
+    // `root + "/usable"` 退化成 `/usable` —— Windows 上解析成**盘根**，
+    // 结果一整批夹具目录（usable / blocked / gbk / legacy / nonutf8 / good /
+    // bslash / somebody-elses-folder / srt stub dir / srt_askpass_* / *.dat）
+    // 全被撒到了 D:\ 根目录下。客户机上 TEMP 不可写（低完整性、只读 %TEMP%、
+    // 磁盘满）时同样会发生，而客户根本不知道这些文件夹从哪来。
+    //
+    // 正确行为：明确告诉他"临时目录用不了"，退出码非 0，不留下任何垃圾。
+    if (!selfCheckSandbox.isValid()) {
+        out << "FAIL\tselfcheck-tempdir\tno-temp-dir\n";
+        out << QString::fromUtf8(u8"\u81EA\u68C0\u65E0\u6CD5\u8FD0\u884C\uFF1A\u5EFA\u4E0D\u51FA\u4E34\u65F6\u76EE\u5F55\u3002\n");
+        out << QString::fromUtf8(u8"\u8BF7\u68C0\u67E5\u73AF\u5883\u53D8\u91CF TEMP / TMP \u6307\u5411\u7684\u76EE\u5F55\u662F\u5426\u5B58\u5728\u3001\u662F\u5426\u53EF\u5199\uFF08\u76D8\u662F\u5426\u5DF2\u6EE1\u3001\u662F\u5426\u88AB\u5B89\u5168\u8F6F\u4EF6\u9501\u4F4F\uFF09\u3002\n");
+        out << QString::fromUtf8(u8"\u4FEE\u597D\u4E4B\u540E\u91CD\u8DD1\u5373\u53EF\uFF1B\u672C\u6B21\u6CA1\u6709\u4FDD\u7559\u4EFB\u4F55\u4E34\u65F6\u6587\u4EF6\u3002\n");
+        out.flush();
+        return 3;
+    }
     const QByteArray oldCfgDir = qgetenv("SRT_CONFIG_DIR");
-    if (selfCheckSandbox.isValid())
-        qputenv("SRT_CONFIG_DIR", selfCheckSandbox.path().toLocal8Bit());
+    qputenv("SRT_CONFIG_DIR", selfCheckSandbox.path().toLocal8Bit());
 
     for (const LayerCase &c : kLayerCases) {
         const int got = RsyncRunner::layerOf(QString::fromUtf8(c.raw));
