@@ -100,7 +100,10 @@ $mentionsSpace = $txt.Contains('No space left on device')
 # attribution layer names, built from code points so this .ps1 stays ASCII
 $recvLayer  = -join ([char[]](0x63A5, 0x6536, 0x7AEF))          # receiver
 $localLayer = -join ([char[]](0x672C, 0x673A, 0x7AEF))          # local machine
-$netLayer   = -join ([char[]](0x7F51, 0x7EDC))                  # network
+# The network layer's NAME, not the two characters "network": the product's
+# own sentence "this is not a network problem" also contains them, so a bare
+# substring test would blame the network for a correct attribution.
+$netLayer   = -join ([char[]](0x7F51, 0x7EDC, 0x94FE, 0x8DEF, 0x95EE, 0x9898))
 $doneWord   = -join ([char[]](0x540C, 0x6B65, 0x5B8C, 0x6210))  # sync completed
 Say ("VERDICT round reported as failed = {0}" -f $failed)
 Say ("VERDICT mentions 'No space left on device' = {0}" -f $mentionsSpace)

@@ -1,4 +1,4 @@
-﻿# concurrent-probe.ps1 - two clients pushing into the SAME receiver directory.
+# concurrent-probe.ps1 - two clients pushing into the SAME receiver directory.
 #
 # This is a normal field setup: a workstation and a PC both sync their data
 # into one folder on the server.
@@ -144,8 +144,9 @@ Say ("VERDICT clientA data intact = {0}" -f ($remoteSize -eq (Get-Item (Join-Pat
 $markers = @($seen.Keys)
 Say ("DEBUG seen={0} markers={1} first=[{2}]" -f $seen.Count, $markers.Count, (@($markers)[0]))
 
-# 作用域 = 主机名（下划线化、截 24）+ '-' + 配置目录路径的 md5 前 8 位。
-# 这里按产品同样的公式算一遍（QDir::absolutePath 在 Windows 上出的是正斜杠）。
+# Scope = hostname (underscored, 24 chars max) + '-' + first 8 hex of the
+# md5 of the config dir path. Computed with the same formula the product
+# uses (QDir::absolutePath yields forward slashes on Windows).
 $hostEnv = $env:COMPUTERNAME
 if (-not $hostEnv) { $hostEnv = [System.Environment]::MachineName }
 $hostRaw = $hostEnv.ToLower()
@@ -189,7 +190,7 @@ if ($txtC.Contains($swapped)) {
 
 # ================= phase 3: stale marker cleanup is scoped =================
 Say '=========== PHASE 3: stale marker cleanup only touches our own ==========='
-# 作用域在上一段已经按产品公式算好了。
+# The scope was computed with the product's formula in the previous block.
 Say ("scope for clientA = {0}" -f $scopeA)
 $scopeHit = @($markers | Where-Object { $_ -like ".srt-verify-$scopeA-*" })
 Say ("VERDICT the marker the product wrote carries that scope = {0}" -f ($scopeHit.Count -ge 1))
