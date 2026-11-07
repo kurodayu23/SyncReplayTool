@@ -4211,6 +4211,57 @@ int runSelfCheck()
       }
 
       // ----------------------------------------------------------------
+      // 判据：远端**目录名**太长时，不许说成「文件名太长」
+      //
+      // 2026-11-07 实测（remoteSubDir 填了 300 字节的目录名）：
+      //   ERR  rsync: ERROR: cannot stat destination "/data/rx/.../aaa…": File name too long (36)
+      //   ERR  rsync error: errors selecting input/output files, dirs (code 3) [Receiver=3.1.1]
+      //这句话也含 "File name too long"，于是被 isFileNameTooLong 抢走，客户看到
+      //「把文件名缩短到 80 个中文字以内」—— **改文件名根本没用**，
+      //要改的是「设置」里的远端保存目录或规则里的子目录。
+      //
+      // 区分靠 rsync 自己的侧标记：
+      //   [sender]   + link_stat + File name too long  → 本地文件名太长
+      //   [Receiver] + cannot stat destination          → 远端目录名太长
+      {
+          const QString remoteErr = QStringLiteral(
+              "rsync: ERROR: cannot stat destination : File name too long (36)\n"
+              "rsync error: errors selecting input/output files, dirs (code 3) "
+              "at main.c(652) [Receiver=3.1.1]");
+          const QString localErr = QStringLiteral(
+              "rsync: [sender] link_stat : File name too long (91)\n"
+              "rsync error: some files/attrs were not transferred (code 23) [sender=3.5.1]");
+          const bool remoteDetected = RsyncRunner::isRemotePathTooLongForTest(remoteErr);
+          const bool localNotRemote = !RsyncRunner::isRemotePathTooLongForTest(localErr);
+          // 短结论必须点到"远端目录"，且不许说"文件名"
+          const QString rs = RsyncRunner::shortConclusionForTest(remoteErr);
+          const bool saysRemoteDir = rs.contains(QString::fromUtf8(u8"\u8FDC\u7AEF\u76EE\u5F55"));
+          const bool notFileName = !rs.contains(QString::fromUtf8(u8"\u6587\u4EF6\u540D\u592A\u957F"));
+          // 建议必须指向"设置里的远端保存目录 / 子目录"，而不是文件名
+          const QString ra = RsyncRunner::adviceForTest(remoteErr);
+          const bool advPointsSettings = ra.contains(QString::fromUtf8(u8"\u8BBE\u7F6E"));
+          const bool advMentionsSubdir = ra.contains(QString::fromUtf8(u8"\u5B50\u76EE\u5F55"));
+          const bool advSaysNameNoUse = ra.contains(QString::fromUtf8(u8"\u6539\u6587\u4EF6\u540D\u6CA1\u7528"));
+          // 反向锁：本地文件名过长那一条仍然要走"文件名"分支
+          const QString ls = RsyncRunner::shortConclusionForTest(localErr);
+          const bool localStillFileName = ls.contains(QString::fromUtf8(u8"\u6587\u4EF6\u540D\u592A\u957F"));
+          const bool ok = remoteDetected && localNotRemote && saysRemoteDir && notFileName
+                          && advPointsSettings && advMentionsSubdir && advSaysNameNoUse
+                          && localStillFileName;
+          if (!ok)
+              ++bad;
+          out << (ok ? "PASS\t" : "FAIL\t") << "remote-path-too-long-message"
+              << "\tremoteDetected=" << (remoteDetected ? 1 : 0)
+              << "\tlocalNotRemote=" << (localNotRemote ? 1 : 0)
+              << "\tsaysRemoteDir=" << (saysRemoteDir ? 1 : 0)
+              << "\tnotFileName=" << (notFileName ? 1 : 0)
+              << "\tadvPointsSettings=" << (advPointsSettings ? 1 : 0)
+              << "\tadvMentionsSubdir=" << (advMentionsSubdir ? 1 : 0)
+              << "\tadvSaysNameNoUse=" << (advSaysNameNoUse ? 1 : 0)
+              << "\tlocalStillFileName=" << (localStillFileName ? 1 : 0) << "\n";
+      }
+
+      // ----------------------------------------------------------------
       // 判据：私钥带口令时必须说「带口令」，不能只说「本机环境有问题」
       //
       // 2026-11-07 实测：客户用 ssh-keygen -N "口令" 生成的私钥（很多单位强制要求）

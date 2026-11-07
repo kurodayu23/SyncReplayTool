@@ -801,6 +801,30 @@ static bool isPassphraseProtectedKey(const QString &text)
 // 归到本机层是**对的** —— 报错前缀是 [sender]，失败发生在客户自己的机器上
 // （Windows 允许 255 个**字符**，Linux 只允许 255 **字节**，1 个中文字占 3 字节）。
 // 错的是建议：客户照着查一圈什么也查不到，而文件永远传不过去。
+// 远端**目录路径**太长（不是文件名）：2026-11-07 实测（remoteSubDir 填了 300 字节的目录名）
+//   ERR  rsync: ERROR: cannot stat destination "/data/rx/longsub/aaa…": File name too long (36)
+//   ERR  rsync error: errors selecting input/output files, dirs (code 3) [Receiver=3.1.1]
+// 这一句也含 "File name too long"，于是被上面的 isFileNameTooLong 抢走，
+// 客户看到的是「把文件名缩短到 80 个中文字以内」——**改文件名根本没用**，
+// 要改的是「设置」里那条规则的远端子目录（或目标目录）。
+//
+// 区分靠 rsync 自己的侧标记：
+//   本地文件名过长：[sender] … link_stat … File name too long
+//   远端路径过长  ：[Receiver] … cannot stat destination … File name too long
+static bool isRemotePathTooLong(const QString &text)
+{
+    if (text.isEmpty())
+        return false;
+    if (!text.contains(QLatin1String("File name too long"), Qt::CaseInsensitive)
+        && !text.contains(QString::fromUtf8(u8"\u6587\u4EF6\u540D\u592A\u957F")))
+        return false;
+    // 远端侧的两个证词：cannot stat destination / [Receiver]。
+    if (text.contains(QLatin1String("cannot stat destination"), Qt::CaseInsensitive))
+        return true;
+    if (text.contains(QLatin1String("[Receiver]"), Qt::CaseInsensitive))
+        return true;
+    return false;
+}
 static bool isFileNameTooLong(const QString &text)
 {
     if (text.isEmpty())
@@ -1749,11 +1773,29 @@ void RsyncRunner::collectModifiedDuringTransfer()
     m_preStat.clear();
 }
 
+bool RsyncRunner::isRemotePathTooLongForTest(const QString &raw)
+{
+    return isRemotePathTooLong(raw);
+}
+
 bool RsyncRunner::isFileNameTooLongForTest(const QString &raw)
 {
     return isFileNameTooLong(raw);
 }
 
+QString RsyncRunner::remotePathTooLongAdviceText()
+{
+    return QString::fromUtf8(
+        u8"\u76EE\u6807\u7535\u8111\u4E0A\u8FD9\u4E2A\u76EE\u5F55\u7684\u540D\u5B57\u592A\u957F\uFF0C\u5EFA\u4E0D\u51FA\u6765\uFF1A"
+        u8"\u9E92\u9E9F/Linux \u7684\u6587\u4EF6\u7CFB\u7EDF\u9650\u5236\u5355\u4E2A\u540D\u5B57\u6700\u957F 255 \u4E2A\u5B57\u8282"
+        u8"\uFF08\u4E00\u4E2A\u4E2D\u6587\u5360 3 \u5B57\u8282\uFF0C\u5373 85 \u4E2A\u4E2D\u6587\uFF09\uFF0C"
+        u8"\u8D85\u8FC7\u5C31\u5EFA\u4E0D\u51FA\u6765\uFF0C\u6587\u4EF6\u4E00\u4E2A\u90FD\u4F20\u4E0D\u8FC7\u53BB\u3002"
+        u8"\u8FD9\u4E0D\u662F\u6587\u4EF6\u540D\u7684\u95EE\u9898\uFF0C\u6539\u6587\u4EF6\u540D\u6CA1\u7528\u3002"
+        u8"\u8BF7\u5230\u300C\u8BBE\u7F6E\u300D\u91CC\u770B\u4E24\u4E2A\u5730\u65B9\uFF1A"
+        u8"\u2460 \u300C\u8FDC\u7AEF\u4FDD\u5B58\u76EE\u5F55\u300D\u662F\u5426\u5206\u5F97\u592A\u6DF1\u3001\u6BCF\u4E00\u6BB5\u540D\u5B57\u662F\u5426\u592A\u957F\uFF1B"
+        u8"\u2461 \u5404\u6761\u540C\u6B65\u89C4\u5219\u91CC\u7684\u300C\u5B50\u76EE\u5F55\u300D\u662F\u5426\u592A\u957F\u3002"
+        u8"\u628A\u8D85\u957F\u7684\u90A3\u4E00\u6BB5\u6539\u77ED\u5230 80 \u4E2A\u4E2D\u6587\u5B57\u4EE5\u5185\u518D\u8BD5\u3002");
+}
 QString RsyncRunner::modifiedNoticeForTest(const QStringList &names)
 {
     if (names.isEmpty())
@@ -1840,6 +1882,10 @@ int RsyncRunner::classifyLayerForTest(const QString &raw)
 // 判据里要挂 QSignalSpy 才能收，而且文案与层说明混在一起不好断言。
 QString RsyncRunner::shortConclusionFor(const QString &raw)
 {
+    // 远端目录路径太长要排在"文件名太长"之前：两句话都含 File name too long，
+    // 但处置完全不同（改远端子目录 vs 改文件名）。
+    if (isRemotePathTooLong(raw))
+        return QString::fromUtf8(u8"\u8FDC\u7AEF\u76EE\u5F55\u540D\u592A\u957F\uFF0C\u4F20\u4E0D\u8FC7\u53BB");
     if (isFileNameTooLong(raw))
         return QString::fromUtf8(u8"\u6709\u6587\u4EF6\u540D\u592A\u957F\uFF0C\u4F20\u4E0D\u8FC7\u53BB");
     if (isPassphraseProtectedKey(raw))
@@ -1860,6 +1906,8 @@ QString RsyncRunner::shortConclusionFor(const QString &raw)
 // 必须复刻**覆写优先**的顺序，否则判据验不到"口令私钥给了专项建议"这件事。
 QString RsyncRunner::adviceForTest(const QString &raw)
 {
+    if (isRemotePathTooLong(raw))
+        return remotePathTooLongAdviceText();
     if (isFileNameTooLong(raw))
         return fileNameTooLongAdviceText();
     if (isPassphraseProtectedKey(raw))
@@ -1874,12 +1922,15 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer, const QS
     const int layer = (forceLayer >= 0) ? forceLayer : classifyLayer(raw);
 
     QString advice = adviceOverride;
-      // 私钥带口令的处置**与层无关**：它是本机的钥匙问题，但本机层的通用建议
-      // 只说"私钥是否存在且可读"（这条情况下全都成立），查不出任何东西。
-      // 所以在层建议之前先覆写掉，并说明两条能照做的路。
-      // 文件名太长的处置与层无关：本机层通用建议只说"rsync/私钥/磁盘"，三条都不成立。
-      if (advice.isEmpty() && isFileNameTooLong(raw))
-          advice = fileNameTooLongAdviceText();
+      // 一组"与层无关"的专项处置：私钥带口令 / 本地文件名太长 / 远端目录名太长。
+      // 它们的共同点是：本机层（或接收端层）的通用建议对这几种情况**全都不成立**，
+      // 客户照着查一圈什么也查不到。
+      //
+      // 2026-11-07 教训（第三次踩）：这段原来是一串 if，而 adviceForTest 里另有一份，
+      // 我给其中一份加分支、忘了另一份 → 判据绿、客户看到的还是旧文案。
+      // 现在**只走 adviceForTest 这一个函数**，两边不可能再分叉。
+      if (advice.isEmpty())
+          advice = adviceForTest(raw);
     if (advice.isEmpty())
         // 「接收端没装 rsync」这句专项建议只对接收端层成立。
         //
