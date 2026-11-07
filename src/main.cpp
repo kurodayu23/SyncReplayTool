@@ -4155,6 +4155,44 @@ int runSelfCheck()
       }
 
       // ----------------------------------------------------------------
+      // 判据：文件名太长时必须说「名字太长」，不能只说「本机环境有问题」
+      //
+      // 2026-11-07 实测（《已知限制》第 21 条）：Windows 发送端放一个 96 个中文字的名字
+      // （292 字节），同步到麒麟。rsync 原文：
+      //   rsync: [sender] link_stat ".../shushu.spe" failed: File name too long (91)
+      //   rsync error: some files/attrs were not transferred ... (code 23)
+      // 产品原来给的是：
+      //   本机环境有问题
+      //   请检查本机：rsync 和 ssh 客户端是否齐全、私钥文件是否存在且可读、本机磁盘是否有空间。
+      // 三条一条都不对（rsync/ssh 都在、私钥在、磁盘有空），而文件永远传不过去。
+      //
+      // 归到本机层是对的（[sender] 侧失败），错的是建议 —— 所以这里验"结论点到名字长度"。
+      {
+          QString longErr = QStringLiteral("rsync: [sender] link_stat : File name too long (91) at main.c");
+          longErr += QStringLiteral("\nrsync error: some files/attrs were not transferred");
+          const bool detected = RsyncRunner::isFileNameTooLongForTest(longErr);
+          const QString shortText = RsyncRunner::shortConclusionForTest(longErr);
+          const QString advice = RsyncRunner::adviceForTest(longErr);
+          const bool saysLong = shortText.contains(QString::fromUtf8(u8"\u6587\u4EF6\u540D\u592A\u957F"));
+          const bool noVague = !shortText.contains(QString::fromUtf8(u8"\u672C\u673A\u73AF\u5883"));
+          const bool advHasFix = advice.contains(QStringLiteral("80"));
+          const bool advHasBytes = advice.contains(QString::fromUtf8(u8"\u5B57\u8282"));
+          const bool noFalsePositive =
+              !RsyncRunner::isFileNameTooLongForTest(
+                  QStringLiteral("rsync: [receiver] write failed: No space left on device (28)"));
+          const bool ok = detected && saysLong && noVague && advHasFix && advHasBytes && noFalsePositive;
+          if (!ok)
+              ++bad;
+          out << (ok ? "PASS\t" : "FAIL\t") << "filename-too-long-message"
+              << "\tdetected=" << (detected ? 1 : 0)
+              << "\tsaysLong=" << (saysLong ? 1 : 0)
+              << "\tnoVague=" << (noVague ? 1 : 0)
+              << "\tadvHasFix=" << (advHasFix ? 1 : 0)
+              << "\tadvHasBytes=" << (advHasBytes ? 1 : 0)
+              << "\tnoFalsePositive=" << (noFalsePositive ? 1 : 0) << "\n";
+      }
+
+      // ----------------------------------------------------------------
       // 判据：私钥带口令时必须说「带口令」，不能只说「本机环境有问题」
       //
       // 2026-11-07 实测：客户用 ssh-keygen -N "口令" 生成的私钥（很多单位强制要求）

@@ -362,13 +362,17 @@ public:
     // 手册 L663 承诺的「传输过程中被修改」通知。抽成静态函数是为了让判据
     // 能验到**客户实际看到的那段文字**，而不是验一条手抄的副本。
     static QString modifiedNoticeForTest(const QStringList &names);
+    // 判据用：文件名过长检测（Linux 只允许 255 字节，中文 1 字 3 字节）。
+    static bool    isFileNameTooLongForTest(const QString &raw);
     static QString modifiedAdviceText();
     // 判据用：把分类结果与短结论也接出来，避免判据只差一层拿不到。
     static int     classifyLayerForTest(const QString &raw);
     // 判据用：返回**客户实际会看到的那段建议**（含 reportAttribution 里的覆写）。
     // 不能用 specialAdviceFor 代替：那个只对接收端层调用，本机层的专项处置不在里面。
     static QString adviceForTest(const QString &raw);
-    static QString shortConclusionForTest(const QString &raw);
+    // 生产函数：客户看到的"短结论"就是它算出来的。
+    static QString shortConclusionFor(const QString &raw);
+    static QString shortConclusionForTest(const QString &raw);   // 转发器，判据用
 
     // 收尾清理的**唯一次序来源**，按执行先后返回步骤名：
     //   "remote-markers"（删接收端 .srt-verify-*，要 ssh 凭据）
