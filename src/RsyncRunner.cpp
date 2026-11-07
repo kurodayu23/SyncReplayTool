@@ -789,6 +789,31 @@ static bool isPassphraseProtectedKey(const QString &text)
     return false;
 }
 
+// 文件名太长，rsync 自己处理不了（《已知限制与未验证项》第 21 条）。
+//
+// 2026-11-07 实测（Windows 发送端 → 麒麟接收端，96 个中文字的文件名 = 292 字节）：
+//   ERR  rsync: [sender] link_stat "/cygdrive/c/.../数数数...spe" failed: File name too long (91)
+//   ERR  rsync error: some files/attrs were not transferred ... (code 23)
+//   INFO 本机环境有问题
+//   INFO 请检查本机：rsync 和 ssh 客户端是否齐全、私钥文件是否存在且可读、本机磁盘是否有空间。
+// 三条建议**一条都不对**：rsync/ssh 都在、私钥也在、磁盘有空。真因是名字太长。
+//
+// 归到本机层是**对的** —— 报错前缀是 [sender]，失败发生在客户自己的机器上
+// （Windows 允许 255 个**字符**，Linux 只允许 255 **字节**，1 个中文字占 3 字节）。
+// 错的是建议：客户照着查一圈什么也查不到，而文件永远传不过去。
+static bool isFileNameTooLong(const QString &text)
+{
+    if (text.isEmpty())
+        return false;
+    // "File name too long (91)" 是 Linux/rsync 对 ENAMETOOLONG 的原话。
+    // 英文以外再兜一层中文报错（不同 rsync 版本/语言环境）。
+    if (text.contains(QLatin1String("File name too long"), Qt::CaseInsensitive))
+        return true;
+    if (text.contains(QString::fromUtf8(u8"\u6587\u4EF6\u540D\u592A\u957F")))
+        return true;
+    return false;
+}
+
 
 int classifyLayer(const QString &text)
 {
@@ -1824,7 +1849,17 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer, const QS
       // 私钥带口令的处置**与层无关**：它是本机的钥匙问题，但本机层的通用建议
       // 只说"私钥是否存在且可读"（这条情况下全都成立），查不出任何东西。
       // 所以在层建议之前先覆写掉，并说明两条能照做的路。
-      if (advice.isEmpty() && isPassphraseProtectedKey(raw))
+      // 文件名太长的处置与层无关：本机层通用建议只说"rsync/私钥/磁盘"，三条都不成立。
+      if (advice.isEmpty() && isFileNameTooLong(raw))
+          advice = QString::fromUtf8(
+              u8"\u8FD9\u4E00\u7EC4\u91CC\u6709\u6587\u4EF6\u7684\u540D\u5B57\u592A\u957F\uFF0C\u63A5\u6536\u7AEF
+              u8"\u7684\u6587\u4EF6\u7CFB\u7EDF\u5B58\u4E0D\u4E0B\uFF1AWindows \u5141\u8BB8 255 \u4E2A\u5B57\u7B26"
+              u8"\uFF08\u4E00\u4E2A\u4E2D\u6587\u7B97\u4E00\u4E2A\uFF09\uFF0C\u800C\u9E92\u9E9F/Linux \u53EA\u5141\u8BB8 255"
+              u8" \u4E2A\u5B57\u8282\uFF08\u4E00\u4E2A\u4E2D\u6587\u5360 3 \u5B57\u8282\uFF09\uFF0C\u6240\u4EE5\u4E00\u4E2A 88"
+              u8" \u5B57\u4EE5\u4E0A\u7684\u4E2D\u6587\u6587\u4EF6\u540D\u5C31\u4F1A\u88AB\u62D2\u3002"
+              u8"\u8BF7\u628A\u6587\u4EF6\u540D\u7F29\u77ED\u5230 80 \u4E2A\u4E2D\u6587\u5B57\u4EE5\u5185"
+              u8"\uFF08\u7EA6 240 \u5B57\u8282\uFF09\u540E\u91CD\u8BD5\u3002\u8FD9\u4E2A\u6587\u4EF6\u4E0D\u6539\u540D",
+              u8"\u5C31\u6C38\u8FDC\u4F20\u4E0D\u8FC7\u53BB\uFF0C\u91CD\u8BD5\u591A\u5C11\u6B21\u90FD\u4E00\u6837\u3002");
           advice = passphraseKeyAdviceText();
     if (advice.isEmpty())
         // 「接收端没装 rsync」这句专项建议只对接收端层成立。
@@ -1859,7 +1894,11 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer, const QS
     // 短结论就会说「目标电脑没装 rsync」，与紧跟着的层说明自相矛盾。
     // 私钥带口令：本程序没有输入口令的地方，必须直说，并给出能照做的两条路。
     // 排在算法之前判：口令错误的原文里也可能带 Connection closed by 之类的尾巴。
-    if (isPassphraseProtectedKey(raw)) {
+    // 文件名太长：本机层的通用建议（rsync 装没装 / 私钥在不在 / 磁盘满没满）三条全不对。
+    if (isFileNameTooLong(raw)) {
+        emit logText(QString::fromUtf8(u8"\u6709\u6587\u4EF6\u540D\u592A\u957F\uFF0C\u4F20\u4E0D\u8FC7\u53BB"));
+    }
+    else if (isPassphraseProtectedKey(raw)) {
         emit logText(QString::fromUtf8(u8"\u79C1\u94A5\u6587\u4EF6\u5E26\u53E3\u4EE4\uFF0C\u672C\u7A0B\u5E8F\u7528\u4E0D\u4E86"));
     }
     else if (isAlgoNegotiationFailure(raw)) {
