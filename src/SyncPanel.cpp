@@ -1203,7 +1203,14 @@ void SyncPanel::launchToolForRow(int row, int toolIndex)
     // 放在预检之后的话，"源文件不存在"这种失败路径每次都会重新查一遍，
     // 而且会在日志里连刷 5 条一样的 ERR。
     const qint64 now = m_toolClock.elapsed();
-    const qint64 last = m_toolLaunchAtMs.value(row, -1);
+    // 防抖键 = "行:第几个按钮"，**不是**行。
+    //
+    // 按行记的话，一行配了 AAA/BBB 两个工具时，点完 AAA 立刻点 BBB 会被当成连点吞掉
+    // （《已知限制》第 8 条实测：只起了 AAA，BBB 连日志都没有）。
+    // 同一次点击里 runKey 也是这个键，两处口径一致。
+    const QString debounceKey = QString::number(row) + QLatin1Char(':')
+                                     + QString::number(toolIndex);
+    const qint64 last = m_toolLaunchAtMs.value(debounceKey, -1);
     if (last >= 0 && (now - last) < launchDebounceMs()) {
         ++m_toolDebounceSuppressed;
         return;
@@ -1249,11 +1256,11 @@ void SyncPanel::launchToolForRow(int row, int toolIndex)
             toggleLogDrawer();
         setStatusLine(msg, 2);
         // 记下"这一行点过了"，否则失败路径上的连点会每次都重新判一遍。
-        m_toolLaunchAtMs.insert(row, now);
+        m_toolLaunchAtMs.insert(debounceKey, now);
         return;
     }
 
-    m_toolLaunchAtMs.insert(row, now);
+    m_toolLaunchAtMs.insert(debounceKey, now);
 
     // 参数整条链借给工具页的 buildArgv（= buildArgs + splitCommand）。
     //

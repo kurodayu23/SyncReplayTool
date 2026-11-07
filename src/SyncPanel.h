@@ -630,7 +630,10 @@ private:
     // 连点「打开」会起一串进程：工具窗口开两份、文件被同一工具打开两次，
     // 而界面毫无异常。这里挡住的是**真的多起进程**，
     // 不是把按钮禁用 —— 按钮禁用的那 500ms 里用户看不见发生了什么。
-    QHash<int, qint64>  m_toolLaunchAtMs;
+    // 防抖时间戳：键是 "行:第几个按钮"，**不是**行。
+    // 按行记的话，一行配了 AAA/BBB 两个工具时，点完 AAA 立刻点 BBB 会被当成连点吞掉
+    // （《已知限制》第 8 条实测：只起了 AAA，BBB 连日志都没有）。
+    QHash<QString, qint64> m_toolLaunchAtMs;
     int                 m_toolLaunchAttempts = 0;      // 真正 start() 过的次数
     int                 m_toolDebounceSuppressed = 0; // 被防抖挡掉的次数
     int                 m_toolAlreadyRunning = 0;    // 被"已在运行"挡掉的次数

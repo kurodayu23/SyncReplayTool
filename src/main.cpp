@@ -3323,6 +3323,100 @@ int runSelfCheck()
     }
 
     // ----------------------------------------------------------------
+    // 判据：同一行里点**不同**工具按钮，不许被防抖吞掉（《已知限制》第 8 条）
+    //
+    // 2026-11-05 实测的缺陷：一行配了 AAA/BBB 两个工具，点 AAA 后 200ms 点 BBB，
+    // **只起了 AAA**，BBB 被吞掉、连日志都没有。
+    // 根因：防抖时间戳按 `row` 记，不是按 `row:toolIndex` 记 —— 粗了一格。
+    //
+    // 修法：防抖键改成与"已在运行"检测同一个 runKey（行:第几个按钮），两处口径一致。
+    // 判据同时验两个方向：
+    //   ① 同一行连点**同一个**按钮 → 必须仍被挡（防连点起一串进程，是有意行为）
+    //   ② 同一行点**不同**按钮 → 必须放行（本缺陷）
+    {
+        QTemporaryDir sandbox;
+        const QString root = sandbox.path();
+        { QFile f(root + QStringLiteral("/a.spe")); f.open(QIODevice::WriteOnly); f.write("x"); }
+
+        SyncPanel panel;
+        panel.setLocalRootForTest(root);
+        panel.setRulesForTest(QStringList() << QStringLiteral("spe"));
+        panel.scanFilesForTest();
+        {
+            QElapsedTimer t; t.start();
+            while (panel.isScanningForTest() && t.elapsed() < 8000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                QThread::msleep(5);
+            }
+        }
+        // **必须跨平台选一个真实存在的可执行文件**：
+        // 第一次写这条判据时硬编码了 Windows 的 cmd.exe，麒麟上它不存在 →
+        // preflight 失败 → diffRowAttempts=0 → 判据在麒麟上变红，
+        // 连带让「麒麟包验证」从 45-0 掉到 42-3。判据自己不许只在一种系统上成立。
+#ifdef _WIN32
+        const QString cmdExe = QStringLiteral("C:/Windows/System32/cmd.exe");
+        const QString exitArg = QStringLiteral("/c exit 0");
+#else
+        const QString cmdExe = QStringLiteral("/bin/true");
+        const QString exitArg = QString();
+#endif
+        ToolRule rule;
+        rule.suffix = QStringLiteral("spe");
+        rule.toolNames << QStringLiteral("AAA") << QStringLiteral("BBB");
+        rule.toolExePaths << cmdExe << cmdExe;
+        rule.toolArgs << exitArg << exitArg;
+        panel.setToolRulesForTest(QVector<ToolRule>() << rule);
+
+        // ① 同一行连点同一个按钮：第 2、3 次必须被挡
+        panel.resetToolLaunchStateForTest();
+        panel.launchToolForTest(0, 0);
+        panel.launchToolForTest(0, 0);
+        panel.launchToolForTest(0, 0);
+        const int sameRowAttempts = panel.toolLaunchAttemptsForTest();
+        const int sameRowSuppressed = panel.toolDebounceSuppressedForTest();
+        const bool sameBlocked = (sameRowAttempts == 1) && (sameRowSuppressed >= 2);
+
+        // 步骤 ① 起的工具可能还在跑。**必须等它们退出**再进步骤 ②：
+        // 否则 ② 的第一击会被"已在运行"守卫挡住（那是正确行为，不是本判据要测的），
+        // 结果是 diffRowAttempts 只有 1 —— 我第一次写这条判据就栽在这儿。
+        {
+            QElapsedTimer t; t.start();
+            while (panel.runningToolCountForTest() > 0 && t.elapsed() < 8000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                QThread::msleep(5);
+            }
+        }
+
+        // ② 同一行点**另一个**按钮：必须放行
+        //
+        // 两次点击之间**必须隔开一点**（文档记录的场景是 200 ms）。
+        // 零间隔时第一把工具还没进 m_toolProcs，第二把会撞上别的守卫，
+        // 那样测出来的就不是"防抖按行记"这个缺陷了。
+        panel.resetToolLaunchStateForTest();
+        panel.launchToolForTest(0, 0);
+        {
+            QElapsedTimer t; t.start();
+            while (t.elapsed() < 200) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+                QThread::msleep(2);
+            }
+        }
+        panel.launchToolForTest(0, 1);
+        const int diffAttempts = panel.toolLaunchAttemptsForTest();
+        const int diffSuppressed = panel.toolDebounceSuppressedForTest();
+        const bool diffAllowed = (diffAttempts == 2) && (diffSuppressed == 0);
+
+        const bool ok = sameBlocked && diffAllowed;
+        if (!ok)
+            ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "tool-debounce-per-button"
+            << "\tsameRowAttempts=" << sameRowAttempts
+            << "\tsameRowSuppressed=" << sameRowSuppressed
+            << "\tdiffRowAttempts=" << diffAttempts
+            << "\tdiffSuppressed=" << diffSuppressed << "\n";
+    }
+
+    // ----------------------------------------------------------------
     // 无执行权限：只有 POSIX 上能造出这个现场
     //
     // Windows 上 Qt 5.9 的 isExecutable() 对任何存在的文件都返回 true，
