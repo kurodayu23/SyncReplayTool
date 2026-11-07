@@ -3528,7 +3528,17 @@ void SyncPanel::startProgressProbe()
     const QStringList suffixes = QString::fromLocal8Bit(qgetenv("SRT_PXP_RULES"))
                                      .split(QLatin1Char(','), QString::SkipEmptyParts);
     setRulesForTest(suffixes);
-    setOnlyNewForTest(!QString::fromLocal8Bit(qgetenv("SRT_PXP_ONLYNEW")).isEmpty());
+    // **必须按值解析，不能按"非空即真"**（2026-11-07 实测踩到）：
+    // 原来写的是 !qgetenv(...).isEmpty()，于是传 SRT_PXP_ONLYNEW=false 也是**勾上**。
+    // 后果不是产品错，而是**用这个钩子写探针的人会得出相反结论**：
+    // 我按"取消勾选"的意图跑了一轮，日志却说「勾了仅同步新增文件」，
+    // 差点据此误报"改了本地内容但远端没更新"这个并不存在的缺陷。
+    // 空串 / 0 / false / off / no 都算 false，其余算 true。
+    const QString onlyNewRaw = QString::fromLocal8Bit(qgetenv("SRT_PXP_ONLYNEW")).trimmed().toLower();
+    setOnlyNewForTest(onlyNewRaw == QLatin1String("1")
+                      || onlyNewRaw == QLatin1String("true")
+                      || onlyNewRaw == QLatin1String("yes")
+                      || onlyNewRaw == QLatin1String("on"));
 
     // 推迟到事件循环起来之后再设：构造函数里 loadConfig() 刚把用户配置读进来，
     // 在它之前设会被覆盖掉，那样跑出来的就是**用户配置**而不是探针给的这一套，
