@@ -3790,6 +3790,131 @@ int runSelfCheck()
       }
 
       // ----------------------------------------------------------------
+      // 判据：重扫**不许**把用户取消勾选的文件重新勾上（越权传输）
+      //
+      // 2026-11-07 审查实测缺陷（D6 的连带）：客户勾 1 个、取消 1 个，点「开始同步」，
+      // 传了 2 个。根因是 D6 让手动路径无条件重扫，而 setFiles() 的下标默认全勾
+      // （FileTableModel.cpp:359 m_checked[i]=true），用户的选择被覆盖。
+      // 本文件另一处注释明说「手动点开始同步必须沿用用户的勾选…那是越权」。
+      //
+      // 修法：重扫前快照未勾选路径 → onScanFinished 里 setUncheckedPaths() 恢复。
+      // 这条判据同时验"勾选还在"和"本轮待传集合确实只有勾的那些"。
+      {
+          QTemporaryDir sandbox;
+          const QString root = sandbox.path();
+          { QFile f(root + QStringLiteral("/a.spe")); f.open(QIODevice::WriteOnly); f.write("aaa"); }
+          { QFile f(root + QStringLiteral("/b.spe")); f.open(QIODevice::WriteOnly); f.write("bbb"); }
+
+          SyncPanel panel;
+          panel.setLocalRootForTest(root);
+          panel.setRulesForTest(QStringList() << QStringLiteral("spe"));
+          panel.setHostForTest(QStringLiteral("127.0.0.1"));
+          panel.setPortForTest(1);
+          panel.setUserForTest(QStringLiteral("srtprobe"));
+
+          panel.scanFilesForTest();
+          {
+              QElapsedTimer t; t.start();
+              while (panel.isScanningForTest() && t.elapsed() < 8000) {
+                  QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                  QThread::msleep(5);
+              }
+          }
+          FileTableModel *mdl = panel.tableModel();
+          const int files0 = mdl->files().size();
+          const int checked0 = mdl->checkedRows().size();
+
+          // 取消其中一个（取第 0 行）
+          const QString dropPath = mdl->files().at(0).relativePath;
+          mdl->setUncheckedPaths(QSet<QString>() << dropPath);
+          {
+              QElapsedTimer t; t.start();
+              while (t.elapsed() < 300) {
+                  QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                  QThread::msleep(5);
+              }
+          }
+          const int checkedAfterUncheck = mdl->checkedRows().size();
+
+          // 手动点「开始同步」——会先重扫，重扫不许把勾选弄丢
+          panel.startSyncForTest();
+          {
+              QElapsedTimer t; t.start();
+              while (t.elapsed() < 8000) {
+                  QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                  if (!panel.isScanningForTest() && panel.runTotalForTest() > 0) break;
+                  QThread::msleep(5);
+              }
+          }
+          const int checkedAfterSync = mdl->checkedRows().size();
+          const int runTotal = panel.runTotalForTest();
+
+          // 反向锁：勾 1 个就必须只传 1 个。若重扫把勾选全恢复，runTotal 会是 2。
+          const bool ok = (files0 == 2) && (checked0 == 2) && (checkedAfterUncheck == 1)
+                          && (checkedAfterSync == 1) && (runTotal == 1);
+          if (!ok)
+              ++bad;
+          out << (ok ? "PASS\t" : "FAIL\t") << "rescan-keeps-checkbox"
+              << "\tfiles=" << files0
+              << "\tcheckedBefore=" << checked0
+              << "\tcheckedAfterUncheck=" << checkedAfterUncheck
+              << "\tcheckedAfterSync=" << checkedAfterSync
+              << "\trunTotal=" << runTotal << "\n";
+      }
+
+      // ----------------------------------------------------------------
+      // 判据：空本机目录点过同步之后，只做「刷新」**不许**自发开同步
+      //
+      // 2026-11-07 审查实测缺陷：scanFiles() 里 `if (m_localRoot.isEmpty())` 这条早退
+      // 不调 onScanFinished，而 m_syncRequested 只能由 onScanFinished 消费。
+      // 于是标志一直留着，客户补上目录、只点一次「刷新」，程序就自己开始同步了。
+      // 对照：rootUnreadable / rootMissing / rootNotDir 三条早退都调了 onScanFinished(空)，
+      // 标志会被消费掉 —— 四条同类分支，三条对、一条漏。
+      {
+          QTemporaryDir sandbox;
+          const QString root = sandbox.path();
+          { QFile f(root + QStringLiteral("/a.spe")); f.open(QIODevice::WriteOnly); f.write("a"); }
+
+          SyncPanel panel;
+          panel.setRulesForTest(QStringList() << QStringLiteral("spe"));
+          panel.setHostForTest(QStringLiteral("127.0.0.1"));
+          panel.setPortForTest(1);
+          panel.setUserForTest(QStringLiteral("srtprobe"));
+          // 刻意**不设** localRoot：模拟"目标配好了、本机目录还没选"
+
+          panel.startSyncForTest();
+          {
+              QElapsedTimer t; t.start();
+              while (t.elapsed() < 600) {
+                  QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                  QThread::msleep(5);
+              }
+          }
+          const int roundsAfterEmpty = panel.syncFinishedCountForTest();
+
+          // 补上目录，只做刷新（不点开始同步）
+          panel.setLocalRootForTest(root);
+          panel.scanFilesForTest();
+          {
+              QElapsedTimer t; t.start();
+              while (t.elapsed() < 2500) {
+                  QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                  QThread::msleep(5);
+              }
+          }
+          const int roundsAfterRefresh = panel.syncFinishedCountForTest();
+          const bool busy = panel.isSyncBusyForTest();
+
+          const bool ok = (roundsAfterEmpty == 0) && (roundsAfterRefresh == 0) && !busy;
+          if (!ok)
+              ++bad;
+          out << (ok ? "PASS\t" : "FAIL\t") << "no-spontaneous-sync"
+              << "\troundsAfterEmpty=" << roundsAfterEmpty
+              << "\troundsAfterRefresh=" << roundsAfterRefresh
+              << "\tbusy=" << (busy ? 1 : 0) << "\n";
+      }
+
+      // ----------------------------------------------------------------
       // 判据：私钥带口令时必须说「带口令」，不能只说「本机环境有问题」
       //
       // 2026-11-07 实测：客户用 ssh-keygen -N "口令" 生成的私钥（很多单位强制要求）
