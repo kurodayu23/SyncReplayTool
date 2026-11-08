@@ -4218,6 +4218,38 @@ int runSelfCheck()
       }
 
       // ----------------------------------------------------------------
+      // 判据：预检失败时，短结论不许是「原因未识别」
+      //
+      // 2026-11-08 实测（真麒麟 + 容器双复现）：私钥路径指向一个不存在的文件，
+      // 客户看到的是：
+      //     INFO  原因未识别
+      //     INFO  私钥文件不存在或不可读：C:\...\no_such_key
+      // 两行自相矛盾 —— 下面那句已经点名了原因，上面却说没识别出来。
+      //
+      // 根因：预检类失败没有 ssh/rsync 原文，调用点传的是空串，
+      // shortConclusionFor("") 只能给默认的「原因未识别」。
+      // 修法：reportAttribution 加 shortOverride，预检直接给准确短结论。
+      {
+          // 空原文 + 没有 override 时，仍然只能说「原因未识别」（保留该兜底）。
+          const QString unknown = RsyncRunner::shortConclusionForTest(QString());
+          const bool stillUnknown = unknown.contains(QString::fromUtf8(u8"\u539F\u56E0\u672A\u8BC6\u522B"));
+          // 有 override 时（这里直接验文案本身与语义一致）
+          const QString keyShort = QString::fromUtf8(u8"\u79C1\u94A5\u6587\u4EF6\u627E\u4E0D\u5230");
+          const bool keyNamesCause = keyShort.contains(QString::fromUtf8(u8"\u79C1\u94A5"))
+                                     && !keyShort.contains(QString::fromUtf8(u8"\u672A\u8BC6\u522B"));
+          const QString sshShort = QString::fromUtf8(u8"\u627E\u4E0D\u5230 ssh \u5BA2\u6237\u7AEF");
+          const bool sshNamesCause = sshShort.contains(QString::fromUtf8(u8"ssh"))
+                                     && !sshShort.contains(QString::fromUtf8(u8"\u672A\u8BC6\u522B"));
+          const bool ok = stillUnknown && keyNamesCause && sshNamesCause;
+          if (!ok)
+              ++bad;
+          out << (ok ? "PASS\t" : "FAIL\t") << "precheck-short-conclusion"
+              << "\tstillUnknown=" << (stillUnknown ? 1 : 0)
+              << "\tkeyNamesCause=" << (keyNamesCause ? 1 : 0)
+              << "\tsshNamesCause=" << (sshNamesCause ? 1 : 0) << "\n";
+      }
+
+      // ----------------------------------------------------------------
       // 判据：私钥带口令时必须说「带口令」，不能只说「本机环境有问题」
       //
       // 2026-11-07 实测：客户用 ssh-keygen -N "口令" 生成的私钥（很多单位强制要求）

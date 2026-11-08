@@ -1861,7 +1861,9 @@ QString RsyncRunner::adviceForTest(const QString &raw)
     return QString();
 }
 
-void RsyncRunner::reportAttribution(const QString &raw, int forceLayer, const QString &adviceOverride){
+void RsyncRunner::reportAttribution(const QString &raw, int forceLayer,
+                                     const QString &adviceOverride,
+                                     const QString &shortOverride){
     const int layer = (forceLayer >= 0) ? forceLayer : classifyLayer(raw);
 
     QString advice = adviceOverride;
@@ -1913,7 +1915,8 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer, const QS
     // 原来这段 if/else 链在生产代码里写了一份、在判据钩子里又写了一份，
     // 结果是 2026-11-07 加"文件名太长"分支时只改了生产那份，判据测的仍是旧副本 →
     // 判据 `saysLong=0` 假绿（明明是同一份逻辑）。收敛成一个函数后不可能再走偏。
-    emit logText(shortConclusionFor(raw));
+    // 预检类失败没有原文，调用点直接给准确短结论；没给才走文本分类。
+    emit logText(shortOverride.isEmpty() ? shortConclusionFor(raw) : shortOverride);
 
     // kLayerMeaning 里带着【责任归属：xx】前缀 —— 对客户是噪音（他要的是
     // "哪里出问题"一句话）。运行时剥掉前缀，只留后面那句人话，不用改那 7 条长转义串。
@@ -3141,13 +3144,18 @@ void RsyncRunner::start(const TargetConfig &target,
         return;
     }
     if (locateTool(QStringLiteral("ssh")).isEmpty()) {
-        reportAttribution(QString(), LayerLocal);
+        // 预检：没有原文，短结论必须由这里给，否则会是「原因未识别」。
+        reportAttribution(QString(), LayerLocal, QString(),
+                          QString::fromUtf8(u8"\u627E\u4E0D\u5230 ssh \u5BA2\u6237\u7AEF"));
         emit logText(QString::fromUtf8(u8"\u672A\u627E\u5230 ssh \u5BA2\u6237\u7AEF\u53EF\u6267\u884C\u6587\u4EF6\u3002"));
         emit allFinished(false);
         return;
     }
     if (target.useKey() && !QFileInfo(target.keyPath).isFile()) {
-        reportAttribution(QString(), LayerLocal);
+        // 预检：短结论必须直说"私钥文件找不到"，否则下面那句具体路径会与
+        //「原因未识别」自相矛盾（2026-11-08 实测）。
+        reportAttribution(QString(), LayerLocal, QString(),
+                          QString::fromUtf8(u8"\u79C1\u94A5\u6587\u4EF6\u627E\u4E0D\u5230"));
         // ssh 拿到一个不存在的私钥不会立刻报错退出，而是继续往下走、
         // 干等到看门狗超时（默认 3 分钟）。用户看到的就是"点了同步没反应"。
         emit logText(QString::fromUtf8(u8"\u79C1\u94A5\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BFB\uFF1A%1").arg(target.keyPath));

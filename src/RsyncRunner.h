@@ -457,8 +457,13 @@ private:
     // 判据见 RsyncRunner.cpp 里 classifyLayer 与 kFailRules 的注释。
     // forceLayer >= 0 时跳过文本分类（预检类失败没有原文可依）；
     // adviceOverride 非空时替掉本层自带的建议（“被弹窗挡住”走这条）。
+    // shortOverride 非空时替掉短结论。专给**预检**用：raw 传空串时
+    // shortConclusionFor("") 只能给「原因未识别」，而调用点其实已经知道原因
+    // （私钥文件不存在 / 找不到 ssh 客户端 / 本地目录不存在）。
+    // 2026-11-08 实测：客户看到「原因未识别」，下一行却写着「私钥文件不存在或不可读：…」，自相矛盾。
     void reportAttribution(const QString &raw, int forceLayer = -1,
-                           const QString &adviceOverride = QString());
+                           const QString &adviceOverride = QString(),
+                           const QString &shortOverride = QString());
     void ensureRemoteDirs();
     void launchNext();
     // rsync 退出 0 之后核对目标目录还是不是同一个目录，见 verifyRemoteDir 注释。
