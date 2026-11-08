@@ -811,6 +811,20 @@ static bool isPassphraseProtectedKey(const QString &text)
 // 区分靠 rsync 自己的侧标记：
 //   本地文件名过长：[sender] … link_stat … File name too long
 //   远端路径过长  ：[Receiver] … cannot stat destination … File name too long
+// 远端保存目录是**只读挂载**（不是权限问题）：2026-11-09 实测（bind + remount,ro）
+//   ERR  rsync: mkstemp "/tmp/romount/.f8.txt.NJybU6" failed: Read-only file system (30)
+//   ERR  rsync error: some files/attrs were not transferred (code 23)
+// 归因落到接收端层是对的，但通用建议是「检查目标目录是否存在、账号是否具备写权限、
+// 磁盘空间、是否装 rsync」——四条里只有"磁盘空间"沾边，真因是**挂载成只读**。
+// 客户会去查账号权限（完全正常），查一圈什么也查不到。
+static bool isReadOnlyFs(const QString &text)
+{
+    if (text.isEmpty())
+        return false;
+    return text.contains(QLatin1String("Read-only file system"), Qt::CaseInsensitive)
+        || text.contains(QLatin1String("EROFS"), Qt::CaseSensitive);
+}
+
 static bool isRemotePathTooLong(const QString &text)
 {
     if (text.isEmpty())
@@ -1744,6 +1758,11 @@ QString specialAdvice(const QString &raw)
 }
 
 
+bool RsyncRunner::isReadOnlyFsForTest(const QString &raw)
+{
+    return isReadOnlyFs(raw);
+}
+
 bool RsyncRunner::isRemotePathTooLongForTest(const QString &raw)
 {
     return isRemotePathTooLong(raw);
@@ -1752,6 +1771,19 @@ bool RsyncRunner::isRemotePathTooLongForTest(const QString &raw)
 bool RsyncRunner::isFileNameTooLongForTest(const QString &raw)
 {
     return isFileNameTooLong(raw);
+}
+
+QString RsyncRunner::readOnlyFsAdviceText()
+{
+    return QString::fromUtf8(
+        u8"\u76EE\u6807\u7535\u8111\u4E0A\u8FD9\u4E2A\u76EE\u5F55\u662F\u53EA\u8BFB\u6302\u8F7D\uFF0C\u5199\u4E0D\u8FDB\u53BB\u3002"
+        u8"\u8FD9\u4E0D\u662F\u8D26\u53F7\u6743\u9650\u95EE\u9898\uFF08\u6743\u9650\u53EF\u80FD\u5B8C\u5168\u6B63\u5E38\uFF09\uFF0C"
+        u8"\u4E5F\u4E0D\u662F\u78C1\u76D8\u6EE1\uFF0C\u800C\u662F\u90A3\u4E2A\u76EE\u5F55\u88AB\u6302\u6210\u4E86\u53EA\u8BFB\u3002"
+        u8"\u8BF7\u8BA9\u76EE\u6807\u7535\u8111\u7684\u8D1F\u8D23\u4EBA\uFF1A"
+        u8"\u2460 \u770B\u6302\u8F7D\u9009\u9879\uFF1Amount | grep \u4FDD\u5B58\u76EE\u5F55\uFF0C\u627E ro \u5B57\u6837\uFF1B"
+        u8"\u2461 \u80FD\u6539\u7684\u8BDD remount \u6210\u8BFB\u5199\uFF08mount -o remount,rw \u76EE\u5F55\uFF09\uFF1B"
+        u8"\u2462 \u6216\u628A\u300C\u4FDD\u5B58\u76EE\u5F55\u300D\u6539\u5230\u4E00\u4E2A\u53EF\u5199\u7684\u76D8\u4E0A\u3002"
+        u8"\u53EA\u8BFB\u76D8\u4E0A\u518D\u600E\u4E48\u6539\u8D26\u53F7\u6743\u9650\u90FD\u5199\u4E0D\u8FDB\u53BB\u3002");
 }
 
 QString RsyncRunner::remotePathTooLongAdviceText()
@@ -1827,6 +1859,9 @@ QString RsyncRunner::shortConclusionFor(const QString &raw)
 {
     // 远端目录路径太长要排在"文件名太长"之前：两句话都含 File name too long，
     // 但处置完全不同（改远端子目录 vs 改文件名）。
+    // 只读挂载排在磁盘满之前：原文都来自接收端 rsync，但处置完全不同。
+    if (isReadOnlyFs(raw))
+        return QString::fromUtf8(u8"\u76EE\u6807\u76EE\u5F55\u662F\u53EA\u8BFB\u7684\uFF0C\u5199\u4E0D\u8FDB\u53BB");
     if (isRemotePathTooLong(raw))
         return QString::fromUtf8(u8"\u8FDC\u7AEF\u76EE\u5F55\u540D\u592A\u957F\uFF0C\u4F20\u4E0D\u8FC7\u53BB");
     if (isFileNameTooLong(raw))
@@ -1849,6 +1884,8 @@ QString RsyncRunner::shortConclusionFor(const QString &raw)
 // 必须复刻**覆写优先**的顺序，否则判据验不到"口令私钥给了专项建议"这件事。
 QString RsyncRunner::adviceForTest(const QString &raw)
 {
+    if (isReadOnlyFs(raw))
+        return readOnlyFsAdviceText();
     if (isRemotePathTooLong(raw))
         return remotePathTooLongAdviceText();
     if (isFileNameTooLong(raw))

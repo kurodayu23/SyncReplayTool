@@ -364,6 +364,9 @@ public:
     // 判据用：文件名过长检测（Linux 只允许 255 字节，中文 1 字 3 字节）。
     static bool    isFileNameTooLongForTest(const QString &raw);
     static QString remotePathTooLongAdviceText();
+    // 远端只读挂载的专项建议（与"权限/磁盘满"分开：那张单子上四条建议全不对）。
+    static QString readOnlyFsAdviceText();
+    static bool    isReadOnlyFsForTest(const QString &raw);
     static bool    isRemotePathTooLongForTest(const QString &raw);
     // 判据用：把分类结果与短结论也接出来，避免判据只差一层拿不到。
     static int     classifyLayerForTest(const QString &raw);

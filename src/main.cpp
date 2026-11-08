@@ -4284,6 +4284,49 @@ int runSelfCheck()
       }
 
       // ----------------------------------------------------------------
+      // 判据：只读挂载必须给"挂载"方向的建议，不许混进权限/磁盘满那张单子
+      //
+      // 2026-11-09 实测（tmpfs bind + remount,ro）：
+      //   ERR  rsync: mkstemp "/tmp/rom3/.f8.txt.xxxxx" failed: Read-only file system (30)
+      //   ERR  rsync error: some files/attrs were not transferred (code 23)
+      // 通用建议原来给的是「检查目标目录是否存在、账号是否具备写权限、磁盘空间、是否装 rsync」
+      // —— 四条里只有磁盘空间沾边，真因是**挂载成只读**，客户会去查账号权限（完全正常）。
+      //
+      // 三件事一起锁：
+      //   ① 短结论点明"只读"，且不许再是泛泛的"目录或权限有问题"
+      //   ② 建议里必须出现 mount / remount 这类可照做的词
+      //   ③ 短结论与被建议**不能是同一句**（我第一次改就把建议塞进了短结论链，
+      //      结果同一句打印两遍、详细建议根本没出现；这条反向锁就是为那类接错线准备的）
+      {
+          const QString roErr = QStringLiteral(
+              "rsync: mkstemp /tmp/rom3/.f8.txt.zuF4Nh failed: Read-only file system (30)\n"
+              "rsync error: some files/attrs were not transferred (see previous errors) (code 23)");
+          const QString roShort = RsyncRunner::shortConclusionForTest(roErr);
+          const QString roAdvice = RsyncRunner::adviceForTest(roErr);
+          const bool saysReadOnly = roShort.contains(QString::fromUtf8(u8"\u53EA\u8BFB"));
+          const bool notVague = !roShort.contains(QString::fromUtf8(u8"\u76EE\u5F55\u6216\u6743\u9650"));
+          const bool advHasMount = roAdvice.contains(QStringLiteral("mount"));
+          const bool advHasRemount = roAdvice.contains(QStringLiteral("remount"));
+          const bool advNotSameAsShort = (roAdvice != roShort);
+          // 反向锁：磁盘满那条不许被只读分支抢走
+          const QString fullErr = QStringLiteral(
+              "rsync: write failed on /tmp/x/big.bin: No space left on device (28)");
+          const bool fullStillFull = RsyncRunner::shortConclusionForTest(fullErr)
+                                         .contains(QString::fromUtf8(u8"\u78C1\u76D8\u6EE1"));
+          const bool ok = saysReadOnly && notVague && advHasMount && advHasRemount
+                          && advNotSameAsShort && fullStillFull;
+          if (!ok)
+              ++bad;
+          out << (ok ? "PASS\t" : "FAIL\t") << "readonly-fs-attribution"
+              << "\tsaysReadOnly=" << (saysReadOnly ? 1 : 0)
+              << "\tnotVague=" << (notVague ? 1 : 0)
+              << "\tadvHasMount=" << (advHasMount ? 1 : 0)
+              << "\tadvHasRemount=" << (advHasRemount ? 1 : 0)
+              << "\tadvNotSameAsShort=" << (advNotSameAsShort ? 1 : 0)
+              << "\tfullStillFull=" << (fullStillFull ? 1 : 0) << "\n";
+      }
+
+      // ----------------------------------------------------------------
       // 判据：私钥带口令时必须说「带口令」，不能只说「本机环境有问题」
       //
       // 2026-11-07 实测：客户用 ssh-keygen -N "口令" 生成的私钥（很多单位强制要求）
