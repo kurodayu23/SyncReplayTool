@@ -2520,10 +2520,22 @@ void RsyncRunner::cleanupStaleSecrets()
             // 其它目录：留着。用户自己可能有同名文件，程序不该替他删。
             if (isPrivate)
                 QFile::remove(full);
-        } else if (pid == QCoreApplication::applicationPid())
+        } else if (pid == QCoreApplication::applicationPid()) {
             continue;
-        else if (!processAlive(pid))
+        } else if (!processAlive(pid)) {
             QFile::remove(full);
+        } else {
+            // pid 判活偶尔会把"刚被强杀、句柄尚未释放"或"pid 刚好被复用"的
+            // 文件当成还活着 —— 实测（2026-11-09）：密码模式下强杀后，
+            // %LOCALAPPDATA% 里留下 srt_pass_<pid>_XXXXXX（15 字节，就是明文口令），
+            // 紧接着那一轮（pid 被判活）没清掉，只有再下一次换 pid 启动才清。
+            // 明文口令多躺一会儿都不该接受，所以加时间兜底：
+            // 超过 24 小时一律删（任何单轮同步都跑不满 24 小时）。
+            const qint64 ageSec = QFileInfo(full).lastModified()
+                                      .secsTo(QDateTime::currentDateTime());
+            if (ageSec > 24 * 3600)
+                QFile::remove(full);
+        }
     }
 
     for (const QString &dir : dirs)
