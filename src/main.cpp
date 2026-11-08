@@ -4368,6 +4368,47 @@ int runSelfCheck()
               << "\tadvNotSameAsShort=" << (advNotSameAsShort ? 1 : 0) << "\n";
       }
 
+      // ----------------------------------------------------------------
+      // 判据：保存目录被同名文件/断链占着时，短结论 + 层 + 建议三处必须一致
+      //
+      // 2026-11-09 实测（远端 /data/rx/broken3 -> 不存在的目录）：
+      //   ERR  rsync: mkdir "/data/rx/broken3" failed: File exists (17)
+      //   ERR  rsync error: error in file IO (code 11) at main.c(674) [Receiver=3.1.1]
+      // 原来客户看到「原因未识别 / 未能判断出具体归属 / 请发给技术支持」三句"我不知道"。
+      //
+      // **三处同改**（这是我连着两次踩的坑：只加短结论、忘了 classifyLayer，
+      // 结果层说明还在说"未能判断"，与短结论当场打脸）：
+      //   ① 短结论点明"被同名文件或断链占着"
+      //   ② 层说明必须是接收端（不许是"未能判断出具体归属"）
+      //   ③ 建议里出现 ls -ld 这类可照做的动作，且不许与短结论同句
+      {
+          const QString ndErr = QStringLiteral(
+              "rsync: mkdir /data/rx/broken3 failed: File exists (17)\n"
+              "rsync error: error in file IO (code 11) at main.c(674) [Receiver=3.1.1]");
+          const QString ndShort = RsyncRunner::shortConclusionForTest(ndErr);
+          const QString ndAdvice = RsyncRunner::adviceForTest(ndErr);
+          const int ndLayer = RsyncRunner::classifyLayerForTest(ndErr);
+          const bool saysNotDir = ndShort.contains(QString::fromUtf8(u8"\u5360\u7740"));
+          const bool layerIsReceiver = (ndLayer == 3);
+          const bool advActionable = ndAdvice.contains(QStringLiteral("ls -ld"));
+          const bool advNotSameAsShort = (ndAdvice != ndShort);
+          // 反向锁：普通的"目录已存在"不许命中（ensureRemoteDirs 自己会处理）
+          const QString normalErr = QStringLiteral(
+              "rsync: [sender] write error: Broken pipe (32)");
+          const bool normalNotHit = !RsyncRunner::shortConclusionForTest(normalErr)
+                                         .contains(QString::fromUtf8(u8"\u5360\u7740"));
+          const bool ok = saysNotDir && layerIsReceiver && advActionable
+                          && advNotSameAsShort && normalNotHit;
+          if (!ok)
+              ++bad;
+          out << (ok ? "PASS\t" : "FAIL\t") << "remote-path-not-dir-attribution"
+              << "\tsaysNotDir=" << (saysNotDir ? 1 : 0)
+              << "\tlayerIsReceiver=" << (layerIsReceiver ? 1 : 0)
+              << "\tadvActionable=" << (advActionable ? 1 : 0)
+              << "\tadvNotSameAsShort=" << (advNotSameAsShort ? 1 : 0)
+              << "\tnormalNotHit=" << (normalNotHit ? 1 : 0) << "\n";
+      }
+
 
       // ----------------------------------------------------------------
       // 判据：私钥带口令时必须说「带口令」，不能只说「本机环境有问题」
