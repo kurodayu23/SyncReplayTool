@@ -4327,6 +4327,48 @@ int runSelfCheck()
       }
 
       // ----------------------------------------------------------------
+      // 判据：远端保存目录中途消失时，短结论/层说明/建议三者必须一致
+      //
+      // 2026-11-09 实测（1GB 传输中 rm -rf 远端目录）：
+      //   ERR  rsync: stat "/data/rx/vanish4/.rnd1g.bin.xxxx" failed: No such file or directory (2)
+      //   INFO rsync: rename "/data/rx/vanish4/.rnd1g.bin.xxxx" -> "rnd1g.bin": No such file or directory (2)
+      // 原来客户看到的是：
+      //   INFO  原因未识别
+      //   INFO  未能从原始报错里判断出具体归属。
+      //   INFO  请将以上原始报错发送给技术支持人员排查。
+      // 三句都是"我不知道" —— 而原文已经点名了原因，客户自己能处理。
+      //
+      // 这条判据锁三件事（我第一次改还漏了第二件，结果层说明与短结论自相矛盾）：
+      //   ① 短结论点明"目录不见了"，不再是"原因未识别"
+      //   ② 层说明是接收端（不再打"未能判断出具体归属"）
+      //   ③ 建议里出现 ls / 挂载 这类可照做的词
+      {
+          const QString vErr = QStringLiteral(
+              "rsync: stat /data/rx/v/.rnd1g.bin.AB12CD failed: No such file or directory (2)\n"
+              "rsync: rename /data/rx/v/.rnd1g.bin.AB12CD -> rnd1g.bin: No such file or directory (2)\n"
+              "rsync error: some files/attrs were not transferred (see previous errors) (code 23)");
+          const QString vShort = RsyncRunner::shortConclusionForTest(vErr);
+          const QString vAdvice = RsyncRunner::adviceForTest(vErr);
+          const int vLayer = RsyncRunner::classifyLayerForTest(vErr);
+          const bool saysGone = vShort.contains(QString::fromUtf8(u8"\u4E0D\u89C1\u4E86"));
+          const bool notUnknown = !vShort.contains(QString::fromUtf8(u8"\u539F\u56E0\u672A\u8BC6\u522B"));
+          const bool layerIsReceiver = (vLayer == 3);   // LayerReceiver
+          const bool advActionable = vAdvice.contains(QStringLiteral("ls "))
+                                     || vAdvice.contains(QString::fromUtf8(u8"\u6302"));
+          const bool advNotSameAsShort = (vAdvice != vShort);
+          const bool ok = saysGone && notUnknown && layerIsReceiver && advActionable
+                          && advNotSameAsShort;
+          if (!ok)
+              ++bad;
+          out << (ok ? "PASS\t" : "FAIL\t") << "remote-dir-vanished-attribution"
+              << "\tsaysGone=" << (saysGone ? 1 : 0)
+              << "\tnotUnknown=" << (notUnknown ? 1 : 0)
+              << "\tlayerIsReceiver=" << (layerIsReceiver ? 1 : 0)
+              << "\tadvActionable=" << (advActionable ? 1 : 0)
+              << "\tadvNotSameAsShort=" << (advNotSameAsShort ? 1 : 0) << "\n";
+      }
+
+      // ----------------------------------------------------------------
       // 判据：私钥带口令时必须说「带口令」，不能只说「本机环境有问题」
       //
       // 2026-11-07 实测：客户用 ssh-keygen -N "口令" 生成的私钥（很多单位强制要求）

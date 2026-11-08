@@ -817,6 +817,31 @@ static bool isPassphraseProtectedKey(const QString &text)
 // 归因落到接收端层是对的，但通用建议是「检查目标目录是否存在、账号是否具备写权限、
 // 磁盘空间、是否装 rsync」——四条里只有"磁盘空间"沾边，真因是**挂载成只读**。
 // 客户会去查账号权限（完全正常），查一圈什么也查不到。
+// 远端保存目录**在传输过程中不见了**（被删 / 盘掉挂载 / 断电后 tmpfs 丢了）：
+// 2026-11-09 实测（1GB 传输中 rm -rf 远端目录）：
+//   ERR  rsync: stat "/data/rx/vanish/.rnd1g.bin.1ZVEYp" failed: No such file or directory (2)
+//   INFO rsync: rename "/data/rx/vanish/.rnd1g.bin.1ZVEYp" -> "rnd1g.bin": No such file or directory (2)
+// 当时短结论是「原因未识别」+「请把原始报错发给技术支持」—— 其实客户自己能查也能修。
+//
+// 判据用两条证词（都要求 No such file or directory 同时出现）：
+//   a) rsync: rename ... -> ...   ：临时文件在改名时不见了 ⇒ 目录没了
+//   b) rsync: stat .../.xxx       ：点开头那个临时文件 stat 不到 ⇒ 同上
+// 不能用单独的 "No such file or directory"：本地文件消失、清单缺文件也会这么说。
+static bool isRemoteDirVanished(const QString &text)
+{
+    if (text.isEmpty())
+        return false;
+    if (!text.contains(QLatin1String("No such file or directory"), Qt::CaseInsensitive))
+        return false;
+    if (text.contains(QLatin1String("rsync: rename"), Qt::CaseInsensitive))
+        return true;
+    // 点开头的临时文件 stat 不到（路径里出现 "/." 片段）
+    if (text.contains(QLatin1String("rsync: stat"), Qt::CaseInsensitive)
+        && text.contains(QLatin1String("/."), Qt::CaseSensitive))
+        return true;
+    return false;
+}
+
 static bool isReadOnlyFs(const QString &text)
 {
     if (text.isEmpty())
@@ -869,6 +894,12 @@ int classifyLayer(const QString &text)
         return LayerReceiverSsh;
 
     // 第 6 类最先判（理由见 isReceiverNameConflict 的注释）。
+    // 远端保存目录中途消失：失败发生在接收端（临时文件改名时目录没了），
+    // 不判的话会落到 LayerUnknown → 层说明打「未能从原始报错里判断出具体归属」，
+    // 与短结论「目标电脑上这个目录不见了」自相矛盾（2026-11-09 实测）。
+    if (isRemoteDirVanished(text))
+        return LayerReceiver;
+
     if (isReceiverNameConflict(text))
         return LayerReceiverNameConflict;
     for (const char *needle : kHardReceiver) {
@@ -1758,6 +1789,11 @@ QString specialAdvice(const QString &raw)
 }
 
 
+bool RsyncRunner::isRemoteDirVanishedForTest(const QString &raw)
+{
+    return isRemoteDirVanished(raw);
+}
+
 bool RsyncRunner::isReadOnlyFsForTest(const QString &raw)
 {
     return isReadOnlyFs(raw);
@@ -1771,6 +1807,20 @@ bool RsyncRunner::isRemotePathTooLongForTest(const QString &raw)
 bool RsyncRunner::isFileNameTooLongForTest(const QString &raw)
 {
     return isFileNameTooLong(raw);
+}
+
+QString RsyncRunner::remoteDirVanishedAdviceText()
+{
+    return QString::fromUtf8(
+        u8"\u4E0B\u8F7D\u5230\u4E00\u534A\uFF0C\u76EE\u6807\u7535\u8111\u4E0A\u90A3\u4E2A\u4FDD\u5B58\u76EE\u5F55\u7A81\u7136\u4E0D\u89C1\u4E86\uFF0C"
+        u8"\u6240\u4EE5\u6700\u540E\u4E00\u6B65\u6539\u540D\u5199\u4E0D\u8FDB\u53BB\u3002"
+        u8"\u5E38\u89C1\u539F\u56E0\u4E09\u79CD\uFF1A\u76EE\u5F55\u88AB\u5220\u3001\u76D8\u88AB\u5378\u8F7D\uFF08U \u76D8\u62D4\u4E86\u3001"
+        u8"\u7F51\u7EDC\u76D8\u65AD\u4E86\u3001tmpfs \u91CD\u542F\u540E\u4E22\u5931\uFF09\u3001\u6E05\u7406\u811A\u672C\u628A\u5B83\u6E05\u6389\u4E86\u3002"
+        u8"\u8BF7\u8BA9\u76EE\u6807\u7535\u8111\u7684\u8D1F\u8D23\u4EBA\uFF1A"
+        u8"\u2460 \u770B\u76EE\u5F55\u8FD8\u5728\u4E0D\u5728\uFF1Als \u4FDD\u5B58\u76EE\u5F55\uFF1B"
+        u8"\u2461 \u82E5\u662F\u76D8\u6389\u4E86\uFF0C\u628A\u5B83\u91CD\u65B0\u6302\u4E0A\u518D\u8DD1\u4E00\u6B21\uFF1B"
+        u8"\u2462 \u82E5\u662F\u6E05\u7406\u811A\u672C\u5E72\u7684\uFF0C\u628A\u8FD9\u4E2A\u4FDD\u5B58\u76EE\u5F55\u52A0\u8FDB\u4F8B\u5916\u3002"
+        u8"\u5DF2\u4F20\u7684\u90E8\u5206\u4E0D\u4F1A\u767D\u4F20\uFF1A\u91CD\u8DD1\u4F1A\u6309\u5185\u5BB9\u91CD\u65B0\u6BD4\u5BF9\u3002");
 }
 
 QString RsyncRunner::readOnlyFsAdviceText()
@@ -1862,6 +1912,9 @@ QString RsyncRunner::shortConclusionFor(const QString &raw)
     // 只读挂载排在磁盘满之前：原文都来自接收端 rsync，但处置完全不同。
     if (isReadOnlyFs(raw))
         return QString::fromUtf8(u8"\u76EE\u6807\u76EE\u5F55\u662F\u53EA\u8BFB\u7684\uFF0C\u5199\u4E0D\u8FDB\u53BB");
+    // 远端目录中途消失：原文清楚写着 rename/stat 到不了，客户自己能处理。
+    if (isRemoteDirVanished(raw))
+        return QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u4E0A\u8FD9\u4E2A\u76EE\u5F55\u4E0D\u89C1\u4E86");
     if (isRemotePathTooLong(raw))
         return QString::fromUtf8(u8"\u8FDC\u7AEF\u76EE\u5F55\u540D\u592A\u957F\uFF0C\u4F20\u4E0D\u8FC7\u53BB");
     if (isFileNameTooLong(raw))
@@ -1886,6 +1939,8 @@ QString RsyncRunner::adviceForTest(const QString &raw)
 {
     if (isReadOnlyFs(raw))
         return readOnlyFsAdviceText();
+    if (isRemoteDirVanished(raw))
+        return remoteDirVanishedAdviceText();
     if (isRemotePathTooLong(raw))
         return remotePathTooLongAdviceText();
     if (isFileNameTooLong(raw))
