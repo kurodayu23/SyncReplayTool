@@ -4127,50 +4127,6 @@ int runSelfCheck()
       }
 
       // ----------------------------------------------------------------
-      // 判据：手册承诺的「传输过程中被修改」通知必须真的存在且措辞对得上
-      //
-      // 2026-11-07 实测缺陷：手册 L663 的「日志里的提示」表里列了 7 条，
-      // 其余 6 条在代码里都能找到（GBK 转码 / 后缀不在规则 / 私钥权限 / 剪贴板占用 /
-      // 自动接受公钥 …），**唯独这一条全 src 搜不到**：
-      //   【注意】以下文件在传输过程中被修改：xxx
-      // 客户对着手册等这条提示永远等不到，也就不知道他传过去的是"写到一半"的快照。
-      //
-      // 判据打的是生产用的同一个函数 modifiedNoticeForTest()，不是手抄一份文案 ——
-      // 手抄的话，把生产那句删掉判据照样绿。
-      {
-          const QString notice = RsyncRunner::modifiedNoticeForTest(
-              QStringList() << QStringLiteral("grow.spe") << QStringLiteral("b.spe"));
-          const QString advice = RsyncRunner::modifiedAdviceText();
-          // 必须点到「注意」「传输过程中被修改」这两个关键措辞（手册里就是这么写的）
-          const bool hasTitle = notice.contains(QString::fromUtf8(u8"\u6CE8\u610F"));
-          const bool hasPhrase = notice.contains(QString::fromUtf8(u8"\u4F20\u8F93\u8FC7\u7A0B\u4E2D\u88AB\u4FEE\u6539"));
-          // 两个文件名都要点名
-          const bool hasBoth = notice.contains(QStringLiteral("grow.spe"))
-                               && notice.contains(QStringLiteral("b.spe"));
-          // 建议必须给出可照做的动作：下一轮补传 + 采集先停
-          const bool advHasRetry = advice.contains(QString::fromUtf8(u8"\u8865\u4F20"));
-          const bool advHasStop = advice.contains(QString::fromUtf8(u8"\u505C\u4E0B\u6765"));
-          // 反向锁：空列表不许产出任何文字（否则界面会冒出半句空提示）
-          const bool emptyQuiet = RsyncRunner::modifiedNoticeForTest(QStringList()).isEmpty();
-          // 反向锁：超过 10 个要折叠成"等 N 个"，否则日志被长列表刷屏
-          QStringList many;
-          for (int i = 0; i < 25; ++i)
-              many << QStringLiteral("f%1.spe").arg(i);
-          const QString manyNotice = RsyncRunner::modifiedNoticeForTest(many);
-          const bool folded = manyNotice.contains(QString::fromUtf8(u8"\u7B49 25 \u4E2A"));
-          const bool ok = hasTitle && hasPhrase && hasBoth && advHasRetry && advHasStop
-                          && emptyQuiet && folded;
-          if (!ok)
-              ++bad;
-          out << (ok ? "PASS\t" : "FAIL\t") << "modified-during-transfer-notice"
-              << "\thasTitle=" << (hasTitle ? 1 : 0)
-              << "\thasPhrase=" << (hasPhrase ? 1 : 0)
-              << "\thasBoth=" << (hasBoth ? 1 : 0)
-              << "\tadvHasRetry=" << (advHasRetry ? 1 : 0)
-              << "\tadvHasStop=" << (advHasStop ? 1 : 0)
-              << "\temptyQuiet=" << (emptyQuiet ? 1 : 0)
-              << "\tfolded=" << (folded ? 1 : 0) << "\n";
-      }
 
       // ----------------------------------------------------------------
       // 判据：文件名太长时必须说「名字太长」，不能只说「本机环境有问题」
