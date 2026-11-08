@@ -477,6 +477,8 @@ private:
                            const QString &adviceOverride = QString(),
                            const QString &shortOverride = QString());
     void ensureRemoteDirs();
+    // 组失败时把本组"未确认送达"的文件一并降级（见实现处注释）。
+    void downgradeUnconfirmedInGroup();
     void launchNext();
     // rsync 退出 0 之后核对目标目录还是不是同一个目录，见 verifyRemoteDir 注释。
     void verifyRemoteDir(const QString &remoteDir);

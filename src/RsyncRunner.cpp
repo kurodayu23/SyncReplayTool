@@ -4562,11 +4562,55 @@ void RsyncRunner::reconcileGroupCount()
     if (back <= 0)
         return;
     m_done -= back;
+    // 兜底：计数分子绝不允许是负数。2026-11-09 实测出现过 runDone=-3
+    // （另一个地方也扣了一次），界面上会显示「-3 / 4 个文件」，比不报还糟。
+    if (m_done < 0)
+        m_done = 0;
     // 再发一次 fileTransferred，把计数分子改成扣完之后的值。
     // 那一行的状态已经是「✕ 失败」，而界面"失败不会被后来的完成盖成成功"，
     // 所以这一发只改计数，不会把那行翻回「✓ 已完成」。
     emit fileTransferred(firstFailed, m_done, m_total);
 }
+
+// 组失败时，把本组**仍标着已传完、但其实无法证明送达**的文件一起降级。
+//
+// 为什么需要它（2026-11-09 实测，tmpfs 10MB + 1×20MB + 3×32B）：
+//   产品报告 states=ok,ok,ok,failed、count=3/4，
+//   而接收端真名文件 **0 个**（只有 .srt-partial 里那 10MB 残片，盘 100% 满）。
+//   真相：大文件先占满磁盘，三个小文件一个都没送到，却被算成 ok。
+//
+// 机制：xfr# 只表示**发送端**把数据发出去了（见 reconcileGroupCount 的注释），
+// 而"这个文件到底成没成"只在 stderr 里；rsync 的 code 23 明确说"有文件没传成"，
+// 但**不一定逐字点名每一个**。没被点名的那些，界面上就一直是「✓ 已完成」。
+//
+// 取舍：宁可多报一次失败，也不能让界面显示"完成"而远端没有文件 ——
+// 这是本项目在"源文件传输中被改"那一处就写下的同一条原则。
+// 重跑一次即可：rsync 按内容比对，真的已送达的文件不会重传。
+void RsyncRunner::downgradeUnconfirmedInGroup()
+{
+    QStringList unconfirmed;
+    for (int i = 0; i < m_settledCount && i < m_groupNames.size(); ++i) {
+        const QString n = m_groupNames.at(i);
+        // 已经被 reportFailedNames 点名降级过的，不重复处理。
+        if (m_failedNames.contains(n))
+            continue;
+        emit fileFailedInGroup(n);
+        m_failedNames.insert(n);
+        unconfirmed.append(n);
+    }
+    if (unconfirmed.isEmpty())
+        return;
+    // **计数不在这里扣**：统一交给 reconcileGroupCount()（它按 m_failedNames 扣），
+    // 两处都扣会扣成负数 —— 2026-11-09 实测 runDone=-3、count=-3 / 4 个文件。
+    // 这里只负责"把行标成失败 + 把名字记进 m_failedNames"。
+    emit logText(QString::fromUtf8(
+        u8"\u672C\u7EC4\u6CA1\u6709\u6210\u529F\u5B8C\u6210\uFF0C\u4E0B\u9762\u8FD9 %1 \u4E2A\u6587\u4EF6"
+        u8"\u65E0\u6CD5\u786E\u8BA4\u662F\u5426\u771F\u7684\u9001\u5230\u4E86\u76EE\u6807\u7535\u8111\uFF0C"
+        u8"\u5DF2\u6539\u56DE\u300C\u5931\u8D25\u300D\u3002"
+        u8"\u91CD\u8DD1\u4E00\u6B21\u5373\u53EF\uFF1A\u5DF2\u7ECF\u771F\u6B63\u9001\u5230\u7684\u6587\u4EF6"
+        u8"\u4E0D\u4F1A\u91CD\u4F20\uFF0C\u53EA\u8865\u5DEE\u5F02\u3002").arg(unconfirmed.size()));
+}
+
 
 void RsyncRunner::harvestStderrNames(const QString &text)
 {
@@ -4895,6 +4939,8 @@ void RsyncRunner::onFinished(int exitCode, QProcess::ExitStatus status)
             reportAttribution(m_stderrTail);
         reportFailedNames();
         reportIncompleteRemoteFiles();
+        // 组已失败：无法证明送达的文件一律降级，别让界面显示"完成"。
+        downgradeUnconfirmedInGroup();
     } else {
         // 传输过程中源文件被改过：rsync 传的是它**打开那一刻**的快照，
         // 用户在传输中途改了文件，远端拿到的就是改动前的版本，
