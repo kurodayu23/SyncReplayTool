@@ -827,6 +827,30 @@ static bool isPassphraseProtectedKey(const QString &text)
 //   a) rsync: rename ... -> ...   ：临时文件在改名时不见了 ⇒ 目录没了
 //   b) rsync: stat .../.xxx       ：点开头那个临时文件 stat 不到 ⇒ 同上
 // 不能用单独的 "No such file or directory"：本地文件消失、清单缺文件也会这么说。
+// 远端保存目录被**同名文件或断掉的符号链接**占着（不是目录）：
+// 2026-11-09 实测（远端 /data/rx/broken -> /data/rx/nonexistent_dir）：
+//   ERR  rsync: mkdir "/data/rx/broken" failed: File exists (17)
+//   ERR  rsync error: error in file IO (code 11) at main.c(674) [Receiver=3.1.1]
+// 当时的短结论是「原因未识别」+「请把原始报错发给技术支持」—— 其实客户自己能修：
+// 那个路径被一个文件或断链占着，删掉它或建出真目录即可。
+//
+// 判据要三条同时成立，避免误伤：
+//   ① rsync: mkdir      （是"建目录"这一步失败，不是别的 IO）
+//   ② failed: File exists（EEXIST）
+//   ③ [Receiver] 或 main.c( （失败发生在接收端；发送端也有 mkdir，但那是本地）
+static bool isRemotePathNotDir(const QString &text)
+{
+    if (text.isEmpty())
+        return false;
+    if (!text.contains(QLatin1String("rsync: mkdir"), Qt::CaseInsensitive))
+        return false;
+    if (!text.contains(QLatin1String("failed: File exists"), Qt::CaseInsensitive))
+        return false;
+    if (text.contains(QLatin1String("[Receiver]"), Qt::CaseInsensitive))
+        return true;
+    return text.contains(QLatin1String("main.c("), Qt::CaseSensitive);
+}
+
 static bool isRemoteDirVanished(const QString &text)
 {
     if (text.isEmpty())
@@ -897,6 +921,10 @@ int classifyLayer(const QString &text)
     // 远端保存目录中途消失：失败发生在接收端（临时文件改名时目录没了），
     // 不判的话会落到 LayerUnknown → 层说明打「未能从原始报错里判断出具体归属」，
     // 与短结论「目标电脑上这个目录不见了」自相矛盾（2026-11-09 实测）。
+    // 保存目录被同名文件/断链占着：失败同样发生在接收端（mkdir EEXIST），
+    // 不判的话层说明会打「未能从原始报错里判断出具体归属」，与短结论自相矛盾。
+    if (isRemotePathNotDir(text))
+        return LayerReceiver;
     if (isRemoteDirVanished(text))
         return LayerReceiver;
 
@@ -1789,6 +1817,11 @@ QString specialAdvice(const QString &raw)
 }
 
 
+bool RsyncRunner::isRemotePathNotDirForTest(const QString &raw)
+{
+    return isRemotePathNotDir(raw);
+}
+
 bool RsyncRunner::isRemoteDirVanishedForTest(const QString &raw)
 {
     return isRemoteDirVanished(raw);
@@ -1807,6 +1840,19 @@ bool RsyncRunner::isRemotePathTooLongForTest(const QString &raw)
 bool RsyncRunner::isFileNameTooLongForTest(const QString &raw)
 {
     return isFileNameTooLong(raw);
+}
+
+QString RsyncRunner::remotePathNotDirAdviceText()
+{
+    return QString::fromUtf8(
+        u8"\u76EE\u6807\u7535\u8111\u4E0A\u8FD9\u4E2A\u4FDD\u5B58\u76EE\u5F55\u88AB\u522B\u7684\u4E1C\u897F\u5360\u7740\u4E86\uFF1A"
+        u8"\u8981\u4E48\u662F\u4E00\u4E2A\u540C\u540D\u7684\u6587\u4EF6\uFF0C\u8981\u4E48\u662F\u4E00\u4E2A\u65AD\u6389\u7684\u8F6F\u94FE\u63A5"
+        u8"\uFF08\u6307\u5411\u4E00\u4E2A\u4E0D\u5B58\u5728\u7684\u76EE\u5F55\uFF09\u3002\u6240\u4EE5\u5EFA\u4E0D\u51FA\u76EE\u5F55\uFF0C"
+        u8"\u6587\u4EF6\u4E00\u4E2A\u90FD\u4F20\u4E0D\u8FDB\u53BB\u3002\u8BF7\u8BA9\u76EE\u6807\u7535\u8111\u7684\u8D1F\u8D23\u4EBA\uFF1A"
+        u8"\u2460 \u770B\u6E05\u5B83\u5230\u5E95\u662F\u4EC0\u4E48\uFF1Als -ld \u4FDD\u5B58\u76EE\u5F55\uFF1B"
+        u8"\u2461 \u82E5\u662F\u540C\u540D\u6587\u4EF6\uFF0C\u628A\u5B83\u6539\u540D\u6216\u5220\u6389\uFF1B"
+        u8"\u2462 \u82E5\u662F\u65AD\u94FE\uFF0C\u8981\u4E48\u5EFA\u51FA\u5B83\u6307\u5411\u7684\u76EE\u5F55\uFF0C"
+        u8"\u8981\u4E48\u5220\u6389\u94FE\u63A5\u6539\u6210\u771F\u76EE\u5F55\u3002");
 }
 
 QString RsyncRunner::remoteDirVanishedAdviceText()
@@ -1913,6 +1959,9 @@ QString RsyncRunner::shortConclusionFor(const QString &raw)
     if (isReadOnlyFs(raw))
         return QString::fromUtf8(u8"\u76EE\u6807\u76EE\u5F55\u662F\u53EA\u8BFB\u7684\uFF0C\u5199\u4E0D\u8FDB\u53BB");
     // 远端目录中途消失：原文清楚写着 rename/stat 到不了，客户自己能处理。
+    // 保存目录被同名文件/断链占着：原文说得很清楚（mkdir File exists），客户自己能修。
+    if (isRemotePathNotDir(raw))
+        return QString::fromUtf8(u8"\u4FDD\u5B58\u76EE\u5F55\u88AB\u540C\u540D\u6587\u4EF6\u6216\u65AD\u94FE\u5360\u7740");
     if (isRemoteDirVanished(raw))
         return QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u4E0A\u8FD9\u4E2A\u76EE\u5F55\u4E0D\u89C1\u4E86");
     if (isRemotePathTooLong(raw))
@@ -1939,6 +1988,8 @@ QString RsyncRunner::adviceForTest(const QString &raw)
 {
     if (isReadOnlyFs(raw))
         return readOnlyFsAdviceText();
+    if (isRemotePathNotDir(raw))
+        return remotePathNotDirAdviceText();
     if (isRemoteDirVanished(raw))
         return remoteDirVanishedAdviceText();
     if (isRemotePathTooLong(raw))

@@ -368,6 +368,9 @@ public:
     static QString readOnlyFsAdviceText();
     // 远端保存目录中途消失的专项建议（原来是"原因未识别"+推给技术支持）。
     static QString remoteDirVanishedAdviceText();
+    // 保存目录被同名文件/断链占着的专项建议。
+    static QString remotePathNotDirAdviceText();
+    static bool    isRemotePathNotDirForTest(const QString &raw);
     static bool    isRemoteDirVanishedForTest(const QString &raw);
     static bool    isReadOnlyFsForTest(const QString &raw);
     static bool    isRemotePathTooLongForTest(const QString &raw);
