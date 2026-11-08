@@ -3247,6 +3247,31 @@ void RsyncRunner::start(const TargetConfig &target,
         emit allFinished(false);
         return;
     }
+    // 「既没填密码、也没选私钥」：产品在无私钥时会明确传
+    //   PreferredAuthentications=password / PubkeyAuthentication=no / NumberOfPasswordPrompts=1
+    // 也就是**主动禁用**了 ssh-agent 与默认密钥。所以这个状态在设计上一定连不上，
+    // 而客户原来得到的是「账号密码不对（或对方改过）」—— 他会一直去改密码。
+    // 2026-11-09 实测：两项都空 → Permission denied (publickey,password)。
+    if (!target.useKey() && target.password.isEmpty()) {
+        // **不调 reportAttribution**：那条路必然套一层通用说明，
+        // 而 LayerAuth 的说明是"已连上目标电脑、但账号被拒绝"——
+        // 我们根本没连，那句话是假的。这里只陈述能确定的事实。
+        emit logText(QString::fromUtf8(u8"\u6CA1\u586B\u5BC6\u7801\u4E5F\u6CA1\u9009\u79C1\u94A5"));
+        emit logText(QString::fromUtf8(
+            u8"\u8FD9\u4E0D\u662F\u7F51\u7EDC\u95EE\u9898\uFF0C\u4E5F\u4E0D\u662F\u5BF9\u65B9\u62D2\u7EDD\uFF1A"
+            u8"\u7A0B\u5E8F\u5728\u53BB\u8FDE\u4E4B\u524D\u5C31\u53D1\u73B0\u767B\u5F55\u51ED\u636E\u662F\u7A7A\u7684\u3002"));
+        emit logText(QString::fromUtf8(
+            u8"\u8BBE\u7F6E\u91CC\u8FD9\u4E24\u9879\u90FD\u662F\u7A7A\u7684\uFF1A"
+            u8"\u65E2\u6CA1\u6709\u767B\u5F55\u5BC6\u7801\uFF0C\u4E5F\u6CA1\u9009\u79C1\u94A5\u6587\u4EF6\u3002"
+            u8"\u672C\u7A0B\u5E8F\u4E0D\u4F1A\u9000\u56DE ssh \u7684\u9ED8\u8BA4\u5BC6\u94A5\u6216 ssh-agent"
+            u8"\uFF08\u90A3\u6837\u5B9E\u9645\u8D70\u54EA\u6761\u8DEF\u5BA2\u6237\u770B\u4E0D\u51FA\u6765\uFF09\uFF0C"
+            u8"\u6240\u4EE5\u8FD9\u6837\u4E00\u5B9A\u8FDE\u4E0D\u4E0A\u3002"
+            u8"\u8BF7\u5728\u300C\u8BBE\u7F6E\u300D\u91CC\u4E8C\u9009\u4E00\uFF1A"
+            u8"\u2460 \u586B\u767B\u5F55\u5BC6\u7801\uFF1B\u2461 \u9009\u4E00\u4E2A\u79C1\u94A5\u6587\u4EF6\u3002"));
+        emit allFinished(false);
+        return;
+    }
+
     if (target.useKey() && !QFileInfo(target.keyPath).isFile()) {
         // 预检：短结论必须直说"私钥文件找不到"，否则下面那句具体路径会与
         //「原因未识别」自相矛盾（2026-11-08 实测）。
