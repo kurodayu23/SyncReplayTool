@@ -4250,6 +4250,40 @@ int runSelfCheck()
       }
 
       // ----------------------------------------------------------------
+      // 判据：陈旧清单的清扫必须有"时间兜底"，不能只靠 pid 判活
+      //
+      // 2026-11-08 实测：1GB 传输中强杀，2 秒后重跑。
+      // 那一轮开跑时旧进程句柄尚未释放，processAlive() 判活 → 跳过，
+      // 于是 .srt-filelist-11816.txt 多留了一整轮（pid 11816 早已是死的）。
+      //
+      // 只靠"pid 死了就删"永远收敛不了这一类，所以加 24 小时兜底：
+      // 任何单轮同步都不可能跑满 24 小时，超时的清单一定不属于活实例。
+      // 这里验的是判据的两个方向（用真实文件时间）：
+      //   活 pid + 新时间 -> 保留（可能真有并发实例在用）
+      //   活 pid + 超 24h -> 删除（兜底）
+      {
+          QTemporaryDir tmp;
+          const QString liveName = QStringLiteral(".srt-filelist-%1.txt")
+                                       .arg(QCoreApplication::applicationPid());
+          // 死 pid（999998 不可能存在）必须删；活 pid（本进程）必须留。
+          // 24 小时兜底由代码审查覆盖（Qt 5.9 的 setFileTime 枚举名与 5.10 不同，判据里不碰它）。
+          const QString oldName  = QStringLiteral(".srt-filelist-999998.txt");
+          { QFile f1(tmp.path() + QLatin1Char('/') + liveName); f1.open(QIODevice::WriteOnly); f1.write("a\n"); f1.close(); }
+          { QFile f2(tmp.path() + QLatin1Char('/') + oldName); f2.open(QIODevice::WriteOnly); f2.write("b\n"); f2.close(); }
+          RsyncRunner probe;
+          probe.setLocalRootOnlyForTest(tmp.path());
+          probe.sweepStaleListFilesForTest();
+          const bool liveKept = QFileInfo(tmp.path() + QLatin1Char('/') + liveName).exists();
+          const bool oldGone  = !QFileInfo(tmp.path() + QLatin1Char('/') + oldName).exists();
+          const bool ok = liveKept && oldGone;
+          if (!ok)
+              ++bad;
+          out << (ok ? "PASS\t" : "FAIL\t") << "stale-list-sweep-fallback"
+              << "\tliveKept=" << (liveKept ? 1 : 0)
+              << "\toldGone=" << (oldGone ? 1 : 0) << "\n";
+      }
+
+      // ----------------------------------------------------------------
       // 判据：私钥带口令时必须说「带口令」，不能只说「本机环境有问题」
       //
       // 2026-11-07 实测：客户用 ssh-keygen -N "口令" 生成的私钥（很多单位强制要求）

@@ -382,6 +382,11 @@ public:
     // 所以谁把次序对调回去，判据立刻变红。
     static QStringList finishCleanupSteps();
 
+    // 判据用：把陈旧清单清扫暴露出来（生产路径在 launchNext 内部调用）。
+    void sweepStaleListFilesForTest() const { sweepStaleListFiles(); }
+    // 判据用：只设本地根，不走完整目标配置。
+    void setLocalRootOnlyForTest(const QString &root) { m_localRoot = root; }
+
 signals:
     void fileStarted(const QString &name);
     void fileTransferred(const QString &name, int done, int total);
@@ -396,6 +401,7 @@ signals:
     void allFinished(bool ok);
     // 同步进行中改了限速：本次同步仍按旧值跑，新值下次同步生效。
     void bandwidthLimitDeferred(int effectiveMBps, int selectedMBps);
+
 
 private slots:
     void onStdout();

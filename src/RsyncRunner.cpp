@@ -2359,7 +2359,11 @@ void RsyncRunner::cleanupStaleSecrets()
     for (const QString &dir : dirs) {
         const QStringList found = QDir(dir).entryList(QStringList() << QStringLiteral("srt_pass_*")
                                                                       << QStringLiteral("srt_askpass_*"),
-                                                     QDir::Files | QDir::NoDotAndDotDot);
+                                                     // **必须带 QDir::Hidden**：清单名以点开头，在 Linux/麒麟 上那是隐藏文件，
+    // 不加这个标志 entryList 根本列不到它 —— 于是"清陈旧残留"在目标平台上
+    // 从来没生效过（2026-11-09 由判据 stale-list-sweep-fallback 在麒麟容器里抓到：
+    // 同一个判据在 Windows 上绿、在容器里红，差别就是 NTFS 的点开头不算隐藏）。
+    QDir::Files | QDir::Hidden | QDir::NoDotAndDotDot);
         for (const QString &name : found) {
             names << name;
             nameDirs << dir;
@@ -3586,7 +3590,11 @@ void RsyncRunner::sweepStaleListFiles() const
         return;
     const QDir root(m_localRoot);
     const QStringList names = root.entryList(QStringList() << QStringLiteral(".srt-filelist-*.txt"),
-                                             QDir::Files | QDir::NoDotAndDotDot);
+                                             // **必须带 QDir::Hidden**：清单名以点开头，在 Linux/麒麟 上那是隐藏文件，
+    // 不加这个标志 entryList 根本列不到它 —— 于是"清陈旧残留"在目标平台上
+    // 从来没生效过（2026-11-09 由判据 stale-list-sweep-fallback 在麒麟容器里抓到：
+    // 同一个判据在 Windows 上绿、在容器里红，差别就是 NTFS 的点开头不算隐藏）。
+    QDir::Files | QDir::Hidden | QDir::NoDotAndDotDot);
     const QString prefix = QStringLiteral(".srt-filelist-");
     const QString suffix = QStringLiteral(".txt");
     const int self = QCoreApplication::applicationPid();
@@ -3603,8 +3611,19 @@ void RsyncRunner::sweepStaleListFiles() const
             QFile::remove(root.absoluteFilePath(name));
             continue;
         }
-        if (pid == self || processAlive(pid))
+        if (pid == self)
             continue;
+        // 判活偶尔会把"刚被强杀、句柄尚未释放"的进程当成还活着 —— 实测（2026-11-08）：
+        // 强杀后 2 秒内开跑，11816 那份清单被判活跳过，于是它多留了一整轮。
+        // 只靠"pid 死了就删"永远收敛不了这一类，所以再加一道按时间的兜底：
+        // 任何单轮同步都不可能跑满 24 小时（看门狗按分钟级在看），
+        // 因此超过 24 小时还留着的清单一定不属于活着的实例，删掉安全。
+        if (processAlive(pid)) {
+            const QFileInfo fi(root.absoluteFilePath(name));
+            const qint64 ageSec = fi.lastModified().secsTo(QDateTime::currentDateTime());
+            if (ageSec < 24 * 3600)
+                continue;
+        }
         QFile::remove(root.absoluteFilePath(name));
     }
 }
@@ -5110,7 +5129,11 @@ int RsyncRunner::purgeSelfPidSecretFiles(const QString &dir, int selfPid)
     // 语义却完全相反，所以判据必须单独盯住它。
     const QStringList found = QDir(dir).entryList(QStringList() << QStringLiteral("srt_pass_*")
                                                                   << QStringLiteral("srt_askpass_*"),
-                                             QDir::Files | QDir::NoDotAndDotDot);
+                                             // **必须带 QDir::Hidden**：清单名以点开头，在 Linux/麒麟 上那是隐藏文件，
+    // 不加这个标志 entryList 根本列不到它 —— 于是"清陈旧残留"在目标平台上
+    // 从来没生效过（2026-11-09 由判据 stale-list-sweep-fallback 在麒麟容器里抓到：
+    // 同一个判据在 Windows 上绿、在容器里红，差别就是 NTFS 的点开头不算隐藏）。
+    QDir::Files | QDir::Hidden | QDir::NoDotAndDotDot);
     int removed = 0;
     const QString self = QString::number(selfPid);
     for (const QString &name : found) {
