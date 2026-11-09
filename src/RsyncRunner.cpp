@@ -2111,7 +2111,24 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer,
     {
         // 算法协商失败时不能用第 5 类那句「对端没有 SSH 服务应答」——
         // sshd 明明是活的，只是算法对不上。改用一句准确的，避免客户去重启 sshd。
-        QString meaning = isAlgoNegotiationFailure(raw)
+        // **没有报错原文时不许说"报错原文命中…"**。
+        //
+        // 2026-11-09 审查指出（11 处调用点受害）：预检类失败（找不到 rsync、
+        // 私钥文件不存在、看门狗超时、清单写不进去…）根本没有 rsync/ssh 原文，
+        // 而它们全都显式传了 forceLayer=LayerLocal，于是层说明取到
+        // kLayerMeaning[LayerLocal] ——「报错原文命中本机层匹配」。
+        // 客户看到「私钥文件找不到 / 报错原文命中本机层匹配」，后一句是**假话**：
+        // 这句结论恰恰是在没有任何原文的情况下得出的。
+        //
+        // 在这一处统一修，而不是逐个改 11 个调用点：原文为空时，
+        // 层说明只陈述能确定的事实（失败发生在发出连接之前）。
+        QString meaning = raw.trimmed().isEmpty()
+            ? QString::fromUtf8(
+                  u8"\u3010\u8D23\u4EFB\u5F52\u5C5E\uFF1A\u542F\u52A8\u68C0\u67E5\u3011"
+                  u8"\u8FD9\u6B21\u5931\u8D25\u53D1\u751F\u5728\u53D1\u51FA\u8FDE\u63A5\u4E4B\u524D\uFF0C"
+                  u8"\u8FD8\u6CA1\u6709\u4E0E\u76EE\u6807\u7535\u8111\u4EA4\u6362\u8FC7\u4EFB\u4F55\u6570\u636E\uFF0C"
+                  u8"\u56E0\u6B64\u6CA1\u6709\u8FDC\u7AEF\u62A5\u9519\u539F\u6587\u53EF\u5F15\u7528\u3002")
+            : isAlgoNegotiationFailure(raw)
             ? QString::fromUtf8(u8"\u3010\u8D23\u4EFB\u5F52\u5C5E\uFF1A\u63A5\u6536\u7AEF\u7535\u8111\u3011\u7AEF\u53E3\u80FD\u8FDE\u4E0A\uFF0C\u4F46\u53CC\u65B9\u6CA1\u6709\u5171\u540C\u652F\u6301\u7684 SSH \u7B97\u6CD5\uFF08\u52A0\u5BC6/\u5BC6\u94A5\u4EA4\u6362/\u4E3B\u673A\u5BC6\u94A5\u7C7B\u578B\uFF09\u3002")
             : QString::fromUtf8(kLayerMeaning[layer]);
         const int rb = meaning.indexOf(QChar(0x3011));
@@ -3348,13 +3365,10 @@ void RsyncRunner::start(const TargetConfig &target,
         reportAttribution(
             QString(), LayerLocal,
             QString::fromUtf8(
-                u8"\u672C\u673A\u6839\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB\uFF0C\u6240\u4EE5\u65E0\u6CD5\u751F\u6210\u4F20\u8F93\u6E05\u5355\u3002"
-                u8"\u5E38\u89C1\u539F\u56E0\uFF1A\u76EE\u5F55\u88AB\u6539\u540D\u3001\u88AB\u5220\u3001\u76D8\u88AB\u5378\u8F7D\uFF0C"
-                u8"\u6216\u8005\u8BE5\u76EE\u5F55\u53D8\u6210\u4E86\u53EA\u8BFB\u3002\u8BF7\uFF1A"
-                u8"\u2460 \u770B\u76EE\u5F55\u8FD8\u5728\u4E0D\u5728\uFF1Als \u672C\u673A\u76EE\u5F55\uFF1B"
-                u8"\u2461 \u76D8\u6389\u4E86\u5C31\u91CD\u65B0\u6302\u4E0A\uFF1B"
-                u8"\u2462 \u82E5\u662F\u53EA\u8BFB\uFF0C\u6362\u5230\u4E00\u4E2A\u53EF\u5199\u7684\u76EE\u5F55\u3002"),
-            QString::fromUtf8(u8"\u672C\u673A\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB"));
+                u8"\u672C\u673A\u6CA1\u627E\u5230 rsync \u53EF\u6267\u884C\u6587\u4EF6\uFF0C\u6240\u4EE5\u65E0\u6CD5\u540C\u6B65\u3002"
+                u8"\u8FD9\u4E0D\u662F\u7F51\u7EDC\u95EE\u9898\uFF0C\u4E5F\u4E0D\u662F\u5BC6\u94A5\u95EE\u9898\u3002\u8BF7\uFF1A"
+                u8"\u2460 \u786E\u8BA4\u5305\u5185 bin/ \u76EE\u5F55\u8FD8\u5728\uFF1B\u2461 \u6216\u5728\u672C\u673A\u88C5\u4E00\u4E2A rsync \u540E\u91CD\u8BD5\u3002"),
+            QString::fromUtf8(u8"\u627E\u4E0D\u5230 rsync"));
         emit logText(QString::fromUtf8(u8"\u672A\u627E\u5230 rsync \u53EF\u6267\u884C\u6587\u4EF6\u3002"));
         emit allFinished(false);
         return;
@@ -3451,20 +3465,16 @@ void RsyncRunner::start(const TargetConfig &target,
         }
     }
     if (!QFileInfo(m_localRoot).isDir()) {
-        // **这条必须给准确的短结论**：调用点已经知道原因（文件列表写不进本地根目录），
-        // 传空原文只会得到「原因未识别」+「请检查 rsync/私钥/磁盘」，三条全都不对。
-        // 2026-11-09 实测：把 localRoot 改名后，客户先看到"原因未识别"，
-        // 再往下才看到「无法在本地根目录写入临时文件列表：…」——顺序和结论都错。
+        // 两种情形都落在这里：目录不存在（被改名/删除/盘没挂上），
+        // 或者那个路径根本不是文件夹（填成了一个文件）。补救动作不同，话要说准。
         reportAttribution(
             QString(), LayerLocal,
             QString::fromUtf8(
-                u8"\u672C\u673A\u6839\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB\uFF0C\u6240\u4EE5\u65E0\u6CD5\u751F\u6210\u4F20\u8F93\u6E05\u5355\u3002"
-                u8"\u5E38\u89C1\u539F\u56E0\uFF1A\u76EE\u5F55\u88AB\u6539\u540D\u3001\u88AB\u5220\u3001\u76D8\u88AB\u5378\u8F7D\uFF0C"
-                u8"\u6216\u8005\u8BE5\u76EE\u5F55\u53D8\u6210\u4E86\u53EA\u8BFB\u3002\u8BF7\uFF1A"
-                u8"\u2460 \u770B\u76EE\u5F55\u8FD8\u5728\u4E0D\u5728\uFF1Als \u672C\u673A\u76EE\u5F55\uFF1B"
-                u8"\u2461 \u76D8\u6389\u4E86\u5C31\u91CD\u65B0\u6302\u4E0A\uFF1B"
-                u8"\u2462 \u82E5\u662F\u53EA\u8BFB\uFF0C\u6362\u5230\u4E00\u4E2A\u53EF\u5199\u7684\u76EE\u5F55\u3002"),
-            QString::fromUtf8(u8"\u672C\u673A\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB"));
+                u8"\u672C\u673A\u6839\u76EE\u5F55\u4E0D\u53EF\u7528\uFF1A"
+                u8"\u8981\u4E48\u4E0D\u5B58\u5728\uFF08\u88AB\u6539\u540D\u3001\u88AB\u5220\u3001\u76D8\u6CA1\u6302\u4E0A\uFF09\uFF0C"
+                u8"\u8981\u4E48\u90A3\u4E2A\u8DEF\u5F84\u6839\u672C\u4E0D\u662F\u6587\u4EF6\u5939\u3002"
+                u8"\u8BF7\u5230\u8BBE\u7F6E\u91CC\u91CD\u65B0\u9009\u4E00\u6B21\u672C\u673A\u76EE\u5F55\u3002"),
+            QString::fromUtf8(u8"\u672C\u673A\u6839\u76EE\u5F55\u4E0D\u5B58\u5728\u6216\u4E0D\u662F\u6587\u4EF6\u5939"));
         emit logText(QString::fromUtf8(u8"\u672C\u5730\u6839\u76EE\u5F55\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BFB\uFF1A%1").arg(m_localRoot));
         emit allFinished(false);
         return;
@@ -4427,13 +4437,10 @@ void RsyncRunner::launchNext()
         reportAttribution(
             QString(), LayerLocal,
             QString::fromUtf8(
-                u8"\u672C\u673A\u6839\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB\uFF0C\u6240\u4EE5\u65E0\u6CD5\u751F\u6210\u4F20\u8F93\u6E05\u5355\u3002"
-                u8"\u5E38\u89C1\u539F\u56E0\uFF1A\u76EE\u5F55\u88AB\u6539\u540D\u3001\u88AB\u5220\u3001\u76D8\u88AB\u5378\u8F7D\uFF0C"
-                u8"\u6216\u8005\u8BE5\u76EE\u5F55\u53D8\u6210\u4E86\u53EA\u8BFB\u3002\u8BF7\uFF1A"
-                u8"\u2460 \u770B\u76EE\u5F55\u8FD8\u5728\u4E0D\u5728\uFF1Als \u672C\u673A\u76EE\u5F55\uFF1B"
-                u8"\u2461 \u76D8\u6389\u4E86\u5C31\u91CD\u65B0\u6302\u4E0A\uFF1B"
-                u8"\u2462 \u82E5\u662F\u53EA\u8BFB\uFF0C\u6362\u5230\u4E00\u4E2A\u53EF\u5199\u7684\u76EE\u5F55\u3002"),
-            QString::fromUtf8(u8"\u672C\u673A\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB"));
+                u8"\u4E34\u65F6\u6587\u4EF6\u5217\u8868\u53EA\u5199\u5165\u4E86\u4E00\u90E8\u5206\u5C31\u505C\u4E86\uFF0C"
+                u8"\u8BF4\u660E\u672C\u673A\u76EE\u5F55\u6240\u5728\u5206\u533A\u5DF2\u7ECF\u6CA1\u7A7A\u95F4\uFF0C"
+                u8"\u6216\u8005\u76EE\u5F55\u88AB\u6539\u6210\u4E86\u53EA\u8BFB\u3002\u8BF7\u817E\u51FA\u7A7A\u95F4\u540E\u91CD\u8BD5\u3002"),
+            QString::fromUtf8(u8"\u4E34\u65F6\u6587\u4EF6\u5217\u8868\u53EA\u5199\u5165\u4E86\u4E00\u90E8\u5206"));
         emit logText(QString::fromUtf8(u8"\u4E34\u65F6\u6587\u4EF6\u5217\u8868\u53EA\u5199\u5165\u4E86 %1 / %2 \u5B57\u8282"
                                          u8"\uFF0C\u672C\u7EC4\u5DF2\u4FDD\u7559\u7684\u90E8\u5206\u6E05\u5355\u672A\u6267\u884C"
                                          u8"\u3002")
@@ -4452,13 +4459,10 @@ void RsyncRunner::launchNext()
         reportAttribution(
             QString(), LayerLocal,
             QString::fromUtf8(
-                u8"\u672C\u673A\u6839\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB\uFF0C\u6240\u4EE5\u65E0\u6CD5\u751F\u6210\u4F20\u8F93\u6E05\u5355\u3002"
-                u8"\u5E38\u89C1\u539F\u56E0\uFF1A\u76EE\u5F55\u88AB\u6539\u540D\u3001\u88AB\u5220\u3001\u76D8\u88AB\u5378\u8F7D\uFF0C"
-                u8"\u6216\u8005\u8BE5\u76EE\u5F55\u53D8\u6210\u4E86\u53EA\u8BFB\u3002\u8BF7\uFF1A"
-                u8"\u2460 \u770B\u76EE\u5F55\u8FD8\u5728\u4E0D\u5728\uFF1Als \u672C\u673A\u76EE\u5F55\uFF1B"
-                u8"\u2461 \u76D8\u6389\u4E86\u5C31\u91CD\u65B0\u6302\u4E0A\uFF1B"
-                u8"\u2462 \u82E5\u662F\u53EA\u8BFB\uFF0C\u6362\u5230\u4E00\u4E2A\u53EF\u5199\u7684\u76EE\u5F55\u3002"),
-            QString::fromUtf8(u8"\u672C\u673A\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB"));
+                u8"\u4E34\u65F6\u6587\u4EF6\u5217\u8868\u5199\u4E0D\u8FDB\u78C1\u76D8\uFF08\u5199\u5B8C\u4E86\u4F46\u5237\u4E0D\u4E0B\u53BB\uFF09\u3002"
+                u8"\u5E38\u89C1\u539F\u56E0\uFF1A\u78C1\u76D8\u6EE1\u3001\u76EE\u5F55\u88AB\u6539\u6210\u53EA\u8BFB\u3002"
+                u8"\u8BF7\u770B\u4E00\u4E0B\u672C\u673A\u76EE\u5F55\u6240\u5728\u5206\u533A\u7684\u5269\u4F59\u7A7A\u95F4\u540E\u91CD\u8BD5\u3002"),
+            QString::fromUtf8(u8"\u4E34\u65F6\u6587\u4EF6\u5217\u8868\u5199\u4E0D\u8FDB\u78C1\u76D8"));
         emit logText(QString::fromUtf8(u8"\u4E34\u65F6\u6587\u4EF6\u5217\u8868\u5199\u5165\u78C1\u76D8\u5931\u8D25"
                                          u8"\uFF0C\u672C\u7EC4\u672A\u6267\u884C\u3002"));
         m_failed = true;
@@ -5494,6 +5498,47 @@ void RsyncRunner::cleanupSecrets()
     m_passFilePath.clear();
 }
 
+// 接收端**磁盘满**时，把本组留在远端的半截文件清掉。
+//
+// 为什么要清（2026-11-09 实测）：tmpfs 100MB 传 200MB，rsync 的
+// --partial-dir=.srt-partial 会把半截文件写满整块盘（df 显示 100M 用 100M 剩 4K）。
+// 客户看到的是"同步失败"，而机上**别的程序也因为没空间开始失败** ——
+// 我们的工具把客户机器的盘占住了，还不退还。
+//
+// 为什么这里敢删、而 cleanupRemoteMarkers 里不敢：
+//   那边保留半截文件是为了"下次续传"。但本机实测（1GB 不可压缩数据）：
+//     干净全量 59.3s  vs  带着 430MB partial 继续 69.8s  —— 没有更快。
+//   也就是说，磁盘满时留着它既换不来续传，又继续占着客户已经没有的空间。
+//   代价对比很直接：留着 = 客户的盘一直满着；删掉 = 下次重传这一组。
+// 只在"确认磁盘满"时调用，其它失败原因仍然保留。
+void RsyncRunner::cleanupPartialAfterDiskFull(const QString &remoteDir)
+{
+    const QString sshBin = locateTool(QStringLiteral("ssh"));
+    if (sshBin.isEmpty())
+        return;
+    QString d = remoteDir.isEmpty() ? QStringLiteral(".") : remoteDir;
+    d.replace(QLatin1Char('\''), QLatin1String("'\\''"));
+    // 只删 .srt-partial 这个**我们自己建的**旁路目录，不碰客户的任何文件。
+    const QString cmd = QStringLiteral("rm -rf -- '") + d
+                        + QStringLiteral("/.srt-partial' 2>/dev/null || true");
+    QProcess p;
+    applyAskpassEnv(&p, m_askpassPath);
+    QStringList args = sshArgs(m_target, false);
+    args << (m_target.user + QLatin1Char('@') + m_target.host) << cmd;
+    p.start(sshBin, args);
+    // 和 cleanupRemoteMarkers 一样：栈上 QProcess 析构前必须收干净，
+    // 否则连不上的目标会让 ssh 一直挂着并打 "Destroyed while process is still running"。
+    p.waitForFinished(3000);
+    if (p.state() != QProcess::NotRunning) {
+        p.kill();
+        p.waitForFinished(1000);
+    }
+    emit logText(QString::fromUtf8(
+        u8"\u5DF2\u6E05\u6389\u672C\u7EC4\u7559\u5728\u76EE\u6807\u7535\u8111\u4E0A\u7684\u534A\u622A\u6587\u4EF6"
+        u8"\uFF08.srt-partial\uFF09\uFF0C\u628A\u7A7A\u95F4\u8FD8\u7ED9\u4E86\u5BF9\u65B9\u3002"
+        u8"\u8BF7\u5728\u76EE\u6807\u7535\u8111\u4E0A\u817E\u51FA\u7A7A\u95F4\u540E\u91CD\u8DD1\u4E00\u6B21\uFF0C"
+        u8"\u5DF2\u771F\u6B63\u9001\u5230\u7684\u6587\u4EF6\u4E0D\u4F1A\u91CD\u4F20\u3002"));
+}
 void RsyncRunner::cleanupRemoteMarkers()
 {
     // 正常路径里每组传完都会顺手删掉自己的标记；这里兜的是中途取消、

@@ -511,6 +511,7 @@ private:
     void cleanupSecrets();
     void cleanupListFiles();
     void cleanupRemoteMarkers();
+    void cleanupPartialAfterDiskFull(const QString &remoteDir);
     // 按 finishCleanupSteps() 给出的次序执行收尾清理。
     void runFinishCleanup();
 
