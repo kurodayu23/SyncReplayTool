@@ -156,17 +156,68 @@ try {
     if (-not (Test-Path $targetExe)) { throw "artifact missing: $targetExe" }
     Write-Output "OK: $targetExe"
 
-    # 同步更新 QtCreator 默认影子构建目录与 deploy 目录。
-    # 这两个目录里还带着运行时 DLL，只有 exe 是新编的那一份 ——
-    # 客户在 QtCreator 里点「运行」看到的就是这个 exe。
-    $qtCreatorDir = "$BuildRoot\build-Release\release"
-    if (Test-Path $qtCreatorDir) {
-        Copy-Item $targetExe (Join-Path $qtCreatorDir 'SyncReplayTool.exe') -Force
+# ---- 同步到**对外交付目录** ----
+#
+# 2026-11-09 审查（P1）：这里原来算的是 "$BuildRoot\deploy"，而 BuildRoot 传进来是
+#   ...\AP7000-Build-Directories\SyncReplayTool\build-Release
+# 于是路径变成 ...\build-Release\deploy —— 那个目录**根本不存在**，
+# 紧跟着的 `if (Test-Path ...)` 就静默跳过了。
+# 结果：工作区根下的 deploy\ 与 release\ **永远不会被更新**，
+#   实测那两个目录停在 11-07 16:44，而 build-Release 已经是 11-09 11:40。
+#   从 deploy\ 或 release\ 拿货 = 发出去的是两天前的版本，缺当天全部修复。
+#
+# 同样的错误也发生在 $qtCreatorDir 上：它被算成 ...\build-Release\build-Release\release。
+#
+# 现在改成：交付目录 = **构建输出目录的上一级**（工作区根），并且
+#   - 目录不存在就建出来（不再静默跳过）
+#   - 拷完逐个校验哈希，不一致直接 throw
+#
+$deliverRoot = Split-Path -Parent $BuildRoot
+# 后面插件同步段要用这个变量（原来由被我替换掉的那段定义，删掉后它变成 $null，
+# Join-Path $null 直接报 ParameterArgumentValidationErrorNullNotAllowed）。
+$deployDir = Join-Path $deliverRoot 'deploy'
+$srcHash = (Get-FileHash $targetExe -Algorithm SHA256).Hash
+foreach ($dn in @('release', 'deploy')) {
+    $d = Join-Path $deliverRoot $dn
+    if (-not (Test-Path $d)) {
+        New-Item -ItemType Directory -Force -Path $d | Out-Null
+        Write-Host "  已创建交付目录 $dn\\（原来不存在，之前一直被静默跳过）" -ForegroundColor Yellow
     }
-    $deployDir = "$BuildRoot\deploy"
-    if (Test-Path $deployDir) {
-        Copy-Item $targetExe (Join-Path $deployDir 'SyncReplayTool.exe') -Force
+    $dst = Join-Path $d 'SyncReplayTool.exe'
+    Copy-Item $targetExe $dst -Force
+    $dstHash = (Get-FileHash $dst -Algorithm SHA256).Hash
+    if ($dstHash -ne $srcHash) {
+        throw "交付目录拷贝校验失败：$dst（src=$($srcHash.Substring(0,16)) dst=$($dstHash.Substring(0,16))）"
     }
+    Write-Output "OK: $dst ($($srcHash.Substring(0,16)))"
+}
+
+# ---- 构建指纹（审查 P1-7）----
+#
+# 问题：交付包清单里的"源码提交"是**打包那一刻**的 git rev-parse HEAD，
+# 与"这个 exe 到底是用哪份源码编的"没有任何绑定关系。
+# 于是用未提交的源码编出来的 exe 也能三闸全绿（11-09 10:05 那份就是活例子：
+# 编于 2785105 提交前 15 分钟）。
+#
+# 现在编译完就写一份指纹，记录：编译时刻的 HEAD + 工作区是否有未提交改动 + exe 哈希。
+# 打包与校验脚本读这份指纹，而不是自己去跑 git —— 这样"exe ↔ 源码"被绑住了。
+$gitHead = (git -C $ProjectRoot rev-parse HEAD 2>$null)
+$gitDirty = 'unknown'
+try {
+    $st = git -C $ProjectRoot status --porcelain 2>$null
+    $gitDirty = if ([string]::IsNullOrWhiteSpace(($st -join ''))) { 'clean' } else { 'dirty' }
+} catch { }
+$stamp = @(
+    "exe-sha256=$srcHash"
+    "exe-bytes=$((Get-Item $targetExe).Length)"
+    "exe-mtime=$((Get-Item $targetExe).LastWriteTime.ToString('o'))"
+    "git-head=$gitHead"
+    "git-tree=$gitDirty"
+    "built-at=$((Get-Date).ToString('o'))"
+) -join "`n"
+$stampPath = Join-Path $BuildRoot 'build-stamp.txt'
+Set-Content -Path $stampPath -Value $stamp -Encoding UTF8
+Write-Output "OK: $stampPath (git=$(if($gitHead){$gitHead.Substring(0,8)}else{'n/a'}) $gitDirty)"
 
     # ---- Qt 插件目录：让**每一个**构建输出目录都能直接运行 ----
     #
