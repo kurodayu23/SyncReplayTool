@@ -1949,18 +1949,10 @@ bool RsyncRunner::isFileNameTooLongForTest(const QString &raw)
     return isFileNameTooLong(raw);
 }
 
-QString RsyncRunner::watchdogTimeoutAdviceText()
-{
-    return QString::fromUtf8(
-        u8"\u957F\u65F6\u95F4\u6CA1\u6709\u4EFB\u4F55\u8F93\u51FA\uFF0C\u7A0B\u5E8F\u5DF2\u7ECF\u628A\u8FD9\u4E00\u8F6E\u505C\u6389\u4E86\u3002"
-        u8"\u8FD9\u4E0D\u662F\u8BBE\u7F6E\u586B\u9519\uFF0C\u4E5F\u4E0D\u662F\u5BC6\u7801\u95EE\u9898\uFF1A"
-        u8"\u8FDE\u63A5\u5DF2\u7ECF\u5EFA\u7ACB\uFF0C\u4F46\u5BF9\u65B9\u957F\u65F6\u95F4\u6CA1\u6709\u4EFB\u4F55\u54CD\u5E94\u3002"
-        u8"\u5E38\u89C1\u539F\u56E0\uFF1A\u4E2D\u9014\u7F51\u7EDC\u505C\u987F\u3001\u76EE\u6807\u7535\u8111\u8D1F\u8F7D\u8FC7\u9AD8"
-        u8"\uFF08\u6B63\u5728\u626B\u6885\u3001\u6B63\u5728\u628A\u5927\u6587\u4EF6\u5199\u78C1\u76D8\uFF09\u3001\u6216\u8005\u76EE\u6807\u76D8\u6162\u5230\u5199\u4E0D\u52A8\u3002"
-        u8"\u8BF7\uFF1A\u2460 \u5148\u91CD\u8DD1\u4E00\u6B21\uFF08\u5DF2\u4F20\u90E8\u5206\u4E0D\u4F1A\u91CD\u4F20\uFF09\uFF1B"
-        u8"\u2461 \u82E5\u53CD\u590D\u8D85\u65F6\uFF0C\u5230\u76EE\u6807\u7535\u8111\u4E0A\u770B\u770B\u78C1\u76D8\u548C CPU \u662F\u4E0D\u662F\u9971\u548C\uFF1B"
-        u8"\u2462 \u5927\u6587\u4EF6\u5728\u5F31\u7F51\u4E0B\u53EF\u4EE5\u5148\u628A\u5E26\u5BBD\u9650\u5236\u8C03\u5C0F\u518D\u8BD5\u3002");
-}
+// （watchdogTimeoutAdviceText 已在 2026-11-10 删除：删掉 launchNext 里重复的归因后
+//   它不再有调用点，编译器会剥离其字符串，交付门禁「中文文案」闸门因此报 8 条缺失。
+//   保留死代码没有意义 —— 需要的话从 git 历史取。）
+
 
 QString RsyncRunner::hostKeyMismatchAdviceText()
 {
@@ -4553,9 +4545,10 @@ void RsyncRunner::launchNext()
         // 客户去改设置，而真因是「长时间没有任何输出 = 卡住了」。
         // 层用 LayerUnknown 是诚实的：知道超时，但不知道是网络停顿、
         // 目标机负载过高还是别的 —— 不编一个具体原因去误导人。
-        reportAttribution(QString(), LayerUnknown,
-                          watchdogTimeoutAdviceText(),
-                          QString::fromUtf8(u8"\u770B\u95E8\u72D7\u8D85\u65F6\uFF0C\u672C\u8F6E\u5DF2\u505C\u6B62"));
+        // **这里不再重复报归因**（2026-11-10 实测）：onWatchdogTimeout() 已经把
+        // 阶段、层、短结论、建议全报过一遍了。原来这里再报一次，日志里
+        // 会同时出现两套结论（第一套短结论是「原因未识别」），自相矛盾。
+        // 这里只留一句"后面的分组不跑了"的事实说明。
         // 整轮绝不能报成功。
         if (!m_abortedUnfinished)
             m_failed = true;
@@ -5667,14 +5660,24 @@ void RsyncRunner::onWatchdogTimeout()
     // 不替用户断言。
     if (m_watchStage == StageVerify)
         reportAttribution(QString(), LayerReceiver,
-                          QString::fromUtf8(kVerifyTimeoutAdvice));
+                          QString::fromUtf8(kVerifyTimeoutAdvice),
+                          QString::fromUtf8(u8"\u6838\u5BF9\u8FDC\u7AEF\u76EE\u5F55\u65F6\u5361\u4F4F\u4E86"));
     else
         // 传输阶段卡住**不能**断言"本机环境有问题"：2026-11-07 实测（传输中途 docker pause
         // 对端 30 秒），客户看到「本机环境有问题」+「报错原文命中本机层匹配」，会去查本机
         // 杀毒软件、权限、磁盘 —— 而真因是对端停止响应。
         // 卡住时 rsync 一个字都不吐，本机弹窗被拦与链路半断开在日志上完全一样，
         // 区分不了就不能断言，用"原因未识别"+ 两个方向都点到的建议（见 kStallAdvice）。
-        reportAttribution(QString(), LayerUnknown, QString::fromUtf8(kStallAdvice));
+        reportAttribution(QString(), LayerUnknown,
+                          QString::fromUtf8(kStallAdvice),
+                          // **短结论按阶段给**（2026-11-10 实测）：原来这里不传 shortOverride，
+                          // 短结论走 shortConclusionFor("") = 「原因未识别」——
+                          // 客户第一眼看到的就是这句，最刺眼也最没用。
+                          m_watchStage == StageRemoteDirs
+                              ? QString::fromUtf8(u8"\u5EFA\u8FDC\u7AEF\u76EE\u5F55\u65F6\u5361\u4F4F\u4E86")
+                              : (m_watchStage == StageVerify
+                                 ? QString::fromUtf8(u8"\u6838\u5BF9\u8FDC\u7AEF\u76EE\u5F55\u65F6\u5361\u4F4F\u4E86")
+                                 : QString::fromUtf8(u8"\u4F20\u8F93\u65F6\u957F\u65F6\u95F4\u65E0\u54CD\u5E94")));
     // 只等 1 秒：kill 之后进程会立刻结束，而 waitForFinished 不跑事件循环，
     // finished 信号稍后由事件循环发出，真正的收尾在 onFinished 槽里做。
     m_proc->kill();
