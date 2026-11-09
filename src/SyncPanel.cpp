@@ -2820,6 +2820,18 @@ void SyncPanel::onRunLog(const QString &text)
                        || l.contains(QString::fromUtf8(u8"\u88AB\u62D2\u7EDD"))
                        || l.contains(QString::fromUtf8(u8"\u78C1\u76D8\u6EE1"))) {
                 kind = 4; tag = QStringLiteral("ERR");
+            } else if (l.startsWith(QString::fromUtf8(u8"\u8BF7"))
+                       || l.startsWith(QString::fromUtf8(u8"\u2460"))
+                       || l.startsWith(QString::fromUtf8(u8"\u2461"))
+                       || l.startsWith(QString::fromUtf8(u8"\u2462"))
+                       || l.startsWith(QString::fromUtf8(u8"\u8BF7\u5728"))
+                       || l.contains(QString::fromUtf8(u8"\u8BF7\u5230"))
+                       || l.contains(QString::fromUtf8(u8"\u8BF7\u8BA9"))) {
+                // **建议行不能是灰字**（2026-11-09 实测）：
+                // 「请检查本机：rsync 和 ssh 客户端是否齐全…」原来打 INFO 灰，
+                // 而它恰恰是客户最该读的那一行；上面结论红、建议灰，一屏红灰相间。
+                // 与失败结论同级用 ERR 偏重，用 WARN（橙）恰好表达"该你动手了"。
+                kind = 3; tag = QStringLiteral("WARN");
             } else if (l.contains(QString::fromUtf8(u8"\u672C\u7EC4\u5B8C\u6210"))
                        || l.contains(QString::fromUtf8(u8"\u540C\u6B65\u5B8C\u6210"))
                        || l.contains(QString::fromUtf8(u8"\u5DF2\u4F20"))
