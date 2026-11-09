@@ -5181,6 +5181,12 @@ void RsyncRunner::onFinished(int exitCode, QProcess::ExitStatus status)
             reportAttribution(m_stderrTail);
         reportFailedNames();
         reportIncompleteRemoteFiles();
+                // 磁盘满时把我们自己写进去的半截文件收掉，把空间还给客户 ——
+                // 否则客户那块盘的 100% 是被**我们**占着的，机上别的程序跟着失败。
+                // （2026-11-09：这个函数上一轮加了却没接上调用点，成了死代码，
+                //   被交付门禁的"中文字面量"检查抓出来：4 条文案不在 exe 里。）
+                if (isReceiverDiskFull(m_stderrTail) && m_groupIndex < m_groups.size())
+                    cleanupPartialAfterDiskFull(m_groups.at(m_groupIndex).remoteDir);
         // 组已失败：无法证明送达的文件一律降级，别让界面显示"完成"。
         downgradeUnconfirmedInGroup();
     } else {
