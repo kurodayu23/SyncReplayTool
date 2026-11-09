@@ -166,6 +166,12 @@ bool processAlive(int pid)
 // 免得后人看到没有转义又以为漏了、顺手加回来。
 QString escapeForRemoteShell(const QString &path)
 {
+    // **实测：这个位置什么都不用转义**（2026-11-10 复核）。
+    // 容器内直接跑 `rsync -a --protect-args src/a.txt "srtpw@host:/data/rx/qtest_it's/"`，
+    // 文件正确落进 `qtest_it's`（1 个），`qtest_its` 为 0 —— 说明 rsync 自己会把这个
+    // 目标串原样交给远端，不需要额外引号处理。
+    // 我一度在这里加单引号转义，结果把原本正确的行为改坏了（文件落进 it's 以外的目录），
+    // 已撤回。保留恒等函数是为了让这条实测结论留在原地。
     Q_UNUSED(path);
     return path;
 }
@@ -3881,7 +3887,16 @@ void RsyncRunner::start(const TargetConfig &target,
     // 但 ensureRemoteDirs / verifyRemoteDir 过 shell，两处口径不同就会出现
     // 「建在一个目录、传进另一个目录」—— 这正是历史上单引号那次故障的形态。只能拒。
     auto rejectShellMeta = [this](const QString &raw) {
-        const QString metaChars = QStringLiteral("$`;|&()");
+        // **单引号与双引号也必须拒**（2026-11-10 实测 D6）：
+        // 上面这段注释提到的"历史上单引号那次故障"其实**没被真正拦住** ——
+        // metaChars 里从来没有单引号。实测（Windows 侧 msys rsync 3.5.1）：
+        //   remoteRoot = /data/rx/wq_it's/
+        //   rsync -a --protect-args -e <ssh> a.txt "srtpw@host:/data/rx/wq_it's/"
+        //   -> rc=0 成功，但文件落进 /data/rx/wq_its（引号被吃掉），
+        //      目标目录 wq_it's 里 0 个文件。
+        // 容器内 Linux rsync 3.1.3 同样调用则正确落位 —— 是 Windows 侧 rsync 的差异，
+        // 产品无法转义补救（见上面 L3886 的结论），只能拒。
+        const QString metaChars = QStringLiteral("$`;|&()") + QChar(0x27) + QChar(0x22);
         for (const QChar c : raw) {
             if (!metaChars.contains(c))
                 continue;
