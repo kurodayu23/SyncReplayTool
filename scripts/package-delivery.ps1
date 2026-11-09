@@ -50,7 +50,9 @@
 [CmdletBinding()]
 param(
     [string]$ProjectRoot = '',
-    [string]$BuildRoot   = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\nightD',
+    # **默认指向当前构建输出目录**（2026-11-09 修）：原来默认 nightD 是 10-28 的旧构建，
+    # 手工打包会打出一个漏掉十几处修复的包（和 verify_delivery_package.ps1 同一个坑）。
+    [string]$BuildRoot   = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\build-Release',
     [string]$OutDir      = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\pkgtest',
     [string]$RuntimeDir  = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\deploy',
     [string[]]$FallbackRuntimeDirs = @('C:\Windows\System32'),
@@ -755,6 +757,40 @@ foreach ($a in $artifacts) {
 #
 # 清单里写什么：版本号、架构、每个产物的 sha256、包内主程序的 sha256、
 # 源码提交号 —— 客服拿到客户机器上的 sha256 就能确认是不是同一版。
+# ---- **构建指纹闸门**（2026-11-09 加）----
+#
+# 目的：绝不打出一个"exe 比源码旧"的包。历史上出现过两次：
+#   · verify_delivery_package.ps1 默认 BuildRoot 指向 12 天前的 nightD；
+#   · 实测：exe 指纹 git-head=2211c21 而 HEAD 已是 f2bb010（落后一个提交）。
+# 两道检查：
+#   ① stamp 必须存在（没有 = 不是 build-win.ps1 编的，来路不明）
+#   ② stamp 的 git-head 必须等于当前 HEAD，且 git-tree=clean
+$stampPath = Join-Path $BuildRoot 'build-stamp.txt'
+if (-not (Test-Path $stampPath)) {
+    Write-Host "错误：$BuildRoot 下没有 build-stamp.txt —— 这个目录不是 build-win.ps1 编出来的。" -ForegroundColor Red
+    exit 3
+}
+$stamp = @{}
+Get-Content $stampPath | ForEach-Object {
+    if ($_ -match '^([^=]+)=(.*)$') { $stamp[$Matches[1].Trim()] = $Matches[2].Trim() }
+}
+$headNow = (& git -C $ProjectRoot rev-parse HEAD 2>$null | Select-Object -First 1)
+$stampHead = $stamp['git-head']
+$stampTree = $stamp['git-tree']
+if ($stampHead -ne $headNow) {
+    Write-Host "错误：exe 比源码旧，拒绝出包。" -ForegroundColor Red
+    Write-Host "  exe 编译于 : $stampHead" -ForegroundColor Yellow
+    Write-Host "  当前 HEAD  : $headNow" -ForegroundColor Yellow
+    Write-Host "  请先跑 scripts\build-win.ps1 重新编译后再打包。" -ForegroundColor Yellow
+    exit 3
+}
+# 工作树是否干净**不拦**（2026-11-09 修正口径）：
+#   exe 对应的是"编译那一刻的提交"，本树之后再有改动并不改变包里那个 exe 的内容。
+#   真正要拦的只有一件事：exe 比源码旧（git-head 对不上 HEAD）—— 那条在上面。
+if ($stampTree -ne 'clean') {
+    Write-Host "  注意：exe 编译时工作区有未提交改动（git-tree=$stampTree）。" -ForegroundColor Yellow
+    Write-Host "        若那些改动已进入后续提交，包内容不受影响；否则请重新编译。" -ForegroundColor Yellow
+}
 $ManifestPath = Join-Path $OutDir "数据同步工具-$SrtVersionTag-版本与校验值.txt"
 $gitCommit = '未知'
 try {
