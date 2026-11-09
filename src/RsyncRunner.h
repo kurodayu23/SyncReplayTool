@@ -370,6 +370,9 @@ public:
     static QString remoteDirVanishedAdviceText();
     // 保存目录被同名文件/断链占着的专项建议。
     static QString remotePathNotDirAdviceText();
+    // 源文件在传输中消失的专项建议。
+    static QString sourceFileVanishedAdviceText();
+    static bool    isSourceFileVanishedForTest(const QString &raw);
     static bool    isRemotePathNotDirForTest(const QString &raw);
     static bool    isRemoteDirVanishedForTest(const QString &raw);
     static bool    isReadOnlyFsForTest(const QString &raw);

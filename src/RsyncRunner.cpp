@@ -838,6 +838,24 @@ static bool isPassphraseProtectedKey(const QString &text)
 //   ① rsync: mkdir      （是"建目录"这一步失败，不是别的 IO）
 //   ② failed: File exists（EEXIST）
 //   ③ [Receiver] 或 main.c( （失败发生在接收端；发送端也有 mkdir，但那是本地）
+// **源端**文件在传输过程中消失（被删/被移走/采集程序滚动清理）：
+// 2026-11-09 实测（传输 200 个文件时删掉 50 个）：
+//   ERR  rsync: [sender] link_stat ".../d151.bin" failed: No such file or directory (2)
+//   ERR  rsync error: some files/attrs were not transferred (code 23) at main.c(1412)
+// 当时短结论是「本机环境有问题」+「检查 rsync/ssh 是否齐全、私钥是否可读、磁盘是否有空间」
+// —— 三条全都不成立。真因是**源文件自己消失了**，客户要做的是"别在同步期间删文件"。
+//
+// 判据：link_stat 是 rsync **发送端**在取文件属性，配 No such file 才是源端消失。
+// 不能用单独的 No such file：远端目录消失、清单缺文件都会这么说。
+static bool isSourceFileVanished(const QString &text)
+{
+    if (text.isEmpty())
+        return false;
+    if (!text.contains(QLatin1String("link_stat"), Qt::CaseInsensitive))
+        return false;
+    return text.contains(QLatin1String("No such file or directory"), Qt::CaseInsensitive);
+}
+
 static bool isRemotePathNotDir(const QString &text)
 {
     if (text.isEmpty())
@@ -923,6 +941,9 @@ int classifyLayer(const QString &text)
     // 与短结论「目标电脑上这个目录不见了」自相矛盾（2026-11-09 实测）。
     // 保存目录被同名文件/断链占着：失败同样发生在接收端（mkdir EEXIST），
     // 不判的话层说明会打「未能从原始报错里判断出具体归属」，与短结论自相矛盾。
+    // 源文件在传输中消失：失败发生在**发送端**（link_stat 取不到文件），归本机层。
+    if (isSourceFileVanished(text))
+        return LayerLocal;
     if (isRemotePathNotDir(text))
         return LayerReceiver;
     if (isRemoteDirVanished(text))
@@ -1817,6 +1838,11 @@ QString specialAdvice(const QString &raw)
 }
 
 
+bool RsyncRunner::isSourceFileVanishedForTest(const QString &raw)
+{
+    return isSourceFileVanished(raw);
+}
+
 bool RsyncRunner::isRemotePathNotDirForTest(const QString &raw)
 {
     return isRemotePathNotDir(raw);
@@ -1840,6 +1866,18 @@ bool RsyncRunner::isRemotePathTooLongForTest(const QString &raw)
 bool RsyncRunner::isFileNameTooLongForTest(const QString &raw)
 {
     return isFileNameTooLong(raw);
+}
+
+QString RsyncRunner::sourceFileVanishedAdviceText()
+{
+    return QString::fromUtf8(
+        u8"\u6709\u6E90\u6587\u4EF6\u5728\u8FD9\u4E00\u8F6E\u4F20\u8F93\u671F\u95F4\u4ECE\u672C\u673A\u6D88\u5931\u4E86"
+        u8"\uFF08\u88AB\u5220\u3001\u88AB\u79FB\u8D70\uFF0C\u6216\u91C7\u96C6\u7A0B\u5E8F\u6B63\u5728\u6EDA\u52A8\u6E05\u7406\uFF09\uFF0C"
+        u8"\u6240\u4EE5\u8FD9\u4E00\u7EC4\u505C\u5728\u4E86\u534A\u8DEF\u3002"
+        u8"\u8FD9\u4E0D\u662F\u672C\u673A\u73AF\u5883\u574F\u4E86\uFF08rsync/ssh \u90FD\u5728\u3001\u79C1\u94A5\u4E5F\u6B63\u5E38\uFF09\u3002"
+        u8"\u8BF7\uFF1A\u2460 \u540C\u6B65\u671F\u95F4\u4E0D\u8981\u5220\u3001\u4E0D\u8981\u79FB\u52A8\u6E90\u76EE\u5F55\u91CC\u7684\u6587\u4EF6\uFF1B"
+        u8"\u2461 \u82E5\u662F\u91C7\u96C6\u7A0B\u5E8F\u5728\u6EDA\u52A8\u6E05\u7406\uFF0C\u6539\u6210\u540C\u6B65\u5B8C\u6210\u540E\u518D\u6E05\uFF1B"
+        u8"\u2462 \u91CD\u8DD1\u4E00\u6B21\u5373\u53EF\uFF1A\u5DF2\u7ECF\u771F\u6B63\u9001\u5230\u7684\u6587\u4EF6\u4E0D\u4F1A\u91CD\u4F20\uFF0C\u53EA\u8865\u5DEE\u5F02\u3002");
 }
 
 QString RsyncRunner::remotePathNotDirAdviceText()
@@ -1960,6 +1998,10 @@ QString RsyncRunner::shortConclusionFor(const QString &raw)
         return QString::fromUtf8(u8"\u76EE\u6807\u76EE\u5F55\u662F\u53EA\u8BFB\u7684\uFF0C\u5199\u4E0D\u8FDB\u53BB");
     // 远端目录中途消失：原文清楚写着 rename/stat 到不了，客户自己能处理。
     // 保存目录被同名文件/断链占着：原文说得很清楚（mkdir File exists），客户自己能修。
+    // 源文件在传输中消失：不是本机环境坏了，是客户自己的文件被动过。
+    if (isSourceFileVanished(raw))
+        return QString::fromUtf8(u8"\u6709\u6E90\u6587\u4EF6\u5728\u4F20\u8F93\u4E2D\u6D88\u5931\u4E86");
+
     if (isRemotePathNotDir(raw))
         return QString::fromUtf8(u8"\u4FDD\u5B58\u76EE\u5F55\u88AB\u540C\u540D\u6587\u4EF6\u6216\u65AD\u94FE\u5360\u7740");
     if (isRemoteDirVanished(raw))
@@ -1986,6 +2028,8 @@ QString RsyncRunner::shortConclusionFor(const QString &raw)
 // 必须复刻**覆写优先**的顺序，否则判据验不到"口令私钥给了专项建议"这件事。
 QString RsyncRunner::adviceForTest(const QString &raw)
 {
+    if (isSourceFileVanished(raw))
+        return sourceFileVanishedAdviceText();
     if (isReadOnlyFs(raw))
         return readOnlyFsAdviceText();
     if (isRemotePathNotDir(raw))
