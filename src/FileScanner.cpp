@@ -797,7 +797,13 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
             QString raw = fi.fileName();
             while (raw.endsWith(QLatin1Char('.')) && raw.length() > 1)
                 raw.chop(1);
-            const QString suffix = QFileInfo(raw).suffix().toLower().trimmed();
+            QString suffixName = raw;
+            // **全角点也要当分隔符**（2026-11-10 实测）：国内输入法未切半角时
+            // 很容易打出 "b．dat"（U+FF0E）。Qt 的 QFileInfo/suffix() 只认 ASCII 点，
+            // 于是这种文件的后缀算出来是空串，**任何规则都匹配不到**，
+            // 而界面还建议"补一条对应后缀的规则"——那条规则根本写不出来。
+            suffixName.replace(QChar(0xFF0E), QLatin1Char('.'));
+            const QString suffix = QFileInfo(suffixName).suffix().toLower().trimmed();
         bool suffixHit = false;
         for (const QString &w : wanted) {
             if (ToolRunner::suffixMatches(w, suffix, raw)) { suffixHit = true; break; }
@@ -1077,7 +1083,13 @@ QVector<SuffixStat> FileScanner::detectSuffixes(const QString &root)
             QString raw = fi.fileName();
             while (raw.endsWith(QLatin1Char('.')) && raw.length() > 1)
                 raw.chop(1);
-            const QString suffix = QFileInfo(raw).suffix().toLower().trimmed();
+            QString suffixName = raw;
+            // **全角点也要当分隔符**（2026-11-10 实测）：国内输入法未切半角时
+            // 很容易打出 "b．dat"（U+FF0E）。Qt 的 QFileInfo/suffix() 只认 ASCII 点，
+            // 于是这种文件的后缀算出来是空串，**任何规则都匹配不到**，
+            // 而界面还建议"补一条对应后缀的规则"——那条规则根本写不出来。
+            suffixName.replace(QChar(0xFF0E), QLatin1Char('.'));
+            const QString suffix = QFileInfo(suffixName).suffix().toLower().trimmed();
 
             QString rel = fi.absoluteFilePath();
             if (rel.startsWith(basePath))

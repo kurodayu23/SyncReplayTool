@@ -362,6 +362,9 @@ bool ToolRunner::suffixMatches(const QString &ruleNorm, const QString &fileSuffi
 QString ToolRunner::normSuffix(const QString &s)
 {
     QString v = s.trimmed().toLower();
+    // **全角点归一成半角点**（2026-11-10 实测）：客户在规则栏里打出 "．dat"
+    // 时，归一化不认全角点，那条规则永远匹配不到任何文件。
+    v.replace(QChar(0xFF0E), QLatin1Char('.'));
     while (v.startsWith(QLatin1Char('.')))
         v.remove(0, 1);
     // **尾点也必须去**，而且必须两侧同时去。
