@@ -888,6 +888,28 @@ static bool isSourceFileLocked(const QString &text)
            || text.contains(QLatin1String("Sharing violation"), Qt::CaseInsensitive);
 }
 
+// **主机密钥校验没通过**（不是用户认证失败！）。2026-11-09 实测：
+//   ERR  Host key verification failed.
+//   ERR  No ED25519 host key is known for [127.0.0.1]:2390 and you have requested strict checking.
+// 产品当时归因成「目标电脑不接受这把私钥」+ 建议「把公钥加到 authorized_keys」——
+// 方向完全反了：这跟客户自己的私钥毫无关系，是**对端身份没被确认**。
+//
+// 根因：kFailRules 里 "Host key verification failed" 被映射到 LayerAuth（L280），
+// 于是短结论走认证层话术。这里单独识别并覆盖三处文案。
+static bool isHostKeyMismatch(const QString &text)
+{
+    if (text.isEmpty())
+        return false;
+    if (text.contains(QLatin1String("Host key verification failed"), Qt::CaseInsensitive))
+        return true;
+    if (text.contains(QLatin1String("REMOTE HOST IDENTIFICATION HAS CHANGED"), Qt::CaseInsensitive))
+        return true;
+    // "No ED25519 host key is known for [host]:port and you have requested strict checking."
+    if (text.contains(QLatin1String("host key is known for"), Qt::CaseInsensitive))
+        return true;
+    return false;
+}
+
 static bool isRemotePathNotDir(const QString &text)
 {
     if (text.isEmpty())
@@ -1908,6 +1930,30 @@ bool RsyncRunner::isFileNameTooLongForTest(const QString &raw)
     return isFileNameTooLong(raw);
 }
 
+QString RsyncRunner::watchdogTimeoutAdviceText()
+{
+    return QString::fromUtf8(
+        u8"\u957F\u65F6\u95F4\u6CA1\u6709\u4EFB\u4F55\u8F93\u51FA\uFF0C\u7A0B\u5E8F\u5DF2\u7ECF\u628A\u8FD9\u4E00\u8F6E\u505C\u6389\u4E86\u3002"
+        u8"\u8FD9\u4E0D\u662F\u8BBE\u7F6E\u586B\u9519\uFF0C\u4E5F\u4E0D\u662F\u5BC6\u7801\u95EE\u9898\uFF1A"
+        u8"\u8FDE\u63A5\u5DF2\u7ECF\u5EFA\u7ACB\uFF0C\u4F46\u5BF9\u65B9\u957F\u65F6\u95F4\u6CA1\u6709\u4EFB\u4F55\u54CD\u5E94\u3002"
+        u8"\u5E38\u89C1\u539F\u56E0\uFF1A\u4E2D\u9014\u7F51\u7EDC\u505C\u987F\u3001\u76EE\u6807\u7535\u8111\u8D1F\u8F7D\u8FC7\u9AD8"
+        u8"\uFF08\u6B63\u5728\u626B\u6885\u3001\u6B63\u5728\u628A\u5927\u6587\u4EF6\u5199\u78C1\u76D8\uFF09\u3001\u6216\u8005\u76EE\u6807\u76D8\u6162\u5230\u5199\u4E0D\u52A8\u3002"
+        u8"\u8BF7\uFF1A\u2460 \u5148\u91CD\u8DD1\u4E00\u6B21\uFF08\u5DF2\u4F20\u90E8\u5206\u4E0D\u4F1A\u91CD\u4F20\uFF09\uFF1B"
+        u8"\u2461 \u82E5\u53CD\u590D\u8D85\u65F6\uFF0C\u5230\u76EE\u6807\u7535\u8111\u4E0A\u770B\u770B\u78C1\u76D8\u548C CPU \u662F\u4E0D\u662F\u9971\u548C\uFF1B"
+        u8"\u2462 \u5927\u6587\u4EF6\u5728\u5F31\u7F51\u4E0B\u53EF\u4EE5\u5148\u628A\u5E26\u5BBD\u9650\u5236\u8C03\u5C0F\u518D\u8BD5\u3002");
+}
+
+QString RsyncRunner::hostKeyMismatchAdviceText()
+{
+    return QString::fromUtf8(
+        u8"\u76EE\u6807\u7535\u8111\u7684\u4E3B\u673A\u5BC6\u94A5\u6CA1\u901A\u8FC7\u6821\u9A8C\uFF0C\u8FDE\u63A5\u88AB\u4E3B\u52A8\u65AD\u5F00\u3002"
+        u8"\u8FD9**\u4E0D\u662F**\u5BC6\u7801\u9519\uFF0C\u4E5F**\u4E0D\u662F**\u79C1\u94A5\u95EE\u9898\uFF1A\u6839\u672C\u6CA1\u8D70\u5230\u8BA4\u8BC1\u90A3\u4E00\u6B65\uFF0C"
+        u8"\u662F\u5BF9\u65B9\u7684\u4E3B\u673A\u516C\u94A5\u6CA1\u88AB\u672C\u673A\u8BB0\u4F4F\uFF08\u6216\u8005\u5BF9\u65B9\u6362\u8FC7\u4E3B\u673A\u5BC6\u94A5\uFF09\u3002\u8BF7\uFF1A"
+        u8"\u2460 \u5728\u300C\u8BBE\u7F6E\u300D\u91CC\u52FE\u4E0A\u300C\u81EA\u52A8\u63A5\u53D7\u76EE\u6807\u4E3B\u673A\u516C\u94A5\u300D\uFF08\u4E0B\u6B21\u8FDE\u63A5\u4F1A\u8BB0\u4F4F\uFF09\uFF1B"
+        u8"\u2461 \u6216\u8005\u8BA9\u76EE\u6807\u673A\u8D1F\u8D23\u4EBA\u628A\u4E3B\u673A\u516C\u94A5\u53D1\u7ED9\u4F60\u3001\u6838\u5BF9\u6307\u7EB9\u540E\u52A0\u8FDB known_hosts\uFF1B"
+        u8"\u2462 \u5982\u679C\u4F60\u786E\u5B9A\u5BF9\u65B9\u771F\u7684\u6362\u8FC7\u673A\u5668\uFF0C\u5148\u628A\u5B83\u4ECE known_hosts \u91CC\u5220\u6389\u518D\u8FDE\u3002");
+}
+
 QString RsyncRunner::sourceFileLockedAdviceText()
 {
     return QString::fromUtf8(
@@ -2054,6 +2100,9 @@ QString RsyncRunner::shortConclusionFor(const QString &raw)
     // 保存目录被同名文件/断链占着：原文说得很清楚（mkdir File exists），客户自己能修。
     // 源文件在传输中消失：不是本机环境坏了，是客户自己的文件被动过。
     // 源文件被别的程序占用：不是本机环境坏了，是那个文件打不开。
+    // 主机密钥校验没过：不是私钥问题，是"对端身份没被确认"。
+    if (isHostKeyMismatch(raw))
+        return QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u7684\u4E3B\u673A\u5BC6\u94A5\u5BF9\u4E0D\u4E0A");
     if (isSourceFileLocked(raw))
         return QString::fromUtf8(u8"\u6709\u6587\u4EF6\u6B63\u88AB\u522B\u7684\u7A0B\u5E8F\u5360\u7528");
     if (isSourceFileVanished(raw))
@@ -2085,6 +2134,8 @@ QString RsyncRunner::shortConclusionFor(const QString &raw)
 // 必须复刻**覆写优先**的顺序，否则判据验不到"口令私钥给了专项建议"这件事。
 QString RsyncRunner::adviceForTest(const QString &raw)
 {
+    if (isHostKeyMismatch(raw))
+        return hostKeyMismatchAdviceText();
     if (isSourceFileLocked(raw))
         return sourceFileLockedAdviceText();
     if (isSourceFileVanished(raw))
@@ -2173,7 +2224,10 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer,
     // 长得一模一样（都是 Permission denied (publickey,password)）。
     QString shortLine = shortOverride.isEmpty() ? shortConclusionFor(raw) : shortOverride;
     QString finalAdvice = advice;
-    if (layer == LayerAuth && m_target.useKey()
+    // **主机密钥校验失败不算"私钥被拒"**（2026-11-09 实测）：
+    // kFailRules 把 "Host key verification failed" 归到 LayerAuth，于是这段
+    // "私钥模式"覆盖会把它改写成「目标电脑不接受这把私钥」＋建议去加公钥，方向完全反了。
+    if (layer == LayerAuth && m_target.useKey() && !isHostKeyMismatch(raw)
         && (shortOverride.isEmpty() || shortLine == QString::fromUtf8(kLayerShort[LayerAuth]))) {
         shortLine = QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u4E0D\u63A5\u53D7\u8FD9\u628A\u79C1\u94A5");
         finalAdvice = QString::fromUtf8(
@@ -2204,12 +2258,21 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer,
         //
         // 在这一处统一修，而不是逐个改 11 个调用点：原文为空时，
         // 层说明只陈述能确定的事实（失败发生在发出连接之前）。
+        // **"没有原文"不等于"还没连上"**（2026-11-09 实测）：
+        // 看门狗超时就是典型反例 —— 连接早建好了、数据可能传了一半，只是卡住没输出，
+        // stderr 自然是空的。原来这里一律说"这次失败发生在发出连接之前"，是假话。
+        // 用 m_roundActive / m_watchStage 区分"运行时卡住"与"连接之前"。
         QString meaning = raw.trimmed().isEmpty()
-            ? QString::fromUtf8(
-                  u8"\u3010\u8D23\u4EFB\u5F52\u5C5E\uFF1A\u542F\u52A8\u68C0\u67E5\u3011"
-                  u8"\u8FD9\u6B21\u5931\u8D25\u53D1\u751F\u5728\u53D1\u51FA\u8FDE\u63A5\u4E4B\u524D\uFF0C"
-                  u8"\u8FD8\u6CA1\u6709\u4E0E\u76EE\u6807\u7535\u8111\u4EA4\u6362\u8FC7\u4EFB\u4F55\u6570\u636E\uFF0C"
-                  u8"\u56E0\u6B64\u6CA1\u6709\u8FDC\u7AEF\u62A5\u9519\u539F\u6587\u53EF\u5F15\u7528\u3002")
+            ? ((m_roundActive || m_watchStage != StageNone)
+               ? QString::fromUtf8(
+                     u8"\u3010\u8D23\u4EFB\u5F52\u5C5E\uFF1A\u8FD0\u884C\u65F6\u3011"
+                     u8"\u8FDE\u63A5\u5DF2\u7ECF\u5EFA\u7ACB\uFF0C\u4F46\u5BF9\u65B9\u957F\u65F6\u95F4\u6CA1\u6709\u4EFB\u4F55\u54CD\u5E94\uFF0C"
+                     u8"\u6240\u4EE5\u62FF\u4E0D\u5230\u5BF9\u65B9\u7684\u62A5\u9519\u539F\u6587\u3002")
+               : QString::fromUtf8(
+                     u8"\u3010\u8D23\u4EFB\u5F52\u5C5E\uFF1A\u542F\u52A8\u68C0\u67E5\u3011"
+                     u8"\u8FD9\u6B21\u5931\u8D25\u53D1\u751F\u5728\u53D1\u51FA\u8FDE\u63A5\u4E4B\u524D\uFF0C"
+                     u8"\u8FD8\u6CA1\u6709\u4E0E\u76EE\u6807\u7535\u8111\u4EA4\u6362\u8FC7\u4EFB\u4F55\u6570\u636E\uFF0C"
+                     u8"\u56E0\u6B64\u6CA1\u6709\u8FDC\u7AEF\u62A5\u9519\u539F\u6587\u53EF\u5F15\u7528\u3002"))
             : isAlgoNegotiationFailure(raw)
             ? QString::fromUtf8(u8"\u3010\u8D23\u4EFB\u5F52\u5C5E\uFF1A\u63A5\u6536\u7AEF\u7535\u8111\u3011\u7AEF\u53E3\u80FD\u8FDE\u4E0A\uFF0C\u4F46\u53CC\u65B9\u6CA1\u6709\u5171\u540C\u652F\u6301\u7684 SSH \u7B97\u6CD5\uFF08\u52A0\u5BC6/\u5BC6\u94A5\u4EA4\u6362/\u4E3B\u673A\u5BC6\u94A5\u7C7B\u578B\uFF09\u3002")
             : QString::fromUtf8(kLayerMeaning[layer]);
@@ -3400,7 +3463,7 @@ void RsyncRunner::start(const TargetConfig &target,
     if (!isSafeLoginField(target.host, true) || !isSafeLoginField(target.user, false)) {
         emit logText(QString::fromUtf8(u8"\u4E3B\u673A\u540D\u6216\u8D26\u53F7\u91CC\u542B\u4E0D\u5141\u8BB8\u7684\u5B57\u7B26\uFF08\u7A7A\u683C\u3001\u5192\u53F7\u3001\u5F15\u53F7\u3001\u5206\u53F7\u7B49\uFF09\u3002"));
             reportAttribution(QString(), LayerConfig, QString(),
-                              QString::fromUtf8(u8"\u4E3B\u673A\u540D\u6216\u8D26\u53F7\u542B\u4E0D\u5148\u8BB8\u7684\u5B57\u7B26"));
+                              QString::fromUtf8(u8"\u4E3B\u673A\u540D\u6216\u8D26\u53F7\u542B\u4E0D\u5141\u8BB8\u7684\u5B57\u7B26"));
         emit allFinished(false);
         return;
     }
@@ -3831,7 +3894,7 @@ void RsyncRunner::start(const TargetConfig &target,
                 u8"\u8BF7\u628A\u79C1\u94A5\u6539\u540D\u6210\u4E0D\u542B\u53CC\u5F15\u53F7\u7684\u6587\u4EF6\u540D"
                 u8"\uFF08\u4F8B\u5982 id_ed25519\uFF09\uFF0C\u6216\u8005\u5728\u300C\u8BBE\u7F6E\u300D\u91CC\u91CD\u65B0\u9009\u4E00\u6B21\u79C1\u94A5\u3002"));
             reportAttribution(QString(), LayerConfig, QString(),
-                              QString::fromUtf8(u8"\u79C1\u94A5\u8DEF\u5F84\u542B\u4E0D\u5148\u8BB8\u7684\u5B57\u7B26"));
+                              QString::fromUtf8(u8"\u79C1\u94A5\u8DEF\u5F84\u542B\u4E0D\u5141\u8BB8\u7684\u5B57\u7B26"));
             emit allFinished(false);
             return;
         }
@@ -4408,16 +4471,18 @@ void RsyncRunner::launchNext()
         // 不是"有问题"：rsync 退出码 0 已经证明这一组传完了，
         // 卡住的是"核对"这个手段（见 onWatchdogTimeout 里的说明）。
         //
-            reportAttribution(QString(), LayerConfig, QString(),
-                              QString::fromUtf8(u8"\u770B\u95E8\u72D7\u8D85\u65F6\uFF0C\u672C\u8F6E\u5DF2\u505C\u6B62"));
-        // 硬约束不变：这里仍然 emit allFinished(false) —— 后续分组没跑，
+        // **看门狗超时不是"设置项填错"**（2026-11-09 实测）：归到 LayerConfig 会让
+        // 客户去改设置，而真因是「长时间没有任何输出 = 卡住了」。
+        // 层用 LayerUnknown 是诚实的：知道超时，但不知道是网络停顿、
+        // 目标机负载过高还是别的 —— 不编一个具体原因去误导人。
+        reportAttribution(QString(), LayerUnknown,
+                          watchdogTimeoutAdviceText(),
+                          QString::fromUtf8(u8"\u770B\u95E8\u72D7\u8D85\u65F6\uFF0C\u672C\u8F6E\u5DF2\u505C\u6B62"));
         // 整轮绝不能报成功。
         if (!m_abortedUnfinished)
             m_failed = true;
         runFinishCleanup();
         m_roundActive = false;
-            reportAttribution(QString(), LayerConfig, QString(),
-                              QString::fromUtf8(u8"\u770B\u95E8\u72D7\u8D85\u65F6\uFF0C\u672C\u8F6E\u5DF2\u505C\u6B62"));
         emit allFinished(false);
         return;
     }

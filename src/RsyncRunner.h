@@ -374,6 +374,8 @@ public:
     static QString sourceFileVanishedAdviceText();
     // 源文件被别的程序占用的专项建议。
     static QString sourceFileLockedAdviceText();
+    static QString hostKeyMismatchAdviceText();
+    static QString watchdogTimeoutAdviceText();
     static bool    isSourceFileLockedForTest(const QString &raw);
     static bool    isSourceFileVanishedForTest(const QString &raw);
     static bool    isRemotePathNotDirForTest(const QString &raw);
