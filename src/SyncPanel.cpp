@@ -2327,6 +2327,22 @@ void SyncPanel::onScanFinished(const QVector<FileItem> &files)
                 appendLogLine(QStringLiteral("WARN"),
                               QObject::tr("\xE8\x87\xAA\xE5\x8A\xA8\xE5\x90\x8C\xE6\xAD\xA5\xE6\x9C\xAC\xE6\xAC\xA1\xE6\x97\xA0\xE6\x96\x87\xE4\xBB\xB6\xE5\x8F\xAF\xE5\x90\x8C\xE6\xAD\xA5\xEF\xBC\x8C\xE5\xB7\xB2\xE7\xBB\x88\xE6\xAD\xA2\xE3\x80\x82"), 3);
             }
+            // **必须把按钮和忙态收回来**（2026-11-09 审查 P1-5）：
+            //
+            // 进这条分支之前，startSyncInternal 已经把按钮文案改成「取消同步」
+            // （那时是为了扫描期间别让客户以为还没开始）。而这里原来只打一行 WARN
+            // 就结束了 —— 按钮**永久停在「取消同步」**。
+            //
+            // 更糟的是 m_syncRequested 在上面已被清掉，所以再点一下实际执行的是
+            // "重新扫描"而不是取消：**文案与行为完全相反**。
+            //
+            // 实测（麒麟 xcb，目录在但无匹配文件）：按钮一直写着「取消同步」，
+            // 客户以为同步还在跑，其实什么都没发生。
+            setBusy(false);
+            setStartButtonIdle();
+            setStatusLine(QString::fromUtf8(u8"\u6CA1\u6709\u5339\u914D\u7684\u6587\u4EF6"), 3);
+            // 探针模式：这一轮永远不会开始，报告不写就等于自动化一直挂着。
+            writeProgressProbeReport();
         } else {
             // **自动触发时显式全选**。
             //
@@ -2767,19 +2783,55 @@ void SyncPanel::onRunLog(const QString &text)
         const QString l = lines.at(i).trimmed();
         if (l.isEmpty())
             continue;
-        int kind = 0;
-        QString tag = QStringLiteral("INFO");
-        const QString lower = l.toLower();
-        if (lower.contains("failed") || lower.contains("error") || lower.contains("denied")) {
-            kind = 4; tag = QStringLiteral("ERR");
-        }
-        else if (lower.contains("skip") || lower.contains("unchanged")) {
-            kind = 3; tag = QStringLiteral("SKIP");
-        }
-        else if (lower.contains("total size") || lower.contains("sent ")) {
-            kind = 2; tag = QStringLiteral("DONE");
-        }
-        appendLogLine(tag, l, kind);
+            int kind = 0;
+            QString tag = QStringLiteral("INFO");
+            const QString lower = l.toLower();
+            // **不能只认英文关键词**（2026-11-09 审查 P1-4）：
+            //
+            // 原来只有 failed / error / denied 判红，于是：
+            //   · 产品自己的中文归因（「私钥文件找不到」「目标电脑磁盘满了」
+            //     「账号密码不对」「有源文件在传输中消失了」）全部落在灰色 INFO；
+            //   · rsync 的英文原文行是红的。
+            // 一屏里红灰相间，客户看到的是「两个故障」，而真正该读的结论是灰的。
+            //
+            // 现在分四类，按**语义**而不是语言：
+            //   红色 ERR  —— 英文报错 + 产品自己的失败结论（下面这张词表）
+            //   橙色 WARN —— 提醒类（自动接受主机公钥、传输中被改、部分未传完）
+            //   绿色 DONE —— 本组完成 / 同步完成 / 已传 xx
+            //   蓝色 SYNC —— 开始同步、→ 目标目录
+            if (lower.contains("failed") || lower.contains("error")
+                || lower.contains("denied") || lower.contains("refused")
+                || lower.contains("timed out") || lower.contains("no space left")) {
+                kind = 4; tag = QStringLiteral("ERR");
+            } else if (l.contains(QString::fromUtf8(u8"\u627E\u4E0D\u5230"))
+                       || l.contains(QString::fromUtf8(u8"\u4E0D\u5B58\u5728"))
+                       || l.contains(QString::fromUtf8(u8"\u8BFB\u4E0D\u4E86"))
+                       || l.contains(QString::fromUtf8(u8"\u5199\u4E0D\u8FDB"))
+                       || l.contains(QString::fromUtf8(u8"\u5199\u4E0D\u5165"))
+                       || l.contains(QString::fromUtf8(u8"\u6CA1\u586B"))
+                       || l.contains(QString::fromUtf8(u8"\u4E0D\u5BF9"))
+                       || l.contains(QString::fromUtf8(u8"\u6D88\u5931\u4E86"))
+                       || l.contains(QString::fromUtf8(u8"\u6CA1\u88C5"))
+                       || l.contains(QString::fromUtf8(u8"\u5360\u7740"))
+                       || l.contains(QString::fromUtf8(u8"\u6CA1\u6CD5"))
+                       || l.contains(QString::fromUtf8(u8"\u65E0\u6CD5"))
+                       || l.contains(QString::fromUtf8(u8"\u5931\u8D25"))
+                       || l.contains(QString::fromUtf8(u8"\u8D85\u65F6"))
+                       || l.contains(QString::fromUtf8(u8"\u88AB\u62D2\u7EDD"))
+                       || l.contains(QString::fromUtf8(u8"\u78C1\u76D8\u6EE1"))) {
+                kind = 4; tag = QStringLiteral("ERR");
+            } else if (l.contains(QString::fromUtf8(u8"\u672C\u7EC4\u5B8C\u6210"))
+                       || l.contains(QString::fromUtf8(u8"\u540C\u6B65\u5B8C\u6210"))
+                       || l.contains(QString::fromUtf8(u8"\u5DF2\u4F20"))
+                       || lower.contains("total size") || lower.contains("sent ")) {
+                kind = 2; tag = QStringLiteral("DONE");
+            } else if (lower.contains("skip") || lower.contains("unchanged")
+                       || l.contains(QString::fromUtf8(u8"\u8DF3\u8FC7"))) {
+                kind = 3; tag = QStringLiteral("SKIP");
+            } else if (l.contains(QString::fromUtf8(u8"\u5F00\u59CB\u7B2C"))
+                       || l.startsWith(QString::fromUtf8(u8"\u2192"))) {
+                kind = 1; tag = QStringLiteral("SYNC");
+            }
     }
 }
 
