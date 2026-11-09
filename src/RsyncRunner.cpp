@@ -869,6 +869,25 @@ static bool isSourceFileVanished(const QString &text)
     return text.contains(QLatin1String("No such file or directory"), Qt::CaseInsensitive);
 }
 
+// **本地源文件正被别的程序占用**（Windows 现场最常见：Excel 开着 .xlsx、
+// PDF 阅读器开着文件、杀毒软件正在扫）。2026-11-09 实测：
+//   ERR  rsync: [sender] send_files failed to open ".../l3.dat": Device or resource busy (16)
+// 产品当时给的是「本机环境有问题」+「请检查 rsync/私钥/磁盘空间」——三条全都不成立，
+// 真因是那个文件被占用，客户要做的是关掉占用它的程序。
+//
+// 判据两条同时成立才认：send_files failed to open（发送端打不开源文件）+ 忙碌错误。
+// 只看 "Device or resource busy" 不够：远端写入路径也可能报同样的词。
+static bool isSourceFileLocked(const QString &text)
+{
+    if (text.isEmpty())
+        return false;
+    if (!text.contains(QLatin1String("send_files failed to open"), Qt::CaseInsensitive))
+        return false;
+    return text.contains(QLatin1String("Device or resource busy"), Qt::CaseInsensitive)
+           || text.contains(QLatin1String("being used by another process"), Qt::CaseInsensitive)
+           || text.contains(QLatin1String("Sharing violation"), Qt::CaseInsensitive);
+}
+
 static bool isRemotePathNotDir(const QString &text)
 {
     if (text.isEmpty())
@@ -955,6 +974,9 @@ int classifyLayer(const QString &text)
     // 保存目录被同名文件/断链占着：失败同样发生在接收端（mkdir EEXIST），
     // 不判的话层说明会打「未能从原始报错里判断出具体归属」，与短结论自相矛盾。
     // 源文件在传输中消失：失败发生在**发送端**（link_stat 取不到文件），归本机层。
+    // 源文件被占用：失败在发送端，归本机层。
+    if (isSourceFileLocked(text))
+        return LayerLocal;
     if (isSourceFileVanished(text))
         return LayerLocal;
     if (isRemotePathNotDir(text))
@@ -1851,6 +1873,11 @@ QString specialAdvice(const QString &raw)
 }
 
 
+bool RsyncRunner::isSourceFileLockedForTest(const QString &raw)
+{
+    return isSourceFileLocked(raw);
+}
+
 bool RsyncRunner::isSourceFileVanishedForTest(const QString &raw)
 {
     return isSourceFileVanished(raw);
@@ -1879,6 +1906,17 @@ bool RsyncRunner::isRemotePathTooLongForTest(const QString &raw)
 bool RsyncRunner::isFileNameTooLongForTest(const QString &raw)
 {
     return isFileNameTooLong(raw);
+}
+
+QString RsyncRunner::sourceFileLockedAdviceText()
+{
+    return QString::fromUtf8(
+        u8"\u6709\u6E90\u6587\u4EF6\u6B63\u88AB\u522B\u7684\u7A0B\u5E8F\u5360\u7528\uFF08Excel\u3001PDF \u9605\u8BFB\u5668\u3001"
+        u8"\u6740\u6BD2\u8F6F\u4EF6\u626B\u63CF\u4E2D\u90FD\u4F1A\u8FD9\u6837\uFF09\uFF0C\u6240\u4EE5\u8FD9\u4E00\u7EC4\u505C\u5728\u4E86\u534A\u8DEF\u3002"
+        u8"\u8FD9\u4E0D\u662F\u672C\u673A\u73AF\u5883\u574F\u4E86\uFF08rsync/ssh \u90FD\u5728\u3001\u79C1\u94A5\u6B63\u5E38\u3001\u78C1\u76D8\u6709\u7A7A\u95F4\uFF09\u3002"
+        u8"\u4E0A\u9762\u7684\u62A5\u9519\u5DF2\u7ECF\u70B9\u540D\u4E86\u662F\u54EA\u4E2A\u6587\u4EF6\uFF1B\u8BF7\uFF1A"
+        u8"\u2460 \u628A\u5360\u7528\u5B83\u7684\u7A0B\u5E8F\u5173\u6389\uFF08\u6216\u5728\u90A3\u4E2A\u7A0B\u5E8F\u91CC\u5173\u95ED\u8BE5\u6587\u4EF6\uFF09\uFF1B"
+        u8"\u2461 \u91CD\u8DD1\u4E00\u6B21\u5373\u53EF\uFF1A\u5DF2\u771F\u6B63\u9001\u5230\u7684\u6587\u4EF6\u4E0D\u4F1A\u91CD\u4F20\u3002");
 }
 
 QString RsyncRunner::sourceFileVanishedAdviceText()
@@ -2012,6 +2050,9 @@ QString RsyncRunner::shortConclusionFor(const QString &raw)
     // 远端目录中途消失：原文清楚写着 rename/stat 到不了，客户自己能处理。
     // 保存目录被同名文件/断链占着：原文说得很清楚（mkdir File exists），客户自己能修。
     // 源文件在传输中消失：不是本机环境坏了，是客户自己的文件被动过。
+    // 源文件被别的程序占用：不是本机环境坏了，是那个文件打不开。
+    if (isSourceFileLocked(raw))
+        return QString::fromUtf8(u8"\u6709\u6587\u4EF6\u6B63\u88AB\u522B\u7684\u7A0B\u5E8F\u5360\u7528");
     if (isSourceFileVanished(raw))
         return QString::fromUtf8(u8"\u6709\u6E90\u6587\u4EF6\u5728\u4F20\u8F93\u4E2D\u6D88\u5931\u4E86");
 
@@ -2041,6 +2082,8 @@ QString RsyncRunner::shortConclusionFor(const QString &raw)
 // 必须复刻**覆写优先**的顺序，否则判据验不到"口令私钥给了专项建议"这件事。
 QString RsyncRunner::adviceForTest(const QString &raw)
 {
+    if (isSourceFileLocked(raw))
+        return sourceFileLockedAdviceText();
     if (isSourceFileVanished(raw))
         return sourceFileVanishedAdviceText();
     if (isReadOnlyFs(raw))

@@ -372,6 +372,9 @@ public:
     static QString remotePathNotDirAdviceText();
     // 源文件在传输中消失的专项建议。
     static QString sourceFileVanishedAdviceText();
+    // 源文件被别的程序占用的专项建议。
+    static QString sourceFileLockedAdviceText();
+    static bool    isSourceFileLockedForTest(const QString &raw);
     static bool    isSourceFileVanishedForTest(const QString &raw);
     static bool    isRemotePathNotDirForTest(const QString &raw);
     static bool    isRemoteDirVanishedForTest(const QString &raw);
