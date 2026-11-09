@@ -1843,7 +1843,18 @@ void SyncPanel::renderCountLabel()
     // 读起来像一句自相矛盾的话（"已完成 2003 个文件 … 下次同步 1 秒后"）。
     QStringList parts;
     // 轮次只写在日志里：计数行只留「文件数 · 已传 · 用时」，开自动同步后不至于挤成一长串。
-    parts << QObject::tr("%1 / %2 \xE4\xB8\xAA\xE6\x96\x87\xE4\xBB\xB6").arg(m_runDone).arg(m_runTotal);
+    // **取消时不能报一个虚高的"已完成"数**（2026-11-10 实测 D7）：
+    // 分子 m_runDone 是按 rsync 的 xfr# 结算的，而 xfr# 只说明**发送端**把数据发出去了；
+    // 取消时组没有正常结束，reconcileGroupCount() 没有机会把"已发出但未落盘"的那批扣回来。
+    // 实测 20000 个文件第 30 秒取消：界面写「3704 / 20000 个文件」，
+    // 而接收端 find -type f 只有 2599 个（虚高 42%）。这个方向最危险 ——
+    // 客户看到"已传 3704 个"会以为过半，不再重跑。
+    // 取消路径下改成"已发起 N 个"并注明以远端为准，不给一个会被当成完成度的数字。
+    if (m_runner && m_runner->wasCanceled()) {
+        parts << QObject::tr("\xE5\xB7\xB2\xE5\x8F\x91\xE8\xB5\xB7 %1 / %2 \xE4\xB8\xAA\xEF\xBC\x8C\xE5\xAE\x9E\xE9\x99\x85\xE8\x90\xBD\xE7\x9B\x98\xE4\xBB\xA5\xE7\x9B\xAE\xE6\xA0\x87\xE7\x94\xB5\xE8\x84\x91\xE4\xB8\xBA\xE5\x87\x86").arg(m_runDone).arg(m_runTotal);
+    } else {
+        parts << QObject::tr("%1 / %2 \xE4\xB8\xAA\xE6\x96\x87\xE4\xBB\xB6").arg(m_runDone).arg(m_runTotal);
+    }
     if (m_lastBytes > 0) {
         // 速度用**本轮平均速度**（已传字节 ÷ 本轮用时），不用 rsync 报的瞬时值。
         // 同一个标签里写「已传 1.4 GB · 8.9 MB/s · 0:47」，用户自己一除是 30 MB/s，
