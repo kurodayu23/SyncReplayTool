@@ -6515,6 +6515,52 @@ int main(int argc, char *argv[])
     if (!probeMode) {
         instanceLock.setStaleLockTime(0);
         if (!instanceLock.tryLock(0)) {
+        // 诊断（仅当 SRT_LOCK_DEBUG=1 时输出，避免污染正常 stderr）：
+        // 只在排查"锁拿不到"时用 —— 记下 QLockFile 的真实错误码与配置目录。
+        if (!qgetenv("SRT_LOCK_DEBUG").isEmpty()) {
+            ConsoleDevice dC(stderr);
+            QTextStream dS(&dC);
+            dS.setCodec("UTF-8");
+            dS << "SRT_LOCK_ERROR=" << int(instanceLock.error())
+               << " dir=" << ConfigStore::configDir() << "\n";
+            dS.flush();
+        }
+        // **"拿不到锁"有两种完全不同的原因，不能都报成"程序已在运行"**
+        // （2026-11-10 实测 P1）：
+        //   ① LockFailedError —— 锁文件**建不出来**（配置目录不可写、
+        //      装在 Program Files 下没有写权限、磁盘满、被杀软拦）
+        //   ② 其余（AlreadyLocked / Permission / Unknown）—— 另一个实例真的在跑
+        // 原来不分情况一律说「程序已在运行。请先关闭已经打开的窗口再试。」：
+        // 客户配置目录只读时，会去关一个根本不存在的窗口，永远解决不了。
+        // 实测：配置目录 icacls 拒绝写 → rc=2 + 「程序已在运行」，而没有任何实例在跑。
+        // Qt5 枚举: NoError=0, LockFailedError=1, PermissionError=2, UnknownError=3。
+        // 实测（配置目录 icacls 拒绝写）返回的是 **2 = PermissionError**，不是 1。
+        // 两者都必须归到"配置目录写不进去"这一类：只读目录里既建不出也删不掉锁文件，
+        // Qt 按 PermissionError 报，而语义上仍然是"写不进去"。
+        if (instanceLock.error() == QLockFile::LockFailedError
+            || instanceLock.error() == QLockFile::PermissionError) {
+            const QString msg2 = QString::fromUtf8(
+                u8"\u914D\u7F6E\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB\uFF0C"
+                u8"\u7A0B\u5E8F\u65E0\u6CD5\u8BB0\u4E0B\u81EA\u5DF1\u5DF2\u7ECF\u8FD0\u884C"
+                u8"\uFF08\u5355\u5B9E\u4F8B\u9501\u6587\u4EF6\u5EFA\u4E0D\u51FA\u6765\uFF09\u3002\n\n"
+                u8"\u8FD9**\u4E0D\u662F**\u53E6\u4E00\u4E2A\u7A97\u53E3\u6CA1\u5173\uFF1A"
+                u8"\u672C\u673A\u5F53\u524D\u6CA1\u6709\u7A0B\u5E8F\u5728\u8FD0\u884C\u3002\n"
+                u8"\u8BF7\u786E\u8BA4\u914D\u7F6E\u76EE\u5F55\u53EF\u5199\uFF08%1\uFF09\uFF1A"
+                u8"\u2460 \u82E5\u88C5\u5728 Program Files \u4E0B\uFF0C\u6539\u88C5\u5230\u7528\u6237\u76EE\u5F55\uFF1B\n"
+                u8"\u2461 \u82E5\u76EE\u5F55\u88AB\u8BBE\u6210\u53EA\u8BFB\uFF0C\u6062\u590D\u5199\u6743\u9650\uFF1B\n"
+                u8"\u2462 \u68C0\u67E5\u78C1\u76D8\u662F\u4E0D\u662F\u6EE1\u4E86\u3002")
+                .arg(ConfigStore::configDir());
+            ConsoleDevice errConsole2(stderr);
+            QTextStream err2(&errConsole2);
+            err2.setCodec("UTF-8");
+            err2 << msg2 << "\n";
+            err2.flush();
+            const QString platform2 = QGuiApplication::platformName();
+            if (platform2 != QLatin1String("offscreen") && platform2 != QLatin1String("minimal")) {
+                QMessageBox::warning(nullptr, QString::fromUtf8(u8"\u6570\u636E\u540C\u6B65\u5DE5\u5177"), msg2);
+            }
+            return 3;
+        }
             const QString msg = QString::fromUtf8(u8"程序已在运行。\n\n"
                                                  u8"请先关闭已经打开的窗口再试。");
             // stderr 永远打一份：脚本和日志里能看见，不依赖界面。
