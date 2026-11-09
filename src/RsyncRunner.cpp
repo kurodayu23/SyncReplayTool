@@ -3660,7 +3660,7 @@ void RsyncRunner::start(const TargetConfig &target,
         g.remoteBase = remoteSpec(target, rule.remoteSubDir);
         g.remoteDir  = remoteDir(target, rule.remoteSubDir);
         for (const FileItem &f : files) {
-            if (ToolRunner::normSuffix(f.suffix) == ruleSuffix)
+            if (ToolRunner::suffixMatches(ruleSuffix, ToolRunner::normSuffix(f.suffix), f.name()))
                 g.files.append(f.relativePath);
         }
         if (!g.files.isEmpty())

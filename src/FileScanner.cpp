@@ -469,6 +469,9 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
         const QString low = ToolRunner::normSuffix(s);
         if (!low.isEmpty() && !wanted.contains(low))
             wanted.append(low);
+
+    // **后缀命中判定收敛到一处**（2026-11-10）：
+    // 多段后缀（tar.gz）必须靠"文件名以 .规则 结尾"才能匹配上，
     }
 
     const QString basePath = base.absolutePath();
@@ -795,7 +798,11 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
             while (raw.endsWith(QLatin1Char('.')) && raw.length() > 1)
                 raw.chop(1);
             const QString suffix = QFileInfo(raw).suffix().toLower().trimmed();
-            if (!wanted.isEmpty() && !wanted.contains(suffix)) {
+        bool suffixHit = false;
+        for (const QString &w : wanted) {
+            if (ToolRunner::suffixMatches(w, suffix, raw)) { suffixHit = true; break; }
+        }
+        if (!wanted.isEmpty() && !suffixHit) {
                 // 不符合规则 = 这个文件永远不会被同步。必须计数（见 g_skippedBySuffix 注释）。
                 g_skippedBySuffix.fetchAndAddOrdered(1);
                 continue;

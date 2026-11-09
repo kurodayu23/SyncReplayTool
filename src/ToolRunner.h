@@ -31,6 +31,10 @@ public:
     // 判「未配置工具」，重启一次（读回配置文件时剥了点）又好了。
     // 提为公开接口，让两条路径只留一个口径。
     static QString normSuffix(const QString &s);
+    // 后缀是否命中规则。**扫描侧与传输侧必须都调它**，
+    // 否则口径一分叉就会出现"列表里有、传输时组为空"→ 界面报完成而远端没文件。
+    static bool suffixMatches(const QString &ruleNorm, const QString &fileSuffix,
+                              const QString &fileName);
 
     // 参数构造 + 分词的一条龙：和工具页 start() 内部走的是同一条链。
     //

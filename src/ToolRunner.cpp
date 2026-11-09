@@ -328,6 +328,37 @@ QStringList splitCommand(const QString &cmd, bool *unclosedQuote)
 //
 // 在匹配点归一化，而不是在存储点归一化：这样无论规则来自内存表格、
 // 配置文件还是将来的脚本，五种写法都是等价的，也不会再出现两个口径。
+// 后缀是否命中规则（**扫描与传输两侧共用，禁止各自实现**）。
+//
+// 2026-11-10 实测缺陷：规则写 "tar.gz" 时一个文件都匹配不到 ——
+// 因为文件的后缀只取"最后一个点之后"（"arch.tar.gz" -> "gz"），
+// 而规则归一化后是整串 "tar.gz"，两者永远不相等。
+// 客户照着文件名写 tar.gz 是最自然的做法，得到的却是 0 个文件，
+// 而界面只会建议"再补一条规则"（他已经补了）。
+//
+// 这里补一条：**文件名以 ".规则后缀" 结尾也算命中**。
+// 只放宽、不收紧：单段后缀（dat）行为完全不变；
+// 多段后缀（tar.gz / tar.bz2 / log.gz）从"永远不匹配"变成"正常匹配"。
+bool ToolRunner::suffixMatches(const QString &ruleNorm, const QString &fileSuffix,
+                               const QString &fileName)
+{
+    if (ruleNorm.isEmpty())
+        return false;
+    if (ruleNorm == fileSuffix)
+        return true;
+    // 多段后缀：按"文件名以 .<规则> 结尾"再判一次。
+    // 尾点先去掉，与 normSuffix 的"去尾点"口径保持一致。
+    QString n = fileName.toLower();
+    while (n.endsWith(QLatin1Char('.')) && n.length() > 1)
+        n.chop(1);
+    // 用显式 QString 拼接，不用 QLatin1Char + QString 那个表达式：
+    // 后者语义不直观，也是我把"多段后缀"写错一次的来源。
+    const QString needle = QStringLiteral(".") + ruleNorm;
+    if (n.length() <= needle.length())
+        return false;
+    return n.endsWith(needle);
+}
+
 QString ToolRunner::normSuffix(const QString &s)
 {
     QString v = s.trimmed().toLower();

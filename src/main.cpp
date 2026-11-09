@@ -4288,6 +4288,56 @@ int runSelfCheck()
               << "\toldGone=" << (oldGone ? 1 : 0) << "\n";
       }
 
+    // ----------------------------------------------------------------
+    // 判据：多段后缀（tar.gz）必须能匹配上（2026-11-10 实测缺陷）
+    //
+    // 规则写 "tar.gz" 时一个文件都匹配不到：文件后缀只取最后一个点之后
+    // （arch.tar.gz -> gz），规则归一化后是整串 tar.gz，两者永不相等。
+    // 客户照文件名写 tar.gz 是最自然的做法，得到的却是 0 个文件，
+    // 而界面只建议"再补一条规则"（他已经补了）。
+    {
+        const bool m1 = ToolRunner::suffixMatches(QStringLiteral("tar.gz"), QStringLiteral("gz"), QStringLiteral("arch.tar.gz"));
+        const bool m2 = ToolRunner::suffixMatches(QStringLiteral("dat"), QStringLiteral("dat"), QStringLiteral("a.dat"));
+        const bool m3 = ToolRunner::suffixMatches(QStringLiteral("gz"), QStringLiteral("gz"), QStringLiteral("arch.tar.gz"));
+        const bool n1 = ToolRunner::suffixMatches(QStringLiteral("tar.gz"), QStringLiteral("gz"), QStringLiteral("arch.zip"));
+        const bool ok = m1 && m2 && m3 && !n1;
+        if (!ok)
+            ++bad;
+        out << (ok ? "PASS\t" : "FAIL\t") << "suffix-multi-segment"
+            << "\ttarGz=" << (m1 ? 1 : 0)
+            << "\tsingle=" << (m2 ? 1 : 0)
+            << "\tgzStill=" << (m3 ? 1 : 0)
+            << "\tnotOther=" << (n1 ? 0 : 1) << "\n";
+    }
+
+    // ----------------------------------------------------------------
+    // 判据：FileScanner::scan 端到端必须按多段后缀找到文件
+    //
+    // 上面那条只证明后缀判定函数正确；这条证明**扫描真的用它**，
+    // 因为"函数对、调用点没生效"正是 2026-11-10 卡住的坑。
+    {
+        QTemporaryDir td;
+        bool ok2 = false;
+        int found = -1;
+        if (td.isValid()) {
+            QString p1 = td.path() + QLatin1Char(
+'/'
+) + QStringLiteral("arch.tar.gz");
+            QString p2 = td.path() + QLatin1Char(
+'/'
+) + QStringLiteral("other.dat");
+            { QFile f(p1); f.open(QIODevice::WriteOnly); f.write("x"); }
+            { QFile f(p2); f.open(QIODevice::WriteOnly); f.write("y"); }
+            const QVector<FileItem> got = FileScanner::scan(td.path(), QStringList() << QStringLiteral("tar.gz"));
+            found = got.size();
+            ok2 = (found == 1 && got.at(0).relativePath.endsWith(QStringLiteral("arch.tar.gz")));
+        }
+        if (!ok2)
+            ++bad;
+        out << (ok2 ? "PASS\t" : "FAIL\t") << "scan-multi-segment"
+            << "\tfound=" << found << "\n";
+    }
+
       // ----------------------------------------------------------------
       // 判据：只读挂载必须给"挂载"方向的建议，不许混进权限/磁盘满那张单子
       //
