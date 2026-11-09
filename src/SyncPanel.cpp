@@ -2768,7 +2768,7 @@ void SyncPanel::onAllFinished(bool ok)
         setStatusLine(T(kStatusFail), 2);
         setStartButtonIdle();
         appendLogLine(QStringLiteral("ERR"),
-                      QObject::tr("\xE5\x90\x8C\xE6\xAD\xA5\xE5\xA4\xB1\xE8\xB4\xA5\xEF\xBC\x8C\xE8\xAF\xA6\xE8\xA7\x81\xE4\xB8\x8A\xE6\x96\xB9\xE6\x97\xA5\xE5\xBF\x97\xE6\x9D\xA1"), 4);
+                      QObject::tr("\xE5\x90\x8C\xE6\xAD\xA5\xE5\xA4\xB1\xE8\xB4\xA5\xEF\xBC\x8C\xE8\xAF\xA6\xE8\xA7\x81\xE4\xB8\x8A\xE6\x96\xB9\xE6\x97\xA5\xE5\xBF\x97"), 4);
         // 失败同样不打满 100：进度条停在走到的地方，如实反映这轮没搬完。
         writeProgressProbeReport();
     }
@@ -2832,6 +2832,7 @@ void SyncPanel::onRunLog(const QString &text)
                        || l.startsWith(QString::fromUtf8(u8"\u2192"))) {
                 kind = 1; tag = QStringLiteral("SYNC");
             }
+            appendLogLine(tag, l, kind);
     }
 }
 

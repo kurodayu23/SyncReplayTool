@@ -2116,7 +2116,30 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer,
     // 结果是 2026-11-07 加"文件名太长"分支时只改了生产那份，判据测的仍是旧副本 →
     // 判据 `saysLong=0` 假绿（明明是同一份逻辑）。收敛成一个函数后不可能再走偏。
     // 预检类失败没有原文，调用点直接给准确短结论；没给才走文本分类。
-    emit logText(shortOverride.isEmpty() ? shortConclusionFor(raw) : shortOverride);
+    // **私钥模式下不许说「账号密码不对」**（2026-11-09 审查 P2）。
+    //
+    // 原来无论哪种认证方式，认证层短结论都是 kLayerShort[LayerAuth] =
+    // 「账号密码不对（或对方改过）」，建议是「重新输入一次密码」。
+    // 而私钥模式（useKey()）根本不走口令：客户按建议改了十次密码也没用，
+    // 真正要做的是把公钥加进目标机的 authorized_keys。
+    //
+    // 判断依据只看**本次用的是哪种认证**，不看原文措辞：原文在两种模式下
+    // 长得一模一样（都是 Permission denied (publickey,password)）。
+    QString shortLine = shortOverride.isEmpty() ? shortConclusionFor(raw) : shortOverride;
+    QString finalAdvice = advice;
+    if (layer == LayerAuth && m_target.useKey()
+        && (shortOverride.isEmpty() || shortLine == QString::fromUtf8(kLayerShort[LayerAuth]))) {
+        shortLine = QString::fromUtf8(u8"\u76EE\u6807\u7535\u8111\u4E0D\u63A5\u53D7\u8FD9\u628A\u79C1\u94A5");
+        finalAdvice = QString::fromUtf8(
+            u8"\u672C\u6B21\u7528\u7684\u662F**\u79C1\u94A5\u8BA4\u8BC1**\uFF0C\u4E0D\u8D70\u53E3\u4EE4\uFF0C"
+            u8"\u6240\u4EE5\u6539\u5BC6\u7801\u6CA1\u6709\u7528\u3002\u8BF7\uFF1A"
+            u8"\u2460 \u628A\u8FD9\u628A\u79C1\u94A5\u5BF9\u5E94\u7684\u516C\u94A5\u52A0\u5230\u76EE\u6807\u7535\u8111\u7684"
+            u8" ~/.ssh/authorized_keys\uFF08\u8FFD\u52A0\u4E00\u884C\u5373\u53EF\uFF09\uFF1B"
+            u8"\u2461 \u786E\u8BA4\u76EE\u6807\u673A\u5BF9\u5E94\u8D26\u53F7\u7684 ~/.ssh \u6743\u9650\u662F 700\u3001"
+            u8"authorized_keys \u662F 600\uFF08\u6743\u9650\u8FC7\u5BBD sshd \u4F1A\u62D2\u7EDD\uFF09\uFF1B"
+            u8"\u2462 \u6216\u8005\u5728\u300C\u8BBE\u7F6E\u300D\u91CC\u6539\u6210\u7528\u5BC6\u7801\u767B\u5F55\u3002");
+    }
+    emit logText(shortLine);
 
     // kLayerMeaning 里带着【责任归属：xx】前缀 —— 对客户是噪音（他要的是
     // "哪里出问题"一句话）。运行时剥掉前缀，只留后面那句人话，不用改那 7 条长转义串。
@@ -2151,7 +2174,7 @@ void RsyncRunner::reportAttribution(const QString &raw, int forceLayer,
             emit logText(meaning);
     }
 
-    emit logText(advice);
+    emit logText(finalAdvice);
 }
 QString RsyncRunner::locateTool(const QString &name)
 {
