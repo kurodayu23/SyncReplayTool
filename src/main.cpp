@@ -4364,6 +4364,19 @@ int runSelfCheck()
             << "\tfound=" << found2 << "\n";
     }
 
+    // 诊断判据：若设置了 SRT_SCAN_PROBE_DIR，扫这个真实目录并按 tar.gz 过滤，
+    // 结果打到输出里（不判失败，只用来定位"自检 1 / 实测 0"的差异）。
+    {
+        const QString pd = QString::fromLocal8Bit(qgetenv("SRT_SCAN_PROBE_DIR"));
+        if (!pd.isEmpty()) {
+            const QVector<FileItem> got3 = FileScanner::scan(pd, QStringList() << QStringLiteral("tar.gz"));
+            out << "INFO\tscan-probe-dir\t" << pd << "\tfound=" << got3.size();
+            for (const FileItem &it : got3)
+                out << "\tfile=" << it.relativePath;
+            out << "\n";
+        }
+    }
+
       // ----------------------------------------------------------------
       // 判据：只读挂载必须给"挂载"方向的建议，不许混进权限/磁盘满那张单子
       //

@@ -2114,8 +2114,18 @@ void SyncPanel::onScanFinished(const QVector<FileItem> &files)
         if (!wanted.isEmpty()) {
             QVector<FileItem> kept;
             int dropped = 0;
+        // **第三处后缀比较点，原来只比"相等"**（2026-11-10 实测）：
+        // 规则 tar.gz 与文件后缀 gz 永远不相等，arch.tar.gz 在这里被丢掉，
+        // 还计入"后缀不在同步规则里"，于是扫描扫到了、面板又筛掉了。
+        // 必须和 FileScanner / RsyncRunner 一样走 ToolRunner::suffixMatches。
             for (int i = 0; i < files.size(); ++i) {
-                if (wanted.contains(ToolRunner::normSuffix(files.at(i).suffix)))
+        bool hit = false;
+        const QString fsuf = ToolRunner::normSuffix(files.at(i).suffix);
+        const QString fname = files.at(i).name();
+        for (const QString &w : wanted) {
+            if (ToolRunner::suffixMatches(w, fsuf, fname)) { hit = true; break; }
+        }
+        if (hit)
                     kept.append(files.at(i));
                 else
                     ++dropped;
