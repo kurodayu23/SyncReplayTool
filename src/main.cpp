@@ -4364,6 +4364,38 @@ int runSelfCheck()
             << "\tfound=" << found2 << "\n";
     }
 
+    // ----------------------------------------------------------------
+    // 判据：扫描条目触顶时必须明确说"结果不完整"，不得静默只扫一部分
+    //
+    // 2026-11-10 补：这条保护（FileScanner 的 kMaxEntries）在产品里早就存在，
+    // 但 102 条判据里**一条都没覆盖它** —— 也就是说这个保护从未被自动验证过。
+    // 造 200 万文件不现实，所以给 FileScanner 加了测试钩子 SRT_SCAN_MAX_ENTRIES，
+    // 把上限压到 3，放 10 个文件，看它是否停扫并如实说"不完整"。
+    {
+        QTemporaryDir td3;
+        bool ok4 = false;
+        int got4 = -1;
+        bool truncated4 = false;
+        if (td3.isValid()) {
+            for (int i2 = 1; i2 <= 10; ++i2) {
+                QFile f(td3.path() + QLatin1Char('/') + QStringLiteral("t%1.dat").arg(i2));
+                f.open(QIODevice::WriteOnly);
+                f.write("x");
+            }
+            qputenv("SRT_SCAN_MAX_ENTRIES", "3");
+            got4 = FileScanner::scan(td3.path(), QStringList() << QStringLiteral("dat")).size();
+            truncated4 = FileScanner::wasTruncated();
+            qunsetenv("SRT_SCAN_MAX_ENTRIES");
+            // 触顶时不但要停，还要把"不完整"这件事标记出来（界面靠它提示）
+            ok4 = truncated4 && got4 <= 10;
+        }
+        if (!ok4)
+            ++bad;
+        out << (ok4 ? "PASS\t" : "FAIL\t") << "scan-truncation-flags-incomplete"
+            << "\ttruncated=" << (truncated4 ? 1 : 0)
+            << "\tgot=" << got4 << "\n";
+    }
+
     // 诊断判据：若设置了 SRT_SCAN_PROBE_DIR，扫这个真实目录并按 tar.gz 过滤，
     // 结果打到输出里（不判失败，只用来定位"自检 1 / 实测 0"的差异）。
     {

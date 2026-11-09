@@ -499,7 +499,21 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
     visited.insert(QDir::fromNativeSeparators(basePath));
 
     const int kMaxDepth = 64;
-    const int kMaxEntries = 2000000;
+    // **测试钩子**（2026-11-10 加）：环境变量 SRT_SCAN_MAX_ENTRIES 可以临时压低上限，
+    // 让"触顶中止扫描"这条保护能在自检里被真正跑到 —— 造 200 万个文件不现实，
+    // 但把它压到几十个就能验证：超限时是否 setTruncated、是否给出"结果不完整"的说明、
+    // 是否停止继续扫（而不是继续闷头扫完再报成功）。
+    // 默认行为完全不变（不设环境变量时仍是 200 万）。
+    int kMaxEntries = 2000000;
+    {
+        const QByteArray ov = qgetenv("SRT_SCAN_MAX_ENTRIES");
+        if (!ov.isEmpty()) {
+            bool ok2 = false;
+            const int v = ov.toInt(&ok2);
+            if (ok2 && v > 0)
+                kMaxEntries = v;
+        }
+    }
     bool stopAll = false;
     // 扫过的**文件**总数（不管有没有命中规则）。
     // 条目上限按它算，与 detectSuffixes() 完全对齐 ——
@@ -979,7 +993,21 @@ QVector<SuffixStat> FileScanner::detectSuffixes(const QString &root)
     visited.insert(QDir::fromNativeSeparators(basePath));
 
     const int kMaxDepth = 64;
-    const int kMaxEntries = 2000000;
+    // **测试钩子**（2026-11-10 加）：环境变量 SRT_SCAN_MAX_ENTRIES 可以临时压低上限，
+    // 让"触顶中止扫描"这条保护能在自检里被真正跑到 —— 造 200 万个文件不现实，
+    // 但把它压到几十个就能验证：超限时是否 setTruncated、是否给出"结果不完整"的说明、
+    // 是否停止继续扫（而不是继续闷头扫完再报成功）。
+    // 默认行为完全不变（不设环境变量时仍是 200 万）。
+    int kMaxEntries = 2000000;
+    {
+        const QByteArray ov = qgetenv("SRT_SCAN_MAX_ENTRIES");
+        if (!ov.isEmpty()) {
+            bool ok2 = false;
+            const int v = ov.toInt(&ok2);
+            if (ok2 && v > 0)
+                kMaxEntries = v;
+        }
+    }
     bool stopAll = false;
     int fileTotal = 0;
 
