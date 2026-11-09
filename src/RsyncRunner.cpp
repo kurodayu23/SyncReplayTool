@@ -259,7 +259,17 @@ enum FailLayer {
     //
     // 和第 5 类一样只能追加在末尾：0~4 被 main.cpp 的 kLayerCases 钉死，
     // 5 是上面这一条，新值只能继续往后排，既有判据一个都不动。
-    LayerReceiverNameConflict = 6
+    LayerReceiverNameConflict = 6,
+    // 第 7 类（2026-11-09 补，审查 P1-3）：**用户自己在设置里填的内容不成立**。
+    //
+    // 属于这一层的：主机名/账号含非法字符、远端路径含控制字符或 glob 通配符、
+    // 私钥路径以 ~ 开头、后缀一条都没匹配上、远端路径层级过深……
+    // 共同点：责任不是本机环境、不是网络、也不是接收端，
+    // 而是**界面上那个输入框里填的东西**。原来它们无层可归，
+    // 于是 21 个失败出口里有 15 个只报现象、不说"去哪改"。
+    //
+    // 同样只能追加在末尾：0~6 都已被既有判据钉住。
+    LayerConfig = 7
 };
 
 struct FailRule { int layer; const char *needle; };
@@ -362,6 +372,7 @@ const char *kLayerMeaning[] = {
     u8"\u672A\u80FD\u4ECE\u539F\u59CB\u62A5\u9519\u91CC\u5224\u65AD\u51FA\u5177\u4F53\u5F52\u5C5E\u3002",
     u8"\u3010\u8D23\u4EFB\u5F52\u5C5E\uFF1A\u63A5\u6536\u7AEF\u7535\u8111\u3011\u7AEF\u53E3\u80FD\u8FDE\u4E0A\uFF0C\u4F46\u5BF9\u7AEF\u6CA1\u6709 SSH \u670D\u52A1\u5E94\u7B54\uFF08sshd \u6CA1\u542F\u52A8 / \u6B63\u5728\u91CD\u542F / \u7AEF\u53E3\u4E0A\u8DD1\u7684\u4E0D\u662F SSH \u670D\u52A1\uFF09\u3002",
     u8"\u3010\u8D23\u4EFB\u5F52\u5C5E\uFF1A\u63A5\u6536\u7AEF\u7535\u8111\u3011\u8FDC\u7AEF\u540C\u4E00\u8DEF\u5F84\u4E0A\u5DF2\u7ECF\u5B58\u5728\u4E00\u4E2A\u540C\u540D\u76EE\u5F55\uFF0Crsync \u65E0\u6CD5\u628A\u5B83\u66FF\u6362\u6210\u540C\u540D\u666E\u901A\u6587\u4EF6\uFF08code 23\uFF09\u3002",
+    u8"\u3010\u8D23\u4EFB\u5F52\u5C5E\uFF1A\u8BBE\u7F6E\u9879\u3011\u8FD9\u4E00\u9879\u586B\u7684\u5185\u5BB9\u4E0D\u6210\u7ACB\u3002",
 };
 
 const char *kLayerAdvice[] = {
@@ -372,6 +383,7 @@ const char *kLayerAdvice[] = {
     u8"\u8BF7\u5C06\u4EE5\u4E0A\u539F\u59CB\u62A5\u9519\u53D1\u9001\u7ED9\u6280\u672F\u652F\u6301\u4EBA\u5458\u6392\u67E5\u3002",
     u8"\u8BF7\u8BA9\u76EE\u6807\u7535\u8111\u7684\u8D1F\u8D23\u4EBA\u786E\u8BA4 sshd \u6B63\u5728\u8FD0\u884C\uFF08systemctl status sshd\uFF09\uFF0C\u5FC5\u8981\u65F6\u91CD\u542F\u5B83\uFF1B\u5982\u679C\u7AEF\u53E3\u53F7\u586B\u9519\u4E86\uFF0C\u6838\u5BF9\u4E00\u4E0B\u662F\u4E0D\u662F\u5199\u6210\u4E86\u522B\u7684\u670D\u52A1\u7684\u7AEF\u53E3\u3002\u8FD9\u4E00\u6B65\u4E0D\u9700\u8981 ping \u76EE\u6807 IP\uFF0C\u4E5F\u4E0D\u9700\u8981\u67E5\u9632\u706B\u5899 \u2014\u2014 \u7AEF\u53E3\u5DF2\u7ECF\u8FDE\u4E0A\u4E86\u3002",
     u8"\u8BF7\u5230\u76EE\u6807\u7535\u8111\u4E0A\u628A\u90A3\u4E2A\u6321\u8DEF\u7684\u540C\u540D\u76EE\u5F55\u6539\u540D\u6216\u5220\u6389\uFF08\u76EE\u5F55\u91CC\u6709\u6587\u4EF6\u7684\u5148\u79FB\u8D70\uFF09\uFF0C\u518D\u91CD\u8DD1\u4E00\u6B21\uFF1B\u4E5F\u53EF\u4EE5\u5728\u8BBE\u7F6E\u91CC\u7ED9\u8FD9\u4E00\u7EC4\u6362\u4E00\u4E2A\u8FDC\u7AEF\u5B50\u76EE\u5F55\u3002\u8FD9\u4E00\u6B65\u4E0D\u9700\u8981 ping \u76EE\u6807 IP\uFF0C\u4E5F\u4E0D\u9700\u8981\u67E5\u9632\u706B\u5899\u3002",
+    u8"\u8BF7\u5230\u300C\u8BBE\u7F6E\u300D\u91CC\u628A\u76F8\u5E94\u7684\u8F93\u5165\u6846\u6539\u5BF9\uFF1A\u4E3B\u673A\u5730\u5740\u3001\u8D26\u53F7\u3001\u8FDC\u7AEF\u76EE\u5F55\u3001\u540E\u7F00\u89C4\u5219\u3002\u8FD9\u4E00\u7C7B\u9519\u8BEF\u4E0D\u662F\u672C\u673A\u73AF\u5883\u3001\u4E5F\u4E0D\u662F\u7F51\u7EDC\u6216\u5BF9\u65B9\uFF0C\u6539\u5B8C\u5373\u53EF\u3002",
 };
 
 // 「测试网络连接」结果标签用的**极简层名**（≤ 10 字）。
@@ -391,6 +403,7 @@ const char *kLayerShort[] = {
     u8"\u539F\u56E0\u672A\u8BC6\u522B",
     u8"\u76EE\u6807\u7535\u8111 SSH \u670D\u52A1\u6CA1\u5F00",
     u8"\u76EE\u6807\u7535\u8111\u4E0A\u5DF2\u6709\u540C\u540D\u76EE\u5F55",
+    u8"\u8BBE\u7F6E\u91CC\u586B\u7684\u5185\u5BB9\u4E0D\u6210\u7ACB",
 };
 
 
@@ -3317,6 +3330,8 @@ void RsyncRunner::start(const TargetConfig &target,
     // 也可能安静地连到别的地方去。必须在起任何子进程之前拦下来。
     if (!isSafeLoginField(target.host, true) || !isSafeLoginField(target.user, false)) {
         emit logText(QString::fromUtf8(u8"\u4E3B\u673A\u540D\u6216\u8D26\u53F7\u91CC\u542B\u4E0D\u5141\u8BB8\u7684\u5B57\u7B26\uFF08\u7A7A\u683C\u3001\u5192\u53F7\u3001\u5F15\u53F7\u3001\u5206\u53F7\u7B49\uFF09\u3002"));
+            reportAttribution(QString(), LayerConfig, QString(),
+                              QString::fromUtf8(u8"\u4E3B\u673A\u540D\u6216\u8D26\u53F7\u542B\u4E0D\u5148\u8BB8\u7684\u5B57\u7B26"));
         emit allFinished(false);
         return;
     }
@@ -3351,6 +3366,8 @@ void RsyncRunner::start(const TargetConfig &target,
             if (badRemote || badSubDir)
                 emit logText(QString::fromUtf8(
                     u8"\u8BF7\u5728\u8BBE\u7F6E\u91CC\u628A\u8FDC\u7AEF\u8DEF\u5F84\u91CD\u65B0\u9009\u4E00\u6B21\uFF0C\u4E0D\u8981\u76F4\u63A5\u624B\u5199\u914D\u7F6E\u6587\u4EF6\u3002"));
+            reportAttribution(QString(), LayerConfig, QString(),
+                              QString::fromUtf8(u8"\u8FDC\u7AEF\u6216\u672C\u673A\u8DEF\u5F84\u542B\u975E\u6CD5\u5B57\u7B26"));
             emit allFinished(false);
             return;
         }
@@ -3567,6 +3584,8 @@ void RsyncRunner::start(const TargetConfig &target,
                          .arg(configuredSuffixes.join(QString::fromUtf8(u8"\u3001"))));
         }
         emit logText(QString::fromUtf8(u8"请检查设置里的文件类型写法（例如 spe 与 .spe 表示同一种类型）。"));
+            reportAttribution(QString(), LayerConfig, QString(),
+                              QString::fromUtf8(u8"\u540E\u7F00\u89C4\u5219\u4E00\u6761\u90FD\u6CA1\u5339\u914D\u4E0A"));
         emit allFinished(false);
         return;
     }
@@ -3600,6 +3619,8 @@ void RsyncRunner::start(const TargetConfig &target,
                                  u8"\u8BF7\u6539\u6210\u7EDD\u5BF9\u8DEF\u5F84\uFF08\u5982 /home/\u7528\u6237\u540D/\u76EE\u5F55\uFF09"
                                  u8"\u6216\u8005\u7528 ~ \u8868\u793A\u5F53\u524D\u8D26\u53F7\u7684\u5BB6\u76EE\u5F55\u3002")
                              .arg(t.section(QLatin1Char(':'), 0, 0)));
+            reportAttribution(QString(), LayerConfig, QString(),
+                              QString::fromUtf8(u8"\u8FDC\u7AEF\u76EE\u5F55\u5199\u6210\u4E86 Windows \u8DEF\u5F84"));
             emit allFinished(false);
             return true;
         }
@@ -3621,6 +3642,8 @@ void RsyncRunner::start(const TargetConfig &target,
             if (u < 0x20 || u == 0x7F) {
                 emit logText(QString::fromUtf8(u8"\u8FDC\u7AEF\u8DEF\u5F84\u4E0D\u80FD\u542B\u63A7\u5236\u5B57\u7B26\uFF08U+%1\uFF09\u3002")
                                      .arg(u, 4, 16, QLatin1Char('0')));
+            reportAttribution(QString(), LayerConfig, QString(),
+                              QString::fromUtf8(u8"\u8FDC\u7AEF\u76EE\u5F55\u542B\u63A7\u5236\u5B57\u7B26"));
                 emit allFinished(false);
                 return true;
             }
@@ -3628,6 +3651,8 @@ void RsyncRunner::start(const TargetConfig &target,
                 continue;
             emit logText(QString::fromUtf8(u8"\u8FDC\u7AEF\u8DEF\u5F84\u4E0D\u542B\u5B57\u7B26 [%1]\uFF1A\u8BE5\u5B57\u7B26\u65E0\u6CD5\u53EF\u9760\u5730\u4F20\u7ED9\u8FDC\u7AEF\uFF0C\u6587\u4EF6\u4F1A\u843D\u5230\u9519\u8BEF\u76EE\u5F55\u3002")
                              .arg(c));
+            reportAttribution(QString(), LayerConfig, QString(),
+                              QString::fromUtf8(u8"\u8FDC\u7AEF\u76EE\u5F55\u542B\u5B57\u7B26\u4E0D\u5408\u6CD5"));
             emit allFinished(false);
             return true;
         }
@@ -3657,6 +3682,8 @@ void RsyncRunner::start(const TargetConfig &target,
                                             u8"\u6587\u4EF6\u4F1A\u843D\u5230\u4F60\u6CA1\u6709\u6307\u5B9A\u7684\u76EE\u5F55\uFF0C"
                                             u8"\u6216\u8005\u53EA\u6709\u7B2C\u4E00\u4E2A\u5339\u914D\u9879\u80FD\u6536\u5230\u6587\u4EF6"
                                             u8"\uFF08\u5176\u4F59\u9759\u9ED8\u4E22\u5931\uFF09\u3002"));
+            reportAttribution(QString(), LayerConfig, QString(),
+                              QString::fromUtf8(u8"\u8FDC\u7AEF\u76EE\u5F55\u542B glob \u901A\u914D\u7B26"));
             emit allFinished(false);
             return true;
         }
@@ -3695,6 +3722,8 @@ void RsyncRunner::start(const TargetConfig &target,
                 u8"\u7684\u76EE\u5F55\uFF0C\u800C\u754C\u9762\u663E\u793A\u540C\u6B65\u5B8C\u6210\u3002"));
             emit logText(QString::fromUtf8(
                 u8"\u8BF7\u628A\u8FD9\u4E9B\u5B57\u7B26\u4ECE\u76EE\u5F55\u540D\u91CC\u53BB\u6389\u3002"));
+            reportAttribution(QString(), LayerConfig, QString(),
+                              QString::fromUtf8(u8"\u8FDC\u7AEF\u76EE\u5F55\u542B shell \u5143\u5B57\u7B26"));
             emit allFinished(false);
             return true;
         }
@@ -3732,6 +3761,8 @@ void RsyncRunner::start(const TargetConfig &target,
             emit logText(QString::fromUtf8(
                 u8"\u8BF7\u628A\u79C1\u94A5\u6539\u540D\u6210\u4E0D\u542B\u53CC\u5F15\u53F7\u7684\u6587\u4EF6\u540D"
                 u8"\uFF08\u4F8B\u5982 id_ed25519\uFF09\uFF0C\u6216\u8005\u5728\u300C\u8BBE\u7F6E\u300D\u91CC\u91CD\u65B0\u9009\u4E00\u6B21\u79C1\u94A5\u3002"));
+            reportAttribution(QString(), LayerConfig, QString(),
+                              QString::fromUtf8(u8"\u79C1\u94A5\u8DEF\u5F84\u542B\u4E0D\u5148\u8BB8\u7684\u5B57\u7B26"));
             emit allFinished(false);
             return;
         }
@@ -3751,6 +3782,8 @@ void RsyncRunner::start(const TargetConfig &target,
                                              u8"\u6362\u6210\u7EDD\u5BF9\u8DEF\u5F84\uFF08\u5982 /home/\u7528\u6237\u540D/\u76EE\u5F55\uFF09"
                                              u8"或者用 ~ 表示当前账号的家目录。")
                              .arg(trimmed));
+            reportAttribution(QString(), LayerConfig, QString(),
+                              QString::fromUtf8(u8"\u8FDC\u7AEF\u76EE\u5F55\u5199\u6210\u4E86 ~ \u5F00\u5934"));
             emit allFinished(false);
             return;
         }
@@ -3776,6 +3809,8 @@ void RsyncRunner::start(const TargetConfig &target,
         emit logText(QString::fromUtf8(u8"\u8FDC\u7AEF %1 \u4E0D\u80FD\u5305\u542B ..\uFF1A"
                                        u8"\u5B83\u4F1A\u628A\u6587\u4EF6\u5199\u5230\u8FDC\u7AEF\u6839\u76EE\u5F55\u4E4B\u5916\u7684\u5730\u65B9\u3002")
                          .arg(what));
+            reportAttribution(QString(), LayerConfig, QString(),
+                              QString::fromUtf8(u8"\u8FDC\u7AEF\u76EE\u5F55\u4F1A\u5199\u5230\u6839\u76EE\u5F55\u4E0B"));
         emit allFinished(false);
         return true;
     };
@@ -3798,6 +3833,8 @@ void RsyncRunner::start(const TargetConfig &target,
         const QString err = createAskpass(target, &m_askpassPath, &m_passFilePath);
         if (!err.isEmpty()) {
             emit logText(err);
+            reportAttribution(QString(), LayerConfig, QString(),
+                              QString::fromUtf8(u8"\u672C\u673A\u76EE\u5F55\u586B\u6210\u4E86\u76F8\u5BF9\u8DEF\u5F84"));
             emit allFinished(false);
             return;
         }
@@ -4302,12 +4339,16 @@ void RsyncRunner::launchNext()
         // 不是"有问题"：rsync 退出码 0 已经证明这一组传完了，
         // 卡住的是"核对"这个手段（见 onWatchdogTimeout 里的说明）。
         //
+            reportAttribution(QString(), LayerConfig, QString(),
+                              QString::fromUtf8(u8"\u770B\u95E8\u72D7\u8D85\u65F6\uFF0C\u672C\u8F6E\u5DF2\u505C\u6B62"));
         // 硬约束不变：这里仍然 emit allFinished(false) —— 后续分组没跑，
         // 整轮绝不能报成功。
         if (!m_abortedUnfinished)
             m_failed = true;
         runFinishCleanup();
         m_roundActive = false;
+            reportAttribution(QString(), LayerConfig, QString(),
+                              QString::fromUtf8(u8"\u770B\u95E8\u72D7\u8D85\u65F6\uFF0C\u672C\u8F6E\u5DF2\u505C\u6B62"));
         emit allFinished(false);
         return;
     }
