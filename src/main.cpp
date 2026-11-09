@@ -4047,6 +4047,11 @@ int runSelfCheck()
           panel.setPortForTest(1);
           panel.setUserForTest(QStringLiteral("srtprobe"));
           // 刻意**不设** localRoot：模拟"目标配好了、本机目录还没选"
+    // **必须显式清空**（2026-11-09 定位）：SyncPanel 构造时会 loadConfig()
+    // 从磁盘读配置，而前面判据往里写过 localRoot —— 于是"刻意不设"其实没生效，
+    // m_localRoot 非空，scanFiles() 不会走空目录早退，扫完就把待办消费掉、
+    // 直接开了一轮同步，判据把它误判成"自发同步"，稳定红。
+    panel.setLocalRootForTest(QString());
 
           panel.startSyncForTest();
           {
