@@ -3698,6 +3698,16 @@ void SyncPanel::writeProgressProbeReport()
     out += QStringLiteral("ok=%1\n").arg(m_syncLastOk ? 1 : 0);
     out += QStringLiteral("canceled=%1\n").arg((m_runner && m_runner->wasCanceled()) ? 1 : 0);
     out += QStringLiteral("groupSuffixes=%1\n").arg(groupSuffixes.join(QLatin1Char(',')));
+    // **诊断用**：把本次真正生效的规则后缀打出来（2026-11-10 加）。
+    // 起因：探针跑 tar.gz 得到 runTotal=0、groupSuffixes 为空，而自检里
+    // 同一规则同一目录结构 scan 返回 1 —— 中间差什么一直靠猜。
+    // 有了这一行就能直接看出"规则有没有真的传进来"。
+    {
+        QStringList ruleSufs;
+        for (int i2 = 0; i2 < m_syncRules.size(); ++i2)
+            ruleSufs.append(m_syncRules.at(i2).suffix);
+        out += QStringLiteral("rules=%1\n").arg(ruleSufs.join(QStringLiteral(",")));
+    }
     out += QStringLiteral("groupSizes=%1\n").arg(groupSizes.join(QLatin1Char(',')));
     out += QStringLiteral("status=%1\n").arg(statusTextForTest());
     out += QStringLiteral("count=%1\n").arg(countTextForTest());

@@ -4338,6 +4338,32 @@ int runSelfCheck()
             << "\tfound=" << found << "\n";
     }
 
+    // 判据：与实测夹具完全相同的 4 个文件，扫描结果必须是 1
+    //
+    // 用来区分"endsWith 分支有错"和"目录/环境有别"。
+    {
+        QTemporaryDir td2;
+        bool ok3 = false;
+        int found2 = -1;
+        if (td2.isValid()) {
+            const char *names[] = { "arch.tar.gz", "data.v1.2.3.dat", "no.extension.here", "traildot.dat" };
+            for (const char *nm : names) {
+                QFile f(td2.path() + QLatin1Char(
+'/'
+) + QString::fromLatin1(nm));
+                f.open(QIODevice::WriteOnly);
+                f.write("x");
+            }
+            const QVector<FileItem> got2 = FileScanner::scan(td2.path(), QStringList() << QStringLiteral("tar.gz"));
+            found2 = got2.size();
+            ok3 = (found2 == 1);
+        }
+        if (!ok3)
+            ++bad;
+        out << (ok3 ? "PASS\t" : "FAIL\t") << "scan-multi-segment-4files"
+            << "\tfound=" << found2 << "\n";
+    }
+
       // ----------------------------------------------------------------
       // 判据：只读挂载必须给"挂载"方向的建议，不许混进权限/磁盘满那张单子
       //
