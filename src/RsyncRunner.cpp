@@ -3709,6 +3709,35 @@ void RsyncRunner::start(const TargetConfig &target,
         // （历史上就是"spe." 尾点：扫描侧去了、传输侧没去）。
         // 两边现在共用 ToolRunner::normSuffix，但这里的闸门要留着 ——
         // 口径一旦再分叉，这里会当场报红，而不是静默传零个文件。
+                // **后缀规则不支持通配符**（2026-11-09 实测）：
+                // 客户填 "*" 时，它被当成"一个真的叫 * 的后缀"，扫出 0 个文件，
+                // 而界面只说「请在设置里补一条对应后缀的规则」——
+                // 客户明明已经填了规则，却被建议"再补一条"，方向完全反了。
+                {
+                    QStringList globbed;
+                    const QString globChars = QStringLiteral("*?[]{}");
+                    for (const SyncRule &r : rules) {
+                        for (const QChar c : r.suffix) {
+                            if (globChars.contains(c)) {
+                                globbed.append(r.suffix);
+                                break;
+                            }
+                        }
+                    }
+                    if (!globbed.isEmpty()) {
+                        emit logText(QString::fromUtf8(
+                            u8"\u540E\u7F00\u89C4\u5219\u91CC\u542B\u901A\u914D\u7B26\uFF08%1\uFF09\uFF0C"
+                            u8"\u672C\u7A0B\u5E8F**\u4E0D\u652F\u6301\u901A\u914D\u7B26**\u2014\u2014"
+                            u8"\u5B83\u4F1A\u88AB\u5F53\u6210\u4E00\u4E2A\u771F\u7684\u53EB\u201C*\u201D\u7684\u540E\u7F00\uFF0C"
+                            u8"\u4E00\u4E2A\u6587\u4EF6\u90FD\u5339\u914D\u4E0D\u5230\u3002"
+                            u8"\u8BF7\u6539\u6210**\u9010\u4E2A\u5217\u51FA**\u8981\u540C\u6B65\u7684\u540E\u7F00"
+                            u8"\uFF08\u4F8B\u5982 dat\u3001spe\u3001txt\uFF09\uFF1B"
+                            u8"\u60F3\u8FDE\u65E0\u6269\u5C55\u540D\u7684\u6587\u4EF6\u4E00\u8D77\u4F20\uFF0C"
+                            u8"\u628A\u540E\u7F00\u7559\u7A7A\u5373\u53EF\u3002")
+                            .arg(globbed.join(QString::fromUtf8(u8"\u3001"))));
+                    }
+                }
+
         emit logText(QString::fromUtf8(u8"本机目录里有 %1 个文件，但没有任何一条同步规则匹配上它们，"
                                        u8"本次没有传输任何文件。").arg(files.size()));
         if (!configuredSuffixes.isEmpty()) {

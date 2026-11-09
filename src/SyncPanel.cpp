@@ -2338,6 +2338,20 @@ void SyncPanel::onScanFinished(const QVector<FileItem> &files)
             //
             // 实测（麒麟 xcb，目录在但无匹配文件）：按钮一直写着「取消同步」，
             // 客户以为同步还在跑，其实什么都没发生。
+            // GLOB-SUFFIX-HINT（2026-11-09 实测）：规则里含通配符时明说
+            {
+                QStringList globbed;
+                const QString globChars = QStringLiteral("*?[]{}");
+                for (const SyncRule &r : m_syncRules) {
+                    for (const QChar c : r.suffix) {
+                        if (globChars.contains(c)) { globbed.append(r.suffix); break; }
+                    }
+                }
+                if (!globbed.isEmpty())
+                    appendLogLine(QStringLiteral("WARN"),
+                        QString::fromUtf8(u8"\u540E\u7F00\u89C4\u5219\u91CC\u542B\u901A\u914D\u7B26\uFF08%1\uFF09\uFF0C\u672C\u7A0B\u5E8F\u4E0D\u652F\u6301\uFF1A\u5B83\u88AB\u5F53\u6210\u4E00\u4E2A\u771F\u7684\u53EB * \u7684\u540E\u7F00\uFF0C\u4E00\u4E2A\u6587\u4EF6\u90FD\u5339\u914D\u4E0D\u5230\u3002\u8BF7\u9010\u4E2A\u5217\u51FA\u540E\u7F00\uFF08\u5982 dat\u3001spe\u3001txt\uFF09\uFF1B\u8981\u8FDE\u65E0\u6269\u5C55\u540D\u7684\u6587\u4EF6\u4E00\u8D77\u4F20\uFF0C\u628A\u540E\u7F00\u7559\u7A7A\u5373\u53EF\u3002")
+                        .arg(globbed.join(QString::fromUtf8(u8"\u3001"))), 3);
+            }
             setBusy(false);
             setStartButtonIdle();
             setStatusLine(QString::fromUtf8(u8"\u6CA1\u6709\u5339\u914D\u7684\u6587\u4EF6"), 3);
