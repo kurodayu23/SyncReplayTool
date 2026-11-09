@@ -43,7 +43,13 @@ param(
     [string[]]$FallbackRuntimeDirs = @('C:\Windows\System32'),
     # payload 与工作根都不放 ai-workspace：那是会被清空的临时区（2026-11-02 搬）
     [string]$PayloadDir = 'D:\AP\AP7000\SyncReplayTool\scripts\kylin-payload',
-    [string]$BuildRoot = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\nightD',
+    # **默认必须指向当前构建输出目录**（2026-11-09 修复）。
+    #
+    # 原来默认是 ..\nightD —— 那是 2026-10-28 的一次夜间构建，比源码老十几天。
+    # 于是任何人**手工**跑这个脚本（不显式传 -BuildRoot）都会得到
+    # 「包内 exe 与构建产物不一致」的假 FAIL；而 run-all-tests 因为显式传了
+    # -BuildRoot，门禁一直是绿的 —— 这个坑只有手工跑才会踩到，所以特别难发现。
+    [string]$BuildRoot = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\build-Release',
     [string]$KylinBinary = '',
     [string]$WorkRoot = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool\work\pkg-preflight',
     [string]$ContainerImage = 'kylin-v10-real:latest',
@@ -54,6 +60,17 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# **构建产物不存在就立刻停**（2026-11-09 加）。
+#
+# 没有这道保护时，$BuildRoot 指错目录的后果是"拿一个旧 exe 去比对"，
+# 于是报「不一致」—— 客户/同事会以为是包的问题，实际是路径指错了。
+# 明确指向错路径比默默比对一个旧文件安全得多。
+$exePath = Join-Path $BuildRoot 'release\SyncReplayTool.exe'
+if (-not (Test-Path $exePath)) {
+    Write-Host "错误：在 -BuildRoot 下找不到构建产物：$exePath" -ForegroundColor Red
+    Write-Host "请用 -BuildRoot 指向本次构建的输出目录（例如 ...\build-Release）。" -ForegroundColor Yellow
+    exit 2
+}
 Set-StrictMode -Version Latest
 
 # 让本脚本的输出按**当前控制台代码页**编码。
