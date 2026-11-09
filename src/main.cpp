@@ -4414,6 +4414,42 @@ int runSelfCheck()
               << "\tnormalNotHit=" << (normalNotHit ? 1 : 0) << "\n";
       }
 
+      // ----------------------------------------------------------------
+      // 判据：源文件被别的程序占用时，短结论/层/建议三处必须一致
+      //
+      // 2026-11-09 实测：Excel 占着 .dat 时，rsync 说
+      //   rsync: [sender] send_files failed to open ".../l3.dat": Device or resource busy (16)
+      // 产品原话是「本机环境有问题」+「请检查 rsync/私钥/磁盘空间」——三条全错，
+      // 接收端其实收到了 4/5，只有被占用的那个没到。
+      {
+          const QString lkErr = QStringLiteral(
+              "rsync: [sender] send_files failed to open \"C:/d/l3.dat\": "
+              "Device or resource busy (16)\n"
+              "rsync error: some files/attrs were not transferred (code 23) at main.c(1412)");
+          const QString lkShort = RsyncRunner::shortConclusionForTest(lkErr);
+          const QString lkAdvice = RsyncRunner::adviceForTest(lkErr);
+          const int lkLayer = RsyncRunner::classifyLayerForTest(lkErr);
+          const bool lkSaysLocked = lkShort.contains(QString::fromUtf8(u8"\u5360\u7528"));
+          const bool lkLayerLocal = (lkLayer == 0);
+          const bool lkAdvNotGeneric = !lkAdvice.contains(QString::fromUtf8(u8"\u79C1\u94A5\u6587\u4EF6\u662F\u5426\u5B58\u5728"));
+          const bool lkAdvActionable = lkAdvice.contains(QString::fromUtf8(u8"\u5173\u6389"));
+          // 反向锁：远端 busy（不是 send_files）不许命中
+          const QString rbErr = QStringLiteral(
+              "rsync: [receiver] write failed: Device or resource busy (16)");
+          const bool rbNotHit = !RsyncRunner::shortConclusionForTest(rbErr)
+                                    .contains(QString::fromUtf8(u8"\u5360\u7528"));
+          const bool ok = lkSaysLocked && lkLayerLocal && lkAdvNotGeneric
+                          && lkAdvActionable && rbNotHit;
+          if (!ok)
+              ++bad;
+          out << (ok ? "PASS\t" : "FAIL\t") << "source-file-locked-attribution"
+              << "\tsaysLocked=" << (lkSaysLocked ? 1 : 0)
+              << "\tlayerLocal=" << (lkLayerLocal ? 1 : 0)
+              << "\tadvNotGeneric=" << (lkAdvNotGeneric ? 1 : 0)
+              << "\tadvActionable=" << (lkAdvActionable ? 1 : 0)
+              << "\treverseNotHit=" << (rbNotHit ? 1 : 0) << "\n";
+      }
+
 
       // ----------------------------------------------------------------
       // 判据：私钥带口令时必须说「带口令」，不能只说「本机环境有问题」
