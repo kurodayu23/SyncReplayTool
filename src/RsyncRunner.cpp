@@ -3341,7 +3341,20 @@ void RsyncRunner::start(const TargetConfig &target,
 
     const QString rsyncBin = locateTool(QStringLiteral("rsync"));
     if (rsyncBin.isEmpty()) {
-        reportAttribution(QString(), LayerLocal);
+        // **这条必须给准确的短结论**：调用点已经知道原因（文件列表写不进本地根目录），
+        // 传空原文只会得到「原因未识别」+「请检查 rsync/私钥/磁盘」，三条全都不对。
+        // 2026-11-09 实测：把 localRoot 改名后，客户先看到"原因未识别"，
+        // 再往下才看到「无法在本地根目录写入临时文件列表：…」——顺序和结论都错。
+        reportAttribution(
+            QString(), LayerLocal,
+            QString::fromUtf8(
+                u8"\u672C\u673A\u6839\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB\uFF0C\u6240\u4EE5\u65E0\u6CD5\u751F\u6210\u4F20\u8F93\u6E05\u5355\u3002"
+                u8"\u5E38\u89C1\u539F\u56E0\uFF1A\u76EE\u5F55\u88AB\u6539\u540D\u3001\u88AB\u5220\u3001\u76D8\u88AB\u5378\u8F7D\uFF0C"
+                u8"\u6216\u8005\u8BE5\u76EE\u5F55\u53D8\u6210\u4E86\u53EA\u8BFB\u3002\u8BF7\uFF1A"
+                u8"\u2460 \u770B\u76EE\u5F55\u8FD8\u5728\u4E0D\u5728\uFF1Als \u672C\u673A\u76EE\u5F55\uFF1B"
+                u8"\u2461 \u76D8\u6389\u4E86\u5C31\u91CD\u65B0\u6302\u4E0A\uFF1B"
+                u8"\u2462 \u82E5\u662F\u53EA\u8BFB\uFF0C\u6362\u5230\u4E00\u4E2A\u53EF\u5199\u7684\u76EE\u5F55\u3002"),
+            QString::fromUtf8(u8"\u672C\u673A\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB"));
         emit logText(QString::fromUtf8(u8"\u672A\u627E\u5230 rsync \u53EF\u6267\u884C\u6587\u4EF6\u3002"));
         emit allFinished(false);
         return;
@@ -3438,7 +3451,20 @@ void RsyncRunner::start(const TargetConfig &target,
         }
     }
     if (!QFileInfo(m_localRoot).isDir()) {
-        reportAttribution(QString(), LayerLocal);
+        // **这条必须给准确的短结论**：调用点已经知道原因（文件列表写不进本地根目录），
+        // 传空原文只会得到「原因未识别」+「请检查 rsync/私钥/磁盘」，三条全都不对。
+        // 2026-11-09 实测：把 localRoot 改名后，客户先看到"原因未识别"，
+        // 再往下才看到「无法在本地根目录写入临时文件列表：…」——顺序和结论都错。
+        reportAttribution(
+            QString(), LayerLocal,
+            QString::fromUtf8(
+                u8"\u672C\u673A\u6839\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB\uFF0C\u6240\u4EE5\u65E0\u6CD5\u751F\u6210\u4F20\u8F93\u6E05\u5355\u3002"
+                u8"\u5E38\u89C1\u539F\u56E0\uFF1A\u76EE\u5F55\u88AB\u6539\u540D\u3001\u88AB\u5220\u3001\u76D8\u88AB\u5378\u8F7D\uFF0C"
+                u8"\u6216\u8005\u8BE5\u76EE\u5F55\u53D8\u6210\u4E86\u53EA\u8BFB\u3002\u8BF7\uFF1A"
+                u8"\u2460 \u770B\u76EE\u5F55\u8FD8\u5728\u4E0D\u5728\uFF1Als \u672C\u673A\u76EE\u5F55\uFF1B"
+                u8"\u2461 \u76D8\u6389\u4E86\u5C31\u91CD\u65B0\u6302\u4E0A\uFF1B"
+                u8"\u2462 \u82E5\u662F\u53EA\u8BFB\uFF0C\u6362\u5230\u4E00\u4E2A\u53EF\u5199\u7684\u76EE\u5F55\u3002"),
+            QString::fromUtf8(u8"\u672C\u673A\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB"));
         emit logText(QString::fromUtf8(u8"\u672C\u5730\u6839\u76EE\u5F55\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BFB\uFF1A%1").arg(m_localRoot));
         emit allFinished(false);
         return;
@@ -4351,7 +4377,20 @@ void RsyncRunner::launchNext()
     const QString listAbs = m_localRoot + QLatin1Char('/') + listName;
     QFile listFile(listAbs);
     if (!listFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        reportAttribution(QString(), LayerLocal);
+        // **这条必须给准确的短结论**：调用点已经知道原因（文件列表写不进本地根目录），
+        // 传空原文只会得到「原因未识别」+「请检查 rsync/私钥/磁盘」，三条全都不对。
+        // 2026-11-09 实测：把 localRoot 改名后，客户先看到"原因未识别"，
+        // 再往下才看到「无法在本地根目录写入临时文件列表：…」——顺序和结论都错。
+        reportAttribution(
+            QString(), LayerLocal,
+            QString::fromUtf8(
+                u8"\u672C\u673A\u6839\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB\uFF0C\u6240\u4EE5\u65E0\u6CD5\u751F\u6210\u4F20\u8F93\u6E05\u5355\u3002"
+                u8"\u5E38\u89C1\u539F\u56E0\uFF1A\u76EE\u5F55\u88AB\u6539\u540D\u3001\u88AB\u5220\u3001\u76D8\u88AB\u5378\u8F7D\uFF0C"
+                u8"\u6216\u8005\u8BE5\u76EE\u5F55\u53D8\u6210\u4E86\u53EA\u8BFB\u3002\u8BF7\uFF1A"
+                u8"\u2460 \u770B\u76EE\u5F55\u8FD8\u5728\u4E0D\u5728\uFF1Als \u672C\u673A\u76EE\u5F55\uFF1B"
+                u8"\u2461 \u76D8\u6389\u4E86\u5C31\u91CD\u65B0\u6302\u4E0A\uFF1B"
+                u8"\u2462 \u82E5\u662F\u53EA\u8BFB\uFF0C\u6362\u5230\u4E00\u4E2A\u53EF\u5199\u7684\u76EE\u5F55\u3002"),
+            QString::fromUtf8(u8"\u672C\u673A\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB"));
         emit logText(QString::fromUtf8(u8"\u65E0\u6CD5\u5728\u672C\u5730\u6839\u76EE\u5F55\u5199\u5165\u4E34\u65F6\u6587\u4EF6\u5217\u8868\uFF1A%1").arg(listAbs));
         m_failed = true;
         ++m_groupIndex;
@@ -4381,7 +4420,20 @@ void RsyncRunner::launchNext()
     // 界面照报「同步完成」，剩下的文件静默不传——这比报错糟糕得多。
     const qint64 written = listFile.write(payload);
     if (written != payload.size()) {
-        reportAttribution(QString(), LayerLocal);
+        // **这条必须给准确的短结论**：调用点已经知道原因（文件列表写不进本地根目录），
+        // 传空原文只会得到「原因未识别」+「请检查 rsync/私钥/磁盘」，三条全都不对。
+        // 2026-11-09 实测：把 localRoot 改名后，客户先看到"原因未识别"，
+        // 再往下才看到「无法在本地根目录写入临时文件列表：…」——顺序和结论都错。
+        reportAttribution(
+            QString(), LayerLocal,
+            QString::fromUtf8(
+                u8"\u672C\u673A\u6839\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB\uFF0C\u6240\u4EE5\u65E0\u6CD5\u751F\u6210\u4F20\u8F93\u6E05\u5355\u3002"
+                u8"\u5E38\u89C1\u539F\u56E0\uFF1A\u76EE\u5F55\u88AB\u6539\u540D\u3001\u88AB\u5220\u3001\u76D8\u88AB\u5378\u8F7D\uFF0C"
+                u8"\u6216\u8005\u8BE5\u76EE\u5F55\u53D8\u6210\u4E86\u53EA\u8BFB\u3002\u8BF7\uFF1A"
+                u8"\u2460 \u770B\u76EE\u5F55\u8FD8\u5728\u4E0D\u5728\uFF1Als \u672C\u673A\u76EE\u5F55\uFF1B"
+                u8"\u2461 \u76D8\u6389\u4E86\u5C31\u91CD\u65B0\u6302\u4E0A\uFF1B"
+                u8"\u2462 \u82E5\u662F\u53EA\u8BFB\uFF0C\u6362\u5230\u4E00\u4E2A\u53EF\u5199\u7684\u76EE\u5F55\u3002"),
+            QString::fromUtf8(u8"\u672C\u673A\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB"));
         emit logText(QString::fromUtf8(u8"\u4E34\u65F6\u6587\u4EF6\u5217\u8868\u53EA\u5199\u5165\u4E86 %1 / %2 \u5B57\u8282"
                                          u8"\uFF0C\u672C\u7EC4\u5DF2\u4FDD\u7559\u7684\u90E8\u5206\u6E05\u5355\u672A\u6267\u884C"
                                          u8"\u3002")
@@ -4393,7 +4445,20 @@ void RsyncRunner::launchNext()
         return;
     }
     if (!listFile.flush()) {
-        reportAttribution(QString(), LayerLocal);
+        // **这条必须给准确的短结论**：调用点已经知道原因（文件列表写不进本地根目录），
+        // 传空原文只会得到「原因未识别」+「请检查 rsync/私钥/磁盘」，三条全都不对。
+        // 2026-11-09 实测：把 localRoot 改名后，客户先看到"原因未识别"，
+        // 再往下才看到「无法在本地根目录写入临时文件列表：…」——顺序和结论都错。
+        reportAttribution(
+            QString(), LayerLocal,
+            QString::fromUtf8(
+                u8"\u672C\u673A\u6839\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB\uFF0C\u6240\u4EE5\u65E0\u6CD5\u751F\u6210\u4F20\u8F93\u6E05\u5355\u3002"
+                u8"\u5E38\u89C1\u539F\u56E0\uFF1A\u76EE\u5F55\u88AB\u6539\u540D\u3001\u88AB\u5220\u3001\u76D8\u88AB\u5378\u8F7D\uFF0C"
+                u8"\u6216\u8005\u8BE5\u76EE\u5F55\u53D8\u6210\u4E86\u53EA\u8BFB\u3002\u8BF7\uFF1A"
+                u8"\u2460 \u770B\u76EE\u5F55\u8FD8\u5728\u4E0D\u5728\uFF1Als \u672C\u673A\u76EE\u5F55\uFF1B"
+                u8"\u2461 \u76D8\u6389\u4E86\u5C31\u91CD\u65B0\u6302\u4E0A\uFF1B"
+                u8"\u2462 \u82E5\u662F\u53EA\u8BFB\uFF0C\u6362\u5230\u4E00\u4E2A\u53EF\u5199\u7684\u76EE\u5F55\u3002"),
+            QString::fromUtf8(u8"\u672C\u673A\u76EE\u5F55\u5199\u4E0D\u8FDB\u53BB"));
         emit logText(QString::fromUtf8(u8"\u4E34\u65F6\u6587\u4EF6\u5217\u8868\u5199\u5165\u78C1\u76D8\u5931\u8D25"
                                          u8"\uFF0C\u672C\u7EC4\u672A\u6267\u884C\u3002"));
         m_failed = true;
