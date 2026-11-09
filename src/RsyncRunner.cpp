@@ -1272,6 +1272,25 @@ QString RsyncRunner::buildRemoteDirsCommand(const QString &root,
         segs << (QStringLiteral("mkdir -p -- ") + quoted.join(QLatin1Char(' ')));
     if (!drops.isEmpty())
         segs << drops.join(QStringLiteral("; "));
+
+    // **探测"远端同名处是不是一个文件"**（2026-11-10，D3 修复的只加提示那一版）：
+    //
+    // 本地是目录、远端同名处是普通文件时，rsync 会把那个文件删掉、换成目录，
+    // 然后正常退出（rc=0）。产品原来对此**一个字都不提**，只报「已完成」，
+    // 客户远端的一个文件就这么没了，事后在日志里也查不到。
+    //
+    // 这里不改行为（客户确实要求同步这个目录），只把探测结果打到 stderr 供上层播报：
+    // 对每个目标目录，若同名处存在且不是目录，输出一行 SRT-COLLIDE:<路径>。
+    // 只读 -e / -d，不创建、不删除任何东西。
+    if (!quoted.isEmpty()) {
+        QStringList probes;
+        for (const QString &q : quoted) {
+            probes << (QStringLiteral("if [ -e ") + q + QStringLiteral(" ] && [ ! -d ") + q
+                        + QStringLiteral(" ]; then echo \"SRT-COLLIDE:\"") + q + QLatin1String(" >&2; fi"));
+        }
+        segs << probes.join(QStringLiteral("; "));
+    }
+
     return segs.join(QStringLiteral("; "));
 }
 
@@ -4251,6 +4270,36 @@ void RsyncRunner::onDirsFinished(int exitCode, QProcess::ExitStatus status)
                 QStringLiteral("SRT_MISSING_ROOT:[^\\r\\n]*"),
                 QRegularExpression::MultilineOption));
         }
+
+    // ------------------------------------------------------------------
+    // 远端同名处是**一个文件**（2026-11-10，D3：只加提示，不改行为）
+    //
+    // 本地是目录、远端同名处是普通文件时，rsync 会删掉那个文件换成目录并正常
+    // 退出（实测 rc=0），产品原来一个字都不提。这里把探测结果如实说出来：
+    // 客户至少知道"目标电脑上那个东西被我覆盖了"，而不是事后才发现。
+    // ------------------------------------------------------------------
+    {
+        // 标记行是我们自己塞的，先摘出来，不让它混进归因
+        QRegularExpression reCollide(QStringLiteral("SRT-COLLIDE:([^\\r\\n]*)"),
+                                     QRegularExpression::MultilineOption);
+        QRegularExpressionMatchIterator it = reCollide.globalMatch(m_stderrTail);
+        QStringList collided;
+        while (it.hasNext()) {
+            const QString p = it.next().captured(1).trimmed();
+            if (!p.isEmpty() && !collided.contains(p))
+                collided.append(p);
+        }
+        m_stderrTail.remove(reCollide);
+        for (const QString &p : collided) {
+            emit logText(QString::fromUtf8(
+                u8"\u26A0 \u76EE\u6807\u7535\u8111\u4E0A %1 \u539F\u672C\u662F\u4E00\u4E2A**\u6587\u4EF6**\uFF0C"
+                u8"\u4E0D\u662F\u76EE\u5F55\u3002\u672C\u6B21\u540C\u6B65\u5DF2\u6309\u4F60\u7684\u8BBE\u7F6E"
+                u8"\u628A\u5B83\u66FF\u6362\u6210\u4E86\u76EE\u5F55\uFF08\u539F\u6587\u4EF6\u5185\u5BB9\u4E0D\u518D\u4FDD\u7559\uFF09\u3002"
+                u8"\u5982\u679C\u90A3\u4E2A\u6587\u4EF6\u8FD8\u8981\uFF0C\u8BF7\u5148\u53BB\u76EE\u6807\u7535\u8111\u4E0A"
+                u8"\u628A\u5B83\u6539\u540D\u3001\u5E76\u628A\u8FD9\u4E00\u6761\u89C4\u5219\u6362\u4E00\u4E2A\u8FDC\u7AEF\u5B50\u76EE\u5F55\u3002")
+                .arg(p));
+        }
+    }
     }
 
     // **看门狗杀掉的情形要单独处理。**
