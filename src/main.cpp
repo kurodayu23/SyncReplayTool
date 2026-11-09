@@ -4396,6 +4396,38 @@ int runSelfCheck()
             << "\tgot=" << got4 << "\n";
     }
 
+    // ----------------------------------------------------------------
+    // 判据：目录层级过深时整棵跳过，并标记"结果不完整"
+    //
+    // 与上一条同源：kMaxDepth=64 的保护一直在，但判据零覆盖。
+    // 用 SRT_SCAN_MAX_DEPTH 把上限压到 2，造 4 层目录，看是否整棵跳过 + 置 truncated。
+    {
+        QTemporaryDir td4;
+        bool ok5 = false;
+        int got5 = -1;
+        bool truncated5 = false;
+        if (td4.isValid()) {
+            QString deep = td4.path();
+            for (int i2 = 1; i2 <= 4; ++i2) {
+                deep += QLatin1Char('/') + QStringLiteral("d%1").arg(i2);
+                QDir().mkpath(deep);
+            }
+            { QFile f(deep + QLatin1Char('/') + QStringLiteral("deep.dat")); f.open(QIODevice::WriteOnly); f.write("x"); }
+            { QFile f(td4.path() + QLatin1Char('/') + QStringLiteral("shallow.dat")); f.open(QIODevice::WriteOnly); f.write("x"); }
+            qputenv("SRT_SCAN_MAX_DEPTH", "2");
+            got5 = FileScanner::scan(td4.path(), QStringList() << QStringLiteral("dat")).size();
+            truncated5 = FileScanner::wasTruncated();
+            qunsetenv("SRT_SCAN_MAX_DEPTH");
+            // 浅层那个必须扫到，深层那个必须被跳过，且整体标记不完整
+            ok5 = (got5 == 1) && truncated5;
+        }
+        if (!ok5)
+            ++bad;
+        out << (ok5 ? "PASS\t" : "FAIL\t") << "scan-depth-limit-flags-incomplete"
+            << "\tgot=" << got5
+            << "\ttruncated=" << (truncated5 ? 1 : 0) << "\n";
+    }
+
     // 诊断判据：若设置了 SRT_SCAN_PROBE_DIR，扫这个真实目录并按 tar.gz 过滤，
     // 结果打到输出里（不判失败，只用来定位"自检 1 / 实测 0"的差异）。
     {

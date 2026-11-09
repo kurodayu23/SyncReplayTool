@@ -498,7 +498,19 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
     QSet<QString> visited;
     visited.insert(QDir::fromNativeSeparators(basePath));
 
-    const int kMaxDepth = 64;
+    // **测试钩子**（2026-11-10 加）：SRT_SCAN_MAX_DEPTH 可临时压低深度上限，
+    // 让"层级过深跳过"这条保护能在自检里被跑到（造 65 层目录可以，但自检里
+    // 每层建目录很慢且依赖平台；压低上限更快也更稳）。不设时行为完全不变。
+    int kMaxDepth = 64;
+    {
+        const QByteArray ov = qgetenv("SRT_SCAN_MAX_DEPTH");
+        if (!ov.isEmpty()) {
+            bool ok3 = false;
+            const int v = ov.toInt(&ok3);
+            if (ok3 && v > 0)
+                kMaxDepth = v;
+        }
+    }
     // **测试钩子**（2026-11-10 加）：环境变量 SRT_SCAN_MAX_ENTRIES 可以临时压低上限，
     // 让"触顶中止扫描"这条保护能在自检里被真正跑到 —— 造 200 万个文件不现实，
     // 但把它压到几十个就能验证：超限时是否 setTruncated、是否给出"结果不完整"的说明、
@@ -992,7 +1004,19 @@ QVector<SuffixStat> FileScanner::detectSuffixes(const QString &root)
     QSet<QString> visited;
     visited.insert(QDir::fromNativeSeparators(basePath));
 
-    const int kMaxDepth = 64;
+    // **测试钩子**（2026-11-10 加）：SRT_SCAN_MAX_DEPTH 可临时压低深度上限，
+    // 让"层级过深跳过"这条保护能在自检里被跑到（造 65 层目录可以，但自检里
+    // 每层建目录很慢且依赖平台；压低上限更快也更稳）。不设时行为完全不变。
+    int kMaxDepth = 64;
+    {
+        const QByteArray ov = qgetenv("SRT_SCAN_MAX_DEPTH");
+        if (!ov.isEmpty()) {
+            bool ok3 = false;
+            const int v = ov.toInt(&ok3);
+            if (ok3 && v > 0)
+                kMaxDepth = v;
+        }
+    }
     // **测试钩子**（2026-11-10 加）：环境变量 SRT_SCAN_MAX_ENTRIES 可以临时压低上限，
     // 让"触顶中止扫描"这条保护能在自检里被真正跑到 —— 造 200 万个文件不现实，
     // 但把它压到几十个就能验证：超限时是否 setTruncated、是否给出"结果不完整"的说明、
