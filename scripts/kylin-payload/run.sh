@@ -201,6 +201,31 @@ if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
         echo "     现在先用离屏模式启动，日志会输出在这里。"
         echo
         export QT_QPA_PLATFORM=offscreen
+
+    fi
+fi
+
+# **用户显式指定了平台、但包里没有那个插件时，也不能直接 core dump**
+# （2026-11-10 实测 P2）：
+#   QT_QPA_PLATFORM=minimal sh run.sh --version
+#   -> bash: Aborted (core dumped)
+#      This application failed to start because it could not find or load
+#      the Qt platform plugin "minimal" ... Available: offscreen, xcb
+# 麒麟现场常用 QT_QPA_PLATFORM=minimal（无 X 时省资源），此时客户只看到英文
+# 和 core dumped，而 run.sh 上面刚承诺过"没有图形界面时说人话"。
+# 这里检查一下：用户指定的平台插件在不在 plugins/platforms 下；
+# 不在就给出中文说明并回落 offscreen（而不是让它崩）。
+if [ -n "${QT_QPA_PLATFORM:-}" ]; then
+    _want_plat="$QT_QPA_PLATFORM"
+    case "$_want_plat" in
+        *:*) _want_plat="${_want_plat%%:*}" ;;
+    esac
+    if [ ! -f "$HERE/plugins/platforms/libq${_want_plat}.so" ]; then
+        echo "提示：你指定了图形平台 $QT_QPA_PLATFORM，但本包没有对应的插件。"
+        echo "     本包里可用的只有：offscreen（无界面）、xcb（有桌面时用）。"
+        echo "     现在改用离屏模式启动；若需要有界面，请在带桌面的机器上双击运行。"
+        echo
+        export QT_QPA_PLATFORM=offscreen
     fi
 fi
 
