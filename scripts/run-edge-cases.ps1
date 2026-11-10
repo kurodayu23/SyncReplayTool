@@ -52,7 +52,11 @@ $results = @()
 foreach ($c in $cases) {
     $path = Join-Path $TestsDir $c.f
     if (-not (Test-Path $path)) {
-        $results += [pscustomobject]@{ Case = $c.n; Result = 'SKIP'; Note = 'probe file missing' }
+        # A missing probe file is NOT a skip - it is a FAIL. The file was
+        # there to assert something; without it nothing was asserted, and
+        # a chain that asserts nothing must not report green (same rule as
+        # "no verdict line at all => FAIL" below).
+        $results += [pscustomobject]@{ Case = $c.n; Result = 'FAIL'; Note = "probe file missing: $path" }
         continue
     }
     Write-Host ("`n########## {0} ##########" -f $c.n)
