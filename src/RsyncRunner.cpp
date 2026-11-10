@@ -4011,6 +4011,52 @@ void RsyncRunner::start(const TargetConfig &target,
     for (const SyncRule &rule : rules) {
         if (reject(rule.remoteSubDir) || rejectGlob(rule.remoteSubDir) || rejectShellMeta(rule.remoteSubDir))
             return;
+        // **归一化把输入改写成了别的东西就拒**（2026-11-10 审查 P1-2，实测踩出来的）。
+        //
+        // 上面三个 reject 看的是**用户原始输入**，而 remoteDir() 还会走
+        // `QDir::cleanPath("/" + subDir)`。归一化本身是有意的（要消掉重复斜杠、
+        // 处理 `.` 与 `..`），但它有个危险性质：**能把一整段语义不同的输入压成同一个结果**。
+        //   cleanPath("/" + "*/..")   -> "/"
+        //   cleanPath("/" + "[a]/..") -> "/"
+        //   cleanPath("/" + "x<TAB>/..") -> "/"
+        // 三条输入完全不像，归一化之后一模一样。于是：
+        //   ① 我第一版想"对归一化结果再跑一遍 reject"是**无效的** ——
+        //      `/` 里没有任何违禁字符，reject 全部为假，等于没加；
+        //   ② 真正的判据是"归一化前后语义是否等价"。
+        //
+        // 实测（审查员在容器里跑过）：remoteSubDir 填 `*/..` 时产品报
+        // `ok=1 status=已完成`，而配置的目标目录是**空的**，文件落到了远端根。
+        //
+        // 这里做保守判断：去掉首尾空白与首尾斜杠后，若归一化结果与原始输入
+        // 的"朴素形式"不同，就视为不可接受。合法的 `a//b`、`a/./b` 会被
+        // cleanPath 规范成 `a/b` —— 这类也一并拒掉是**故意的**：
+        // 与其猜客户想表达什么，不如让他写一个干净的相对路径。
+        {
+            const QString raw = rule.remoteSubDir.trimmed();
+            QString plain = raw;
+            while (plain.startsWith(QLatin1Char('/')))
+                plain.remove(0, 1);
+            while (plain.endsWith(QLatin1Char('/')))
+                plain.chop(1);
+            const QString finalSub = remoteDir(target, rule.remoteSubDir);
+            // finalSub 是相对 remoteRoot 的最终子路径；plain 是"朴素写法"。
+            // 两者不相等 ⇒ 归一化改写了语义 ⇒ 拒。
+            if (!raw.isEmpty() && finalSub != plain) {
+                emit logText(QString::fromUtf8(
+                    u8"\u76F8\u5BF9\u8DEF\u5F84\u5F52\u4E00\u5316\u540E\u53D8\u4E86\u5F62\uFF1A"
+                    u8"\u4F60\u586B\u7684\u662F [%1]\uFF0C\u5B83\u4F1A\u88AB\u5F52\u4E00\u5316\u6210 [%2]\u3002")
+                    .arg(raw, finalSub));
+                emit logText(QString::fromUtf8(
+                    u8"\u8FD9\u7C7B\u5199\u6CD5\uFF08\u53EA\u6709\u901A\u914D\u7B26\u3001 "
+                    u8"\u53EA\u5269 ../\u3001\u6216\u91CD\u590D\u659C\u6760\uFF09\u4F1A\u8BA9\u6587\u4EF6\u843D\u5230"
+                    u8"\u4F60\u6CA1\u586B\u8FC7\u7684\u76EE\u5F55\uFF0C\u800C\u754C\u9762\u7167\u6837\u663E\u793A\u540C\u6B65\u5B8C\u6210\u3002"
+                    u8"\u8BF7\u6539\u6210\u4E00\u4E2A\u666E\u901A\u7684\u5B50\u76EE\u5F55\u540D\uFF08\u5982 spe\uFF09\u3002"));
+                reportAttribution(QString(), LayerConfig, QString(),
+                    QString::fromUtf8(u8"\u76F8\u5BF9\u8DEF\u5F84\u5F52\u4E00\u5316\u540E\u53D8\u4E86\u5F62"));
+                emit allFinished(false);
+                return;
+            }
+        }
         if (rejectEscapes(subDirEscapesRoot(rule.remoteSubDir),
                           QString::fromUtf8(u8"\u76F8\u5BF9\u8DEF\u5F84")))
             return;
