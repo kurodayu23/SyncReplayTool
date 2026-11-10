@@ -489,6 +489,10 @@ private:
     void ensureRemoteDirs();
     // 组失败时把本组"未确认送达"的文件一并降级（见实现处注释）。
     void downgradeUnconfirmedInGroup();
+    // 只降级**指定名单**里的文件（2026-11-10，D11）。
+    // 整组版会把 10 个里只有 1 个有问题的情况降成 0/10 全失败，
+    // 客户只好把 9 个已经传好的文件也重传一遍 —— 比原来的问题更糟。
+    void downgradeUnconfirmedNames(const QStringList &names);
     void launchNext();
     // rsync 退出 0 之后核对目标目录还是不是同一个目录，见 verifyRemoteDir 注释。
     void verifyRemoteDir(const QString &remoteDir);

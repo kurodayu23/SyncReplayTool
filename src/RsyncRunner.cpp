@@ -5129,6 +5129,40 @@ void RsyncRunner::downgradeUnconfirmedInGroup()
         u8"\u4E0D\u4F1A\u91CD\u4F20\uFF0C\u53EA\u8865\u5DEE\u5F02\u3002").arg(unconfirmed.size()));
 }
 
+// 只降级**名单里**的文件（2026-11-10，D11 的正确修法）。
+//
+// 背景：传输过程中源文件被改时，产品已经正确判了失败并说明"分不清改在
+// rsync 读到之前还是之后"，但**计数没有跟着降级** —— 界面出现
+// 「10 / 10 个文件」配一个「失败」状态，客户看到 10/10 就不再看失败二字。
+//
+// 第一版直接复用整组降级，实测把 10 个里只有 1 个有问题的情形降成
+// 0/10、states 全 failed —— 比原问题更糟（客户会把 9 个已传好的也重传）。
+// 所以这里只处理传入的名字，其余文件保持它们真实的状态。
+void RsyncRunner::downgradeUnconfirmedNames(const QStringList &names)
+{
+    if (names.isEmpty())
+        return;
+    int n = 0;
+    for (const QString &name : names) {
+        // 已经被点名降级过的，不重复处理（同一个文件可能既在失败名单里、
+        // 又被检出"传输期间被改过"）。
+        if (m_failedNames.contains(name))
+            continue;
+        emit fileFailedInGroup(name);
+        m_failedNames.insert(name);
+        ++n;
+    }
+    if (n <= 0)
+        return;
+    // 计数不在这里扣：统一交给 reconcileGroupCount()（它按 m_failedNames 扣）。
+    // 两处都扣会扣成负数 —— 2026-11-09 实测 runDone=-3、count=-3 / 4 个文件。
+    emit logText(QString::fromUtf8(
+        u8"\u4E0B\u9762\u8FD9 %1 \u4E2A\u6587\u4EF6\u5728\u4F20\u8F93\u671F\u95F4\u88AB\u6539\u8FC7\uFF0C"
+        u8"\u65E0\u6CD5\u786E\u8BA4\u76EE\u6807\u7535\u8111\u4E0A\u7684\u662F\u4F60\u6539\u4E4B\u540E\u7684\u5185\u5BB9\uFF0C"
+        u8"\u5DF2\u6539\u56DE\u300C\u5931\u8D25\u300D\u3002\u91CD\u8DD1\u4E00\u6B21\u5373\u53EF\uFF1A"
+        u8"\u5DF2\u7ECF\u771F\u6B63\u9001\u5230\u7684\u6587\u4EF6\u4E0D\u4F1A\u91CD\u4F20\u3002").arg(n));
+}
+
 
 void RsyncRunner::harvestStderrNames(const QString &text)
 {
@@ -5504,6 +5538,11 @@ void RsyncRunner::onFinished(int exitCode, QProcess::ExitStatus status)
                 u8"\u7A0B\u5E8F\u5206\u4E0D\u6E05\u6539\u5B58\u5728 rsync \u8BFB\u5230\u5B83\u4E4B\u524D\u8FD8\u662F\u4E4B\u540E"
                 u8"\uFF08\u8FD9\u4E24\u79CD\u60C5\u51B5\u8FDC\u7AEF\u62FF\u5230\u7684\u5185\u5BB9\u4E0D\u540C\uFF09\u3002"
                 u8"\u4E0B\u4E00\u8F6E\u4F1A\u6309\u5185\u5BB9\u91CD\u65B0\u6BD4\u5BF9\uFF0C\u6709\u5DEE\u5F02\u5C31\u4F1A\u8865\u4F20\u3002"));
+            // **只降级被改过的那几个，不动整组**（2026-11-10，D11）。
+            // muted 列表来自 filesMutatedDuringTransfer()，是逐个路径比对出来的，
+            // 所以这里能精确到文件；整组降级会把没问题的文件也标成失败，
+            // 客户只好把已经传好的也重传一遍。
+            downgradeUnconfirmedNames(mutated);
         }
         // 增量同步时 rsync 不会输出任何文件名（文件本来就一致），靠退出码判定成功
         //
