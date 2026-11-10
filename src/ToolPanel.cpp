@@ -1,4 +1,4 @@
-﻿#include "ToolPanel.h"
+#include "ToolPanel.h"
 
 #include <QDir>
 #include <QFileDialog>
@@ -436,9 +436,24 @@ void ToolPanel::runTool()
 
     // 工具是按首个文件的后缀定的。选中区里混了别的后缀时，把全部文件都丢给
     // 同一个工具，第三方回放程序可能直接把结果文件写坏 —— 问清楚再跑。
+    //
+    // **这里必须走 ToolRunner::suffixMatches**（2026-11-10 审查 P2-2）。
+    // 原来是比较 `QFileInfo(f).suffix()` 与 `rule.suffix`，而 suffix() 只取
+    // "最后一个点之后"：客户给工具配了 `tar.gz`、选中 `arch.tar.gz` 时，
+    // suffix() 得到 "gz" ≠ "tar.gz" ⇒ 被判成"后缀与所选工具不匹配"，
+    // 弹一句误导人的警告，还把正常文件从 runnable 里剔掉。
+    // 扫描/面板/建组三处早就统一到这个函数了，这是漏掉的第 4 处。
+    const QString ruleNorm = ToolRunner::normSuffix(rule.suffix);
     QStringList runnable;
     for (const QString &f : files) {
-        if (QFileInfo(f).suffix().compare(rule.suffix, Qt::CaseInsensitive) == 0)
+        const QFileInfo fi(f);
+        // 尾点与全角点归一，与 FileScanner::scan() 的口径一致
+        QString suffixName = fi.fileName();
+        while (suffixName.endsWith(QLatin1Char('.')) && suffixName.length() > 1)
+            suffixName.chop(1);
+        suffixName.replace(QChar(0xFF0E), QLatin1Char('.'));
+        const QString fSuffix = QFileInfo(suffixName).suffix().toLower().trimmed();
+        if (ToolRunner::suffixMatches(ruleNorm, fSuffix, fi.fileName()))
             runnable.append(f);
     }
     if (files.size() > runnable.size()) {

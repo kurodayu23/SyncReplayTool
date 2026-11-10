@@ -4382,12 +4382,18 @@ int runSelfCheck()
                 f.open(QIODevice::WriteOnly);
                 f.write("x");
             }
-            qputenv("SRT_SCAN_MAX_ENTRIES", "3");
+            // **改成显式注入，不再用环境变量**（2026-11-10 审查 P1-3）。
+            FileScanner::setTestLimits(3, 0);
             got4 = FileScanner::scan(td3.path(), QStringList() << QStringLiteral("dat")).size();
             truncated4 = FileScanner::wasTruncated();
-            qunsetenv("SRT_SCAN_MAX_ENTRIES");
-            // 触顶时不但要停，还要把"不完整"这件事标记出来（界面靠它提示）
-            ok4 = truncated4 && got4 <= 10;
+            FileScanner::setTestLimits(0, 0);
+            // **断言必须是 got4 == 0，不能是 got4 <= 10**（2026-11-10 审查 P1-2）：
+            // 上限压到 3、目录里放 10 个文件时，"got4 <= 10" 恒真 —— 于是
+            // 把实现改成"只置位 truncated、不停止扫描"的变异版本照样判 PASS，
+            // 而那正是"闷头扫完再报成功"这个缺陷的形态，判据根本抓不到。
+            // 真实行为是 0：scan() 在**进目录之前**就做 pre-loop 检查（FileScanner.cpp 里那段
+            // `if (fileTotal + filesHere > kMaxEntries)`），超限直接 break，一个文件都不收。
+            ok4 = truncated4 && got4 == 0;
         }
         if (!ok4)
             ++bad;
@@ -4414,12 +4420,18 @@ int runSelfCheck()
             }
             { QFile f(deep + QLatin1Char('/') + QStringLiteral("deep.dat")); f.open(QIODevice::WriteOnly); f.write("x"); }
             { QFile f(td4.path() + QLatin1Char('/') + QStringLiteral("shallow.dat")); f.open(QIODevice::WriteOnly); f.write("x"); }
-            qputenv("SRT_SCAN_MAX_DEPTH", "2");
+            // **再加一个根下兄弟文件**（2026-11-10 审查 P1-1）：
+            // 原判据是 (got5 == 1)，而历史缺陷的形态是"层级过深时 stopAll 整趟中止"。
+            // 目录栈是后进先出，根下 shallow.dat 先被处理完，所以那个坏行为同样得到
+            // got=1 + truncated=1，判据**照样 PASS** —— 分不出"只丢这一棵"和"整趟中止"。
+            // 加第二个根文件后：只丢深支 = got 2（正确）；整趟中止 = got 1（坏行为）。
+            { QFile f(td4.path() + QLatin1Char('/') + QStringLiteral("sibling.dat")); f.open(QIODevice::WriteOnly); f.write("x"); }
+            FileScanner::setTestLimits(0, 2);
             got5 = FileScanner::scan(td4.path(), QStringList() << QStringLiteral("dat")).size();
             truncated5 = FileScanner::wasTruncated();
-            qunsetenv("SRT_SCAN_MAX_DEPTH");
-            // 浅层那个必须扫到，深层那个必须被跳过，且整体标记不完整
-            ok5 = (got5 == 1) && truncated5;
+            FileScanner::setTestLimits(0, 0);
+            // 两个根文件都必须扫到、深层那棵整棵跳过、且整体标记不完整
+            ok5 = (got5 == 2) && truncated5;
         }
         if (!ok5)
             ++bad;

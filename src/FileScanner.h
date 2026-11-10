@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <QString>
 #include <QStringList>
@@ -121,6 +121,19 @@ public:
     // 这类目录整棵被跳过，里面的文件不会进清单、不会被同步，
     // 但日志里一个字都没有，最后照样报「同步完成」—— 同样是静默丢数据。
     static int unreadableDirCount();
+
+    // **测试用上限注入**（2026-11-10 审查 P1-3 后改）。
+    //
+    // 原来是读环境变量 SRT_SCAN_MAX_ENTRIES / SRT_SCAN_MAX_DEPTH，而且**无条件生效**。
+    // 后果实测：客户环境里若恰好设了 SRT_SCAN_MAX_ENTRIES=1，跑 --selfcheck 会
+    // 直接 0xC0000005 崩掉、一行输出都没有；设成 2 则自检失败但报的是
+    // "scan-multi-segment-4files found=0"，看不出真正原因。
+    // 也就是说，一个只在自检里用得上、却被任意环境变量触发的后门，
+    // 把自检本身变成了不可靠的东西。
+    //
+    // 现在改成**显式注入**：只有自检代码会调用它，进程里其它任何路径都不会受影响。
+    // 传 0 表示恢复默认（200 万条目 / 64 层）。
+    static void setTestLimits(int maxEntries, int maxDepth);
 
 private:
     static void setTruncated();

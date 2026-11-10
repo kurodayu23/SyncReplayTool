@@ -30,6 +30,16 @@
 
 namespace {
 
+// 测试上限（只由 setTestLimits 注入；0 = 用默认值）。
+//
+// 为什么不直接用环境变量：这两个值是"给自检用的"，而环境变量对**任何**调用路径都生效。
+// 实测（2026-11-10 审查 P1-3）：SRT_SCAN_MAX_ENTRIES=1 时跑 --selfcheck 直接
+// 0xC0000005（访问冲突）崩掉、一行输出都没有；=2 时报 "found=0" 而看不出真因。
+// 一个只在自检里用得上的后门，把自检本身变成了不可靠的东西 —— 所以改成显式注入。
+static int g_testMaxEntries = 0;
+static int g_testMaxDepth = 0;
+
+
 // 上一次扫描是否因触顶提前停止。见 FileScanner.h 的说明。
 QAtomicInt g_truncated(0);
 
@@ -416,6 +426,13 @@ bool shouldSkipDir(const QString &dirPath, const QString &basePath)
 
 } // namespace
 
+void FileScanner::setTestLimits(int maxEntries, int maxDepth)
+{
+    g_testMaxEntries = (maxEntries > 0) ? maxEntries : 0;
+    g_testMaxDepth   = (maxDepth   > 0) ? maxDepth   : 0;
+}
+
+
 QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suffixes)
 {
     QVector<FileItem> items;
@@ -498,34 +515,15 @@ QVector<FileItem> FileScanner::scan(const QString &root, const QStringList &suff
     QSet<QString> visited;
     visited.insert(QDir::fromNativeSeparators(basePath));
 
-    // **测试钩子**（2026-11-10 加）：SRT_SCAN_MAX_DEPTH 可临时压低深度上限，
-    // 让"层级过深跳过"这条保护能在自检里被跑到（造 65 层目录可以，但自检里
-    // 每层建目录很慢且依赖平台；压低上限更快也更稳）。不设时行为完全不变。
-    int kMaxDepth = 64;
-    {
-        const QByteArray ov = qgetenv("SRT_SCAN_MAX_DEPTH");
-        if (!ov.isEmpty()) {
-            bool ok3 = false;
-            const int v = ov.toInt(&ok3);
-            if (ok3 && v > 0)
-                kMaxDepth = v;
-        }
-    }
-    // **测试钩子**（2026-11-10 加）：环境变量 SRT_SCAN_MAX_ENTRIES 可以临时压低上限，
-    // 让"触顶中止扫描"这条保护能在自检里被真正跑到 —— 造 200 万个文件不现实，
-    // 但把它压到几十个就能验证：超限时是否 setTruncated、是否给出"结果不完整"的说明、
-    // 是否停止继续扫（而不是继续闷头扫完再报成功）。
-    // 默认行为完全不变（不设环境变量时仍是 200 万）。
-    int kMaxEntries = 2000000;
-    {
-        const QByteArray ov = qgetenv("SRT_SCAN_MAX_ENTRIES");
-        if (!ov.isEmpty()) {
-            bool ok2 = false;
-            const int v = ov.toInt(&ok2);
-            if (ok2 && v > 0)
-                kMaxEntries = v;
-        }
-    }
+    // **测试上限**（2026-11-10 审查 P1-3 后改为显式注入）：
+    // 深度上限默认 64。原来这里读环境变量 SRT_SCAN_MAX_DEPTH，而它对**任何进程**都生效，
+    // 客户环境里误设一次就会让扫描异常、连自检都会崩。现在只由 setTestLimits() 注入。
+    // 上限取自 setTestLimits() 注入的值（默认 64）。**不再读环境变量**（审查 P1-3）。
+    const int kMaxDepth = (g_testMaxDepth > 0) ? g_testMaxDepth : 64;
+    // **测试上限**（同上，改为显式注入）：条目上限默认 200 万。
+    // 原来读环境变量 SRT_SCAN_MAX_ENTRIES 并无条件生效；设成 1 时自检会 0xC0000005 崩溃。
+    // 上限取自 setTestLimits() 注入的值（默认 200 万）。**不再读环境变量**（审查 P1-3）。
+    const int kMaxEntries = (g_testMaxEntries > 0) ? g_testMaxEntries : 2000000;
     bool stopAll = false;
     // 扫过的**文件**总数（不管有没有命中规则）。
     // 条目上限按它算，与 detectSuffixes() 完全对齐 ——
@@ -1004,34 +1002,15 @@ QVector<SuffixStat> FileScanner::detectSuffixes(const QString &root)
     QSet<QString> visited;
     visited.insert(QDir::fromNativeSeparators(basePath));
 
-    // **测试钩子**（2026-11-10 加）：SRT_SCAN_MAX_DEPTH 可临时压低深度上限，
-    // 让"层级过深跳过"这条保护能在自检里被跑到（造 65 层目录可以，但自检里
-    // 每层建目录很慢且依赖平台；压低上限更快也更稳）。不设时行为完全不变。
-    int kMaxDepth = 64;
-    {
-        const QByteArray ov = qgetenv("SRT_SCAN_MAX_DEPTH");
-        if (!ov.isEmpty()) {
-            bool ok3 = false;
-            const int v = ov.toInt(&ok3);
-            if (ok3 && v > 0)
-                kMaxDepth = v;
-        }
-    }
-    // **测试钩子**（2026-11-10 加）：环境变量 SRT_SCAN_MAX_ENTRIES 可以临时压低上限，
-    // 让"触顶中止扫描"这条保护能在自检里被真正跑到 —— 造 200 万个文件不现实，
-    // 但把它压到几十个就能验证：超限时是否 setTruncated、是否给出"结果不完整"的说明、
-    // 是否停止继续扫（而不是继续闷头扫完再报成功）。
-    // 默认行为完全不变（不设环境变量时仍是 200 万）。
-    int kMaxEntries = 2000000;
-    {
-        const QByteArray ov = qgetenv("SRT_SCAN_MAX_ENTRIES");
-        if (!ov.isEmpty()) {
-            bool ok2 = false;
-            const int v = ov.toInt(&ok2);
-            if (ok2 && v > 0)
-                kMaxEntries = v;
-        }
-    }
+    // **测试上限**（2026-11-10 审查 P1-3 后改为显式注入）：
+    // 深度上限默认 64。原来这里读环境变量 SRT_SCAN_MAX_DEPTH，而它对**任何进程**都生效，
+    // 客户环境里误设一次就会让扫描异常、连自检都会崩。现在只由 setTestLimits() 注入。
+    // 上限取自 setTestLimits() 注入的值（默认 64）。**不再读环境变量**（审查 P1-3）。
+    const int kMaxDepth = (g_testMaxDepth > 0) ? g_testMaxDepth : 64;
+    // **测试上限**（同上，改为显式注入）：条目上限默认 200 万。
+    // 原来读环境变量 SRT_SCAN_MAX_ENTRIES 并无条件生效；设成 1 时自检会 0xC0000005 崩溃。
+    // 上限取自 setTestLimits() 注入的值（默认 200 万）。**不再读环境变量**（审查 P1-3）。
+    const int kMaxEntries = (g_testMaxEntries > 0) ? g_testMaxEntries : 2000000;
     bool stopAll = false;
     int fileTotal = 0;
 

@@ -5552,10 +5552,24 @@ void RsyncRunner::onFinished(int exitCode, QProcess::ExitStatus status)
 
 void RsyncRunner::cancel()
 {
-    if (!isRunning())
-        return;
-
+    // **取消标记必须在 isRunning() 判断之前置位**（2026-11-10 审查 P2）。
+    //
+    // 原来第一行是 `if (!isRunning()) return;`，然后才 m_cancelRequested = true。
+    // 而组与组之间 m_proc 会短暂为 nullptr（SyncPanel 里那段注释自己承认这个窗口
+    // 用户够得着），此时用户点"取消"：isRunning() 为假 ⇒ 直接 return ⇒
+    // 标记**没置位** ⇒ onAllFinished 里 canceled=false ⇒
+    // 计数文案回到「N / M 个文件」（正是 D7 要消灭的那个虚高数），
+    // 状态还可能按"已完成"收掉 —— 用户看到的是「已取消」的日志 +「已完成」的计数。
+    //
+    // 置位是纯状态操作，不需要进程存在；只有 kill 那部分才看 isRunning()。
     m_cancelRequested = true;
+
+    if (!isRunning()) {
+        // 没有进程可杀：标记已经置位，让收尾路径按"已取消"结算即可。
+        emit logText(QString::fromUtf8(u8"\u6B63\u5728\u53D6\u6D88\u2026"));
+        return;
+    }
+
     emit logText(QString::fromUtf8(u8"\u6B63\u5728\u53D6\u6D88\u2026"));
     // 必须用 kill()，不能用 terminate()。
     //
