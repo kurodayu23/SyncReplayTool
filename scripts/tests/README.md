@@ -37,8 +37,14 @@ powershell -ExecutionPolicy Bypass -File scripts\tests\e2e\scale-probe.ps1 -File
 
 ```
 probe --root <dir> [--host H --port P --user U --key K --remote R]
-      [--rules a,b,c | --no-rules] [--only-new] [--sync] [--timeout S] [--dump-rows]
+      [--password P] [--rules a,b,c | --no-rules] [--only-new] [--sync]
+      [--timeout S] [--dump-rows]
 ```
+
+`--password P` 切到**口令认证**（私钥那套之外的另一条路径）。给了它就会**清掉私钥路径** ——
+不清的话产品走的是私钥分支，口令根本没被用过，测出来"口令模式没问题"其实没测到（2026-11-10 补）。
+接收端容器：`srt-e2e-recv`，用户 `srtpw`，口令 `SrtTest2026x`，端口 2222
+（`scripts\run-all-tests.ps1` 的 `$E2ePass` 是同一个值）。
 
 输出是机器可读的四段：`SCAN` / `SYNC` / `ROW` / `LOG`（LOG 是产品自己写的日志原文）。
 

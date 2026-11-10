@@ -62,6 +62,7 @@ int main(int argc, char *argv[])
     const int    port      = argValue(args, "--port", "0").toInt();
     const QString user      = argValue(args, "--user");
     const QString key       = argValue(args, "--key");
+    const QString password  = argValue(args, "--password");
     const QString remote    = argValue(args, "--remote");
     const QString rulesArg  = argValue(args, "--rules");
     const bool   noRules   = argFlag(args, "--no-rules");
@@ -88,6 +89,14 @@ int main(int argc, char *argv[])
         panel->setUserForTest(user);
     if (!key.isEmpty())
         panel->setKeyPathForTest(key);
+    // --password: switch to password authentication (the other, much less
+    // covered auth path). The key path must be cleared, otherwise the
+    // product takes the private-key branch and never uses the password at
+    // all -- a test that looks like it covered password mode but did not.
+    if (!password.isEmpty()) {
+        panel->setPasswordForTest(password);
+        panel->setKeyPathForTest(QString());
+    }
     if (!remote.isEmpty())
         panel->setRemoteRootForTest(remote);
     if (!rulesArg.isEmpty()) {
