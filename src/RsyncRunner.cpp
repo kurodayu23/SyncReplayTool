@@ -4038,14 +4038,24 @@ void RsyncRunner::start(const TargetConfig &target,
                 plain.remove(0, 1);
             while (plain.endsWith(QLatin1Char('/')))
                 plain.chop(1);
-            const QString finalSub = remoteDir(target, rule.remoteSubDir);
-            // finalSub 是相对 remoteRoot 的最终子路径；plain 是"朴素写法"。
-            // 两者不相等 ⇒ 归一化改写了语义 ⇒ 拒。
-            if (!raw.isEmpty() && finalSub != plain) {
+            // **要比较的是"子目录那一段"归一化后的样子，不是整条远端路径**。
+            // 第一版直接拿 remoteDir()（它返回 remoteRoot + 子目录的完整路径）
+            // 和朴素子目录名比，于是正常的 `normal` 也被判成"变了形"而误拦 ——
+            // 实测三种输入全部失败，包括本该成功的那一个。
+            // 正确做法：归一化"单独的 /子目录"，再拿掉前导斜杠。
+            QString normSub;
+            if (!plain.isEmpty()) {
+                normSub = QDir::cleanPath(QLatin1Char('/') + plain);
+                while (normSub.startsWith(QLatin1Char('/')))
+                    normSub.remove(0, 1);
+            }
+            // normSub 与 plain 不同 ⇒ 归一化改写了语义（`*/..` 会变成空串、
+            // `a/../..` 会变成 ".."）⇒ 拒。
+            if (!plain.isEmpty() && normSub != plain) {
                 emit logText(QString::fromUtf8(
                     u8"\u76F8\u5BF9\u8DEF\u5F84\u5F52\u4E00\u5316\u540E\u53D8\u4E86\u5F62\uFF1A"
                     u8"\u4F60\u586B\u7684\u662F [%1]\uFF0C\u5B83\u4F1A\u88AB\u5F52\u4E00\u5316\u6210 [%2]\u3002")
-                    .arg(raw, finalSub));
+                    .arg(raw, normSub));
                 emit logText(QString::fromUtf8(
                     u8"\u8FD9\u7C7B\u5199\u6CD5\uFF08\u53EA\u6709\u901A\u914D\u7B26\u3001 "
                     u8"\u53EA\u5269 ../\u3001\u6216\u91CD\u590D\u659C\u6760\uFF09\u4F1A\u8BA9\u6587\u4EF6\u843D\u5230"
