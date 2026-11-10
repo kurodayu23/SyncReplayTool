@@ -566,14 +566,19 @@ if [ -x "$HERE/SyncReplayTool" ]; then
         # 数目录里还剩几个 .so，而不是只查某一个文件：
         # 少哪一个都不对，但"一个都不剩"和"少了几个"要分开说。
         _nplug=$(ls -1 "$HERE/plugins/platforms/"*.so 2>/dev/null | wc -l)
+        # **期望数量从包里读，不再硬编码**（2026-11-10 审查 P2-1）。
+        # 打包脚本 package-kylin-container.sh 在裁完插件后把最终数量写进
+        # plugins/platforms/.expected-count；这里只读那份事实。
+        # 原来写死"应有 2 个"，而真正决定数量的是打包脚本里那几行 rm ——
+        # 两边一旦不同步，就会对着一个完整的包说"解压不完整"，把客户引去重拷。
+        _expect=$(cat "$HERE/plugins/platforms/.expected-count" 2>/dev/null)
+        case "$_expect" in
+            ''|*[!0-9]*) _expect=2 ;;   # 老包没有这个文件，退回历史值 2
+        esac
         if [ "$_nplug" -eq 0 ]; then
             echo "    plugins/platforms/ 里一个插件都没有 —— 这个包**解压不完整**。"
-        # 本包固定只带 2 个平台插件（libqoffscreen.so + libqxcb.so）。
-        # **原来这里写的是"正常至少 3 个"**（2026-11-10 实测）：包里从来只有 2 个，
-        # 于是客户真遇到加载失败时，会被引导去"重新解压"——而包本来就是完整的，
-        # 重拷也修不好，白白浪费时间。阈值改成与包内实际数量一致。
-        elif [ "$_nplug" -lt 2 ]; then
-            echo "    plugins/platforms/ 里只剩 $_nplug 个插件（本包应有 2 个：offscreen 与 xcb）—— 解压不完整。"
+        elif [ "$_nplug" -lt "$_expect" ]; then
+            echo "    plugins/platforms/ 里只剩 $_nplug 个插件（本包应有 $_expect 个）—— 解压不完整。"
             echo "    请重新完整拷贝一次，或重新解压一次压缩包。"
         else
             echo "    文件在，但加载失败。可能是**安全中心**把它拦了，也可能是它损坏。"

@@ -145,6 +145,16 @@ rm -f  "$PKG/plugins/platforms/libqminimal.so" \
        "$PKG/plugins/platforms/libqminimalegl.so"
 find "$PKG/plugins" -mindepth 1 -type d -empty -delete 2>/dev/null || true
 
+# **把最终剩下的平台插件数量写进包里**，供 自检.sh 读取。
+#
+# 2026-11-10 审查 P2-1：自检.sh 里那条「本包应有 2 个」是硬编码，
+# 而真正决定数量的是上面这几行 rm。两边一旦不同步（比如将来又裁掉一个、
+# 或者加了回来），自检就会对着一个完整的包说"解压不完整"，把客户引去重拷。
+# 让打包这一步把事实写下来，自检只读那份事实 —— 单一事实来源。
+_expect_cnt=$(ls -1 "$PKG/plugins/platforms/"*.so 2>/dev/null | wc -l | tr -d ' ')
+printf '%s' "$_expect_cnt" > "$PKG/plugins/platforms/.expected-count"
+echo "  plugins/platforms 最终数量：$_expect_cnt（已写入 .expected-count）"
+
 # ---- 裁掉 Qt 死重库（麒麟 V10 实机测出来的）----
 #
 # 【P0 教训 · 2026-10-23】"程序不用" != "包里不用"。

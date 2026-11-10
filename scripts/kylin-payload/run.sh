@@ -223,7 +223,18 @@ if [ -n "${QT_QPA_PLATFORM:-}" ]; then
     if [ ! -f "$HERE/plugins/platforms/libq${_want_plat}.so" ]; then
         echo "提示：你指定了图形平台 $QT_QPA_PLATFORM，但本包没有对应的插件。"
         echo "     本包里可用的只有：offscreen（无界面）、xcb（有桌面时用）。"
-        echo "     现在改用离屏模式启动；若需要有界面，请在带桌面的机器上双击运行。"
+        # **提示语必须按"这台机器有没有桌面"分岔**（2026-11-10 审查 P1-3）：
+        # 原来不分场合一律印"若需要有界面，请在带桌面的机器上双击运行"——
+        # 而这句话在**已经有桌面**的机器上是误导：客户照着做一遍，
+        # 只要 QT_QPA_PLATFORM 还是 minimal，回来仍然被改成 offscreen。
+        # 有桌面时该说的是"把平台改回 xcb"，那才是他能照做的一步。
+        if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+            echo "     这台机器**有**桌面（DISPLAY=${DISPLAY:-未设置}${WAYLAND_DISPLAY:+ WAYLAND=$WAYLAND_DISPLAY}），"
+            echo "     要看到窗口请改回：QT_QPA_PLATFORM=xcb 再启动（或直接 unset QT_QPA_PLATFORM）。"
+            echo "     本次仍先用离屏模式启动，以免直接崩掉。"
+        else
+            echo "     现在改用离屏模式启动；若需要有界面，请在**带桌面的机器上**双击运行。"
+        fi
         echo
         export QT_QPA_PLATFORM=offscreen
     fi

@@ -42,7 +42,11 @@ $rc = $LASTEXITCODE
 Remove-Item Env:SRT_CONFIG_DIR,Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue
 $pass = @($o | Where-Object { $_ -match '^PASS' }).Count
 $fail = @($o | Where-Object { $_ -match '^FAIL' }).Count
-Check '自检 全绿' ($rc -eq 0 -and $fail -eq 0) "PASS=$pass FAIL=$fail rc=$rc"
+# **必须给 PASS 数一个下界**（2026-11-10 审查 P1-1）：
+# 原来判据是 `$rc -eq 0 -and $fail -eq 0`。把一个"立刻 exit 0 但什么都不打印"的
+# 程序替换成 exe，$rc=0、$fail=0、$pass=0 ⇒ 这一项照样判绿 —— 闸门自己假通过。
+# 现在要求至少 100 条 PASS（当前真实值 104），数量对不上就是自检没真跑。
+Check '自检 全绿' ($rc -eq 0 -and $fail -eq 0 -and $pass -ge 100) "PASS=$pass FAIL=$fail rc=$rc（PASS 至少 100）"
 
 # 5 最新交付包的校验值自洽
 $pkg = Get-ChildItem $root -Directory -Filter '交付包-*' | Sort-Object Name | Select-Object -Last 1
@@ -63,8 +67,19 @@ if ($pkg) {
             }
         }
         $got = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToUpper()
-        $ok = ($want -eq $got)
-        $d = "$($zip.Name) 清单=$($want.Substring(0,16)) 实际=$($got.Substring(0,16))"
+        # **$want 可能为 $null**（2026-11-10 审查 P1-2）：
+        # 清单里没找到该 zip 的 sha256 行时，$want 停在 $null，
+        # 原来第 67 行的 $want.Substring(0,16) 会抛"不能对值为 Null 的表达式调用方法"，
+        # 在 $ErrorActionPreference='Continue' 下这是终止性语句错误 ⇒ 脚本中断、
+        # 第 5 项根本没记 FAIL、最后那句「结论：不要出包」也不会打印。
+        # 现在先判空：找不到摘要本身就是失败，并且说清楚是"清单里没有"而不是"不匹配"。
+        if (-not $want) {
+            $ok = $false
+            $d = "$($zip.Name) 清单里没找到它的 sha256 行（实际 $($got.Substring(0,16))）"
+        } else {
+            $ok = ($want -eq $got)
+            $d = "$($zip.Name) 清单=$($want.Substring(0,16)) 实际=$($got.Substring(0,16))"
+        }
     }
     Check '交付包校验值自洽' $ok $d
 } else { Check '交付包校验值自洽' $false '没有交付包' }
