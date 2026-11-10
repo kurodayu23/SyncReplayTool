@@ -343,7 +343,11 @@ public:
                                            bool needHomeRoot,
                                            const QString &token,
                                            const QString &marker,
-                                           const QString &scope);
+                                           const QString &scope,
+                                           // 只探测、不创建的路径（2026-11-10 修 D3）：
+                                           // "文件清单里隐含的一级目录名"。D3 的冲突（本地是目录、
+                                           // 远端同名处是文件）恰好发生在组根下面一级，dirs 里没有这些。
+                                           const QStringList &probeOnly = QStringList());
 
     // 本客户端的身份作用域：主机名 + 配置目录的短哈希。
     //

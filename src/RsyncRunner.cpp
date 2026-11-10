@@ -1207,7 +1207,8 @@ QString RsyncRunner::buildRemoteDirsCommand(const QString &root,
                                             bool needHomeRoot,
                                             const QString &token,
                                             const QString &marker,
-                                            const QString &scope)
+                                            const QString &scope,
+                                            const QStringList &probeOnly)
 {
     // 远端命令交给远端 shell 解析，路径里的空格和引号必须自己转义。
     // remoteDir() 已经把 "~" 开头改写成了等价的相对路径（见 remoteDir 注释），
@@ -1288,13 +1289,24 @@ QString RsyncRunner::buildRemoteDirsCommand(const QString &root,
     // 这里不改行为（客户确实要求同步这个目录），只把探测结果打到 stderr 供上层播报：
     // 对每个目标目录，若同名处存在且不是目录，输出一行 SRT-COLLIDE:<路径>。
     // 只读 -e / -d，不创建、不删除任何东西。
-    if (!quoted.isEmpty()) {
+    {
         QStringList probes;
         for (const QString &q : quoted) {
             probes << (QStringLiteral("if [ -e ") + q + QStringLiteral(" ] && [ ! -d ") + q
                         + QStringLiteral(" ]; then echo \"SRT-COLLIDE:\"") + q + QLatin1String(" >&2; fi"));
         }
-        segs << probes.join(QStringLiteral("; "));
+        // **只探测、不创建的那些路径**（2026-11-10 修 D3）。
+        // dirs 里只有"组的远端根"，而 D3 的冲突发生在组根下面一级。
+        // 探测是只读的 [ -e ] && [ ! -d ]，不建、不删。
+        for (const QString &d : probeOnly) {
+            QString e = d;
+        e.replace(QLatin1Char('\''), QLatin1String("'\\''"));
+            const QString qq = (QLatin1Char('\'') + e + QLatin1Char('\''));
+            probes << (QStringLiteral("if [ -e ") + qq + QStringLiteral(" ] && [ ! -d ") + qq
+                        + QStringLiteral(" ]; then echo \"SRT-COLLIDE:\"") + qq + QLatin1String(" >&2; fi"));
+        }
+        if (!probes.isEmpty())
+            segs << probes.join(QStringLiteral("; "));
     }
 
     return segs.join(QStringLiteral("; "));
@@ -4223,12 +4235,40 @@ void RsyncRunner::ensureRemoteDirs()
 
     QStringList dirs;
     bool needHomeRoot = false;
+    // **只探测、不创建**的路径（2026-11-10 修 D3）。
+    //
+    // D3 的形态：本地有目录 conflict.dat/、远端 /root/conflict.dat 是普通文件。
+    // rsync 按清单里的相对路径 conflict.dat/inner.dat 自己把那个文件删掉、建成目录，
+    // 然后 rc=0 正常退出 —— 客户远端的一个文件无声消失，界面报「已完成」。
+    //
+    // 冲突发生在**组目录下面一级**，那一层从来不在 dirs 里（dirs 只有组的远端根）。
+    // 所以这里把"清单里出现过的一级目录名"拼成 <组目录>/<一级名> 单独送去探测。
+    QStringList probeOnly;
     for (const Group &g : m_groups) {
         // 空 remoteDir 表示远端 home 根，本来就在，不用建
-        if (g.remoteDir.isEmpty())
+        const bool isHome = g.remoteDir.isEmpty();
+        if (isHome)
             needHomeRoot = true;
         else if (!dirs.contains(g.remoteDir))
             dirs.append(g.remoteDir);
+
+        // 从相对路径里取一级目录名（rel 形如 "conflict.dat/inner.dat"）
+        QSet<QString> firstLevels;
+        for (const QString &rel : g.files) {
+            const int slash = rel.indexOf(QLatin1Char('/'));
+            if (slash <= 0)
+                continue;               // 根下的文件，没有一级目录
+            const QString lvl = rel.left(slash);
+            if (lvl == QLatin1String(".") || lvl == QLatin1String(".."))
+                continue;
+            firstLevels.insert(lvl);
+        }
+        for (const QString &lvl : firstLevels) {
+            const QString full = isHome ? lvl
+                                        : (g.remoteDir + QLatin1Char('/' ) + lvl);
+            if (!probeOnly.contains(full) && !dirs.contains(full))
+                probeOnly.append(full);
+        }
     }
 
     const QString sshBin = locateTool(QStringLiteral("ssh"));
@@ -4268,7 +4308,7 @@ void RsyncRunner::ensureRemoteDirs()
     // 自检判据验的是**同一个函数**，所以产品改了这里判据一定跟着变。
     const QString dirsCommand = buildRemoteDirsCommand(rootOnly, dirs, needHomeRoot,
                                                        m_verifyToken, m_verifyMarker,
-                                                       clientScope());
+                                                       clientScope(), probeOnly);
 
     m_proc = new QProcess(this);
 #ifdef Q_OS_WIN
