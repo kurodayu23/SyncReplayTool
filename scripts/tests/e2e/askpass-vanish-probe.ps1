@@ -131,29 +131,62 @@ function Read-Live([string]$path) {
 }
 
 # ---------------- the watcher ----------------
-# Wait until rsync has started (the log line names the remote user), then
-# delete the helper script 3 s later - long after the first successful
-# authentication, long before the last one.
+# The trigger is the helper file itself, not the log: the helper exists from
+# the moment the round starts until it is purged at the end, so seeing it
+# means the round is running.
+#
+# The log cannot be used for this: Start-Process -RedirectStandardOutput
+# pipes the child's output through .NET, which buffers it - the file stays
+# empty until the child exits, so a log based trigger always fires after
+# the round is over (measured: 31 s late on a 31 s transfer).
+#
+# Deleting the helper 5 s after it appears is safely inside the transfer
+# window: the first ssh (create remote dirs) has authenticated by then, the
+# verification ssh after the transfer has not.
+function Find-Helpers {
+  $found = @()
+  foreach ($d in $candDirs) {
+    foreach ($f in @(Get-ChildItem -LiteralPath $d -File -Force -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Name -like 'srt_askpass_*' -or $_.Name -like 'srt_pass_*' })) {
+      $found += $f
+    }
+  }
+  return $found
+}
+
 $deleted = @()
 $killed = $false
+$recreated = $false
 $deadline = (Get-Date).AddSeconds(180)
 while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
   Start-Sleep -Milliseconds 200
-  $cur = ''
-  if (Test-Path $po) { $cur = Read-Live $po }
-  if ($cur -and $cur.Contains('srtpw@') -and -not $killed) {
-    Say 'rsync has started (first authentication done) - waiting before deleting the helper'
+  if ($killed) { continue }
+  $helpers = Find-Helpers
+  if ($helpers.Count -gt 0) {
+    Say ("helper file(s) are on disk: {0}" -f (($helpers | ForEach-Object { $_.Name }) -join ', '))
+    Say ("waiting {0} s before deleting them (the first ssh has authenticated by now)" -f $KillAfterSec)
     Start-Sleep -Seconds $KillAfterSec
-    foreach ($d in $candDirs) {
-      foreach ($f in @(Get-ChildItem -LiteralPath $d -File -Force -ErrorAction SilentlyContinue |
-                       Where-Object { $_.Name -like 'srt_askpass_*' -or $_.Name -like 'srt_pass_*' })) {
-        $deleted += ("{0} ({1} bytes)" -f $f.FullName, $f.Length)
-        Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
-      }
+    foreach ($f in (Find-Helpers)) {
+      $deleted += ("{0} ({1} bytes)" -f $f.FullName, $f.Length)
+      Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
     }
     $killed = $true
     Say ("deleted {0} helper file(s)" -f $deleted.Count)
     foreach ($d in $deleted) { Say ("  deleted: " + $d) }
+    # Does the product put it back? If it does, deleting it is harmless -
+    # every later ssh finds a fresh helper. If it does not, the later ssh
+    # calls have to fail. This is the difference between "the risk is real"
+    # and "the risk does not exist".
+    for ($i = 0; $i -lt 25; $i++) {
+      Start-Sleep -Milliseconds 400
+      $again = Find-Helpers
+      if ($again.Count -gt 0) {
+        Say ("  helper came back: {0}" -f (($again | ForEach-Object { $_.Name }) -join ', '))
+        $recreated = $true
+        break
+      }
+    }
+    if (-not $recreated) { Say '  helper did NOT come back' }
   }
 }
 $p.WaitForExit(600000) | Out-Null
