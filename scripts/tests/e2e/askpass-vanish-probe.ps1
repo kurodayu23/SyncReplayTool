@@ -34,7 +34,10 @@ param(
   [string]$User = 'srtpw',
   [string]$Pass = 'SrtTest2026x',
   [int]$BigMB = 30,
-  [int]$KillAfterSec = 3
+  [int]$KillAfterSec = 3,
+  # Control run: same round, but nothing gets deleted. The difference between
+  # the two runs is what the deletion actually causes.
+  [switch]$NoDelete
 )
 $ErrorActionPreference = 'Stop'
 $BuildRoot = 'D:\AP\AP7000\AP7000-Build-Directories\SyncReplayTool'
@@ -157,13 +160,37 @@ function Find-Helpers {
 $deleted = @()
 $killed = $false
 $recreated = $false
-$deadline = (Get-Date).AddSeconds(180)
+$helperEvents = New-Object System.Collections.Generic.List[string]
+$seenNames = @{}
+$deadline = (Get-Date).AddSeconds(300)
 while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
   Start-Sleep -Milliseconds 200
-  if ($killed) { continue }
+  # The watcher has to stay for the WHOLE round, not just a few seconds after
+  # the deletion: the last ssh of the round happens after the transfer is
+  # over (30 s in), and a helper that is put back just before that call
+  # would never be seen by a short window.
   $helpers = Find-Helpers
+  $nowNames = @($helpers | ForEach-Object { $_.Name })
+  foreach ($n in $nowNames) {
+    if (-not $seenNames.ContainsKey($n)) {
+      $seenNames[$n] = $true
+      $helperEvents.Add(("  {0} helper appeared: {1}" -f (Get-Date -Format 'HH:mm:ss.fff'), $n))
+    }
+  }
+  foreach ($k in @($seenNames.Keys)) {
+    if ($nowNames -notcontains $k) {
+      $helperEvents.Add(("  {0} helper vanished: {1}" -f (Get-Date -Format 'HH:mm:ss.fff'), $k))
+      $seenNames.Remove($k)
+    }
+  }
+  if ($killed) { continue }
   if ($helpers.Count -gt 0) {
     Say ("helper file(s) are on disk: {0}" -f (($helpers | ForEach-Object { $_.Name }) -join ', '))
+    if ($NoDelete) {
+      Say 'control run: nothing is deleted'
+      $killed = $true
+      continue
+    }
     Say ("waiting {0} s before deleting them (the first ssh has authenticated by now)" -f $KillAfterSec)
     Start-Sleep -Seconds $KillAfterSec
     foreach ($f in (Find-Helpers)) {
@@ -173,22 +200,10 @@ while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
     $killed = $true
     Say ("deleted {0} helper file(s)" -f $deleted.Count)
     foreach ($d in $deleted) { Say ("  deleted: " + $d) }
-    # Does the product put it back? If it does, deleting it is harmless -
-    # every later ssh finds a fresh helper. If it does not, the later ssh
-    # calls have to fail. This is the difference between "the risk is real"
-    # and "the risk does not exist".
-    for ($i = 0; $i -lt 25; $i++) {
-      Start-Sleep -Milliseconds 400
-      $again = Find-Helpers
-      if ($again.Count -gt 0) {
-        Say ("  helper came back: {0}" -f (($again | ForEach-Object { $_.Name }) -join ', '))
-        $recreated = $true
-        break
-      }
-    }
-    if (-not $recreated) { Say '  helper did NOT come back' }
   }
 }
+foreach ($e in $helperEvents) { Say $e }
+if ($deleted.Count -gt 0 -and -not $recreated) { Say '  helper never came back at any point of the round' }
 $p.WaitForExit(600000) | Out-Null
 $p.Refresh()
 Say ("probe exit = {0}" -f $p.ExitCode)
@@ -196,9 +211,15 @@ $txt = Get-Content $po -Encoding UTF8 -Raw
 foreach ($l in ($txt -split "`r?`n")) { if ($l -match '^(SCAN|SYNC|ROW|LOG)') { Say ("  " + $l) } }
 
 # ---------------- what arrived ----------------
-$got = docker exec $Container sh -lc "find /home/$User/srt-in/pwv -maxdepth 1 -type f -printf '%f %s\n' 2>/dev/null | LC_ALL=C sort" 2>&1
+# The whole tree, hidden files included: a leftover .srt-verify-* marker on
+# the receiver is exactly the kind of thing this bench has to see.
+$got = docker exec $Container sh -lc "find /home/$User/srt-in/pwv -maxdepth 1 -printf '%y %f %s\n' 2>/dev/null | LC_ALL=C sort" 2>&1
 Say ("receiver = {0}" -f (($got | Out-String).Trim()))
-$arrived = ($got | Out-String) -match 'big\.dat\s+1048576'
+$expectBytes = $BigMB * 1MB
+$arrived = ($got | Out-String) -match ("big\.dat\s+" + $expectBytes)
+$leftoverMarker = @(($got | Out-String) -split "`r?`n" | Where-Object { $_ -match '\.srt-verify-' })
+Say ("leftover .srt-verify-* markers on the receiver = {0}" -f $leftoverMarker.Count)
+foreach ($m in $leftoverMarker) { Say ("  marker: " + $m.Trim()) }
 
 # ---------------- leftover secret files ----------------
 $left = @()
@@ -225,6 +246,7 @@ Say ("VERDICT the product reported a failure = {0}" -f $saidFail)
 Say ("VERDICT the log blames the account or the password = {0}" -f $mentionsCred)
 Say ("VERDICT the log names the helper script = {0}" -f $mentionsHelper)
 Say ("VERDICT no plaintext helper file survived = {0}" -f ($left.Count -eq 0))
+Say ("VERDICT the receiver keeps no marker file = {0}" -f ($leftoverMarker.Count -eq 0))
 
 try { docker rm -f $Container 2>&1 | Out-Null } catch { }
 Say 'ASKPASS-PROBE DONE'
